@@ -1,6 +1,9 @@
 add_executable(editor
     main.cpp
     EditorApplication.cpp
+    ComponentReflect.cpp
+    ComponentEditors.cpp
+    Inspector.cpp
 )
 
 target_link_libraries(editor

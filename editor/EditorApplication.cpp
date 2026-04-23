@@ -9,6 +9,8 @@
 #include <backend/renderer/sdl_gpu/SDLGPURenderDevice.h>
 #include <engine/components/RenderComponents.h>
 
+#include "ComponentEditors.h"
+
 namespace editor {
 
 namespace {
@@ -131,17 +133,60 @@ void EditorApplication::run() {
     config.resizable = true;
 
     ctx_.init(config);
+    registerComponentEditors();
     ctx_.beforePresentCallback = [this]() { editor_.submitImGuiDrawData(); };
     setupDemoScene();
     setupImGui();
 
     while (ctx_.scheduler.tick()) {
         beginImGuiFrame();
-        drawDockspace();
+
+        const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+        const float leftWidth = 200.0f;
+        const float rightWidth = 250.0f;
+        const float menuBarHeight = 24.0f;
+        const float statsHeight = 60.0f;
+
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(displaySize.x, menuBarHeight));
+        ImGui::Begin("##menubar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+        if (ImGui::BeginMenuBar()) {
+            if (ImGui::BeginMenu("File")) {
+                if (ImGui::MenuItem("Exit")) {
+                    game_.quit();
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(0, menuBarHeight));
+        ImGui::SetNextWindowSize(ImVec2(leftWidth, displaySize.y - menuBarHeight));
+        ImGui::Begin("Hierarchy", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
         drawHierarchy();
-        drawInspector();
-        drawViewport();
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(displaySize.x - rightWidth, menuBarHeight));
+        ImGui::SetNextWindowSize(ImVec2(rightWidth, displaySize.y - menuBarHeight - statsHeight));
+        ImGui::Begin("Inspector", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+        inspector_.draw(selectedEntity_, ctx_.world);
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(displaySize.x - rightWidth, displaySize.y - statsHeight));
+        ImGui::SetNextWindowSize(ImVec2(rightWidth, statsHeight));
+        ImGui::Begin("Stats", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
         drawStats();
+        ImGui::End();
+
+        const float viewportWidth = displaySize.x - leftWidth - rightWidth;
+        const float viewportHeight = displaySize.y - menuBarHeight;
+        ImGui::SetNextWindowPos(ImVec2(leftWidth, menuBarHeight));
+        ImGui::SetNextWindowSize(ImVec2(viewportWidth, viewportHeight));
+        ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBackground);
+        drawViewport();
+        ImGui::End();
+
         endImGuiFrame();
 
         if (ctx_.inputState.isKeyJustPressed(SDLK_ESCAPE)) {
@@ -246,25 +291,7 @@ void EditorApplication::syncInputToImGui() {
     io.AddKeyEvent(static_cast<ImGuiKey>(ImGuiMod_Super), ctx_.inputState.isKeyDown(SDLK_LGUI) || ctx_.inputState.isKeyDown(SDLK_RGUI));
 }
 
-void EditorApplication::drawDockspace() {
-    ImGui::Begin("Editor");
-
-    if (ImGui::BeginMenuBar()) {
-        if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("Exit")) {
-                game_.quit();
-            }
-            ImGui::EndMenu();
-        }
-        ImGui::EndMenuBar();
-    }
-    ImGui::TextUnformatted("ImGui editor shell");
-    ImGui::TextUnformatted("Scene, hierarchy, inspector and stats panels are active.");
-    ImGui::End();
-}
-
 void EditorApplication::drawHierarchy() {
-    ImGui::Begin("Hierarchy");
     auto& entityStorage = ctx_.world.storage<entt::entity>();
     for (const entt::entity entity : entityStorage) {
         const bool selected = entity == selectedEntity_;
@@ -272,60 +299,9 @@ void EditorApplication::drawHierarchy() {
             selectedEntity_ = entity;
         }
     }
-    ImGui::End();
-}
-
-void EditorApplication::drawInspector() {
-    ImGui::Begin("Inspector");
-    if (selectedEntity_ == entt::null || !ctx_.world.valid(selectedEntity_)) {
-        ImGui::TextUnformatted("Select an entity to inspect.");
-        ImGui::End();
-        return;
-    }
-
-    ImGui::Text("%s", entityLabel(selectedEntity_));
-
-    if (ctx_.world.all_of<engine::Transform>(selectedEntity_)) {
-        auto& transform = ctx_.world.get<engine::Transform>(selectedEntity_);
-        ImGui::SeparatorText("Transform");
-        ImGui::DragFloat2("Position", &transform.x, 1.0f);
-        ImGui::DragFloat("Rotation", &transform.rotation, 0.01f);
-        ImGui::DragFloat2("Scale", &transform.scaleX, 0.01f, 0.1f, 10.0f);
-    }
-
-    if (ctx_.world.all_of<engine::Camera>(selectedEntity_)) {
-        auto& camera = ctx_.world.get<engine::Camera>(selectedEntity_);
-        ImGui::SeparatorText("Camera");
-        ImGui::Checkbox("Primary", &camera.primary);
-        if (ImGui::DragFloat("Zoom", &camera.zoom, 0.01f, 0.1f, 8.0f)) {
-            editorCameraZoom_ = camera.zoom;
-        }
-    }
-
-    if (ctx_.world.all_of<engine::Sprite>(selectedEntity_)) {
-        auto& sprite = ctx_.world.get<engine::Sprite>(selectedEntity_);
-        ImGui::SeparatorText("Sprite");
-        ImGui::Text("Texture Handle: %u", sprite.texture.index);
-        ImGui::DragInt("Layer", &sprite.layer, 1.0f);
-        float tint[4] = {
-            sprite.tint.r / 255.0f,
-            sprite.tint.g / 255.0f,
-            sprite.tint.b / 255.0f,
-            sprite.tint.a / 255.0f
-        };
-        if (ImGui::ColorEdit4("Tint", tint)) {
-            sprite.tint.r = static_cast<uint8_t>(tint[0] * 255.0f);
-            sprite.tint.g = static_cast<uint8_t>(tint[1] * 255.0f);
-            sprite.tint.b = static_cast<uint8_t>(tint[2] * 255.0f);
-            sprite.tint.a = static_cast<uint8_t>(tint[3] * 255.0f);
-        }
-    }
-
-    ImGui::End();
 }
 
 void EditorApplication::drawViewport() {
-    ImGui::Begin("Viewport");
     const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
     if (viewportSize.x > 0.0f && viewportSize.y > 0.0f) {
         editor_.setEditorCamera(editorCameraX_, editorCameraY_, editorCameraZoom_);
@@ -340,20 +316,15 @@ void EditorApplication::drawViewport() {
         if (previewTexture != nullptr) {
             ImGui::Image(reinterpret_cast<ImTextureID>(previewTexture), viewportSize);
         } else {
-            ImGui::Button("Scene preview backend pending", viewportSize);
+            ImGui::Button("Scene preview", viewportSize);
         }
     }
-    ImGui::End();
 }
 
 void EditorApplication::drawStats() {
-    ImGui::Begin("Stats");
     ImGui::Text("Frame: %llu", static_cast<unsigned long long>(ctx_.frameCounter));
     ImGui::Text("Delta: %.4f", ctx_.deltaTime);
     ImGui::Text("Entities: %u", static_cast<unsigned>(ctx_.world.storage<entt::entity>().size()));
-    ImGui::Text("Transient: %u", static_cast<unsigned>(editor_.transientEntities().size()));
-    ImGui::TextUnformatted("Month 6 editor shell is ready for scene, hierarchy, inspector and viewport workflows.");
-    ImGui::End();
 }
 
 void EditorApplication::endImGuiFrame() {

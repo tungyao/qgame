@@ -7,6 +7,8 @@
 #include <engine/runtime/EngineConfig.h>
 #include <engine/runtime/EngineContext.h>
 
+#include "Inspector.h"
+
 namespace editor {
 
 class EditorApplication {
@@ -22,9 +24,7 @@ private:
     void shutdownImGui();
     void beginImGuiFrame();
     void syncInputToImGui();
-    void drawDockspace();
     void drawHierarchy();
-    void drawInspector();
     void drawViewport();
     void drawStats();
     void endImGuiFrame();
@@ -32,6 +32,7 @@ private:
     engine::EngineContext ctx_;
     engine::GameAPI game_{ ctx_ };
     engine::EditorAPI editor_{ ctx_ };
+    InspectorPanel inspector_;
     entt::entity selectedEntity_ = entt::null;
     float editorCameraX_ = 0.0f;
     float editorCameraY_ = 0.0f;
