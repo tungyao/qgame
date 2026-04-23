@@ -106,7 +106,7 @@ if(BUILD_GAME)
 endif()
 
 if(BUILD_EDITOR)
-    # add_subdirectory(editor)   # Month 6
+    add_subdirectory(editor)
 endif()
 
 if(BUILD_TESTS)

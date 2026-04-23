@@ -2,6 +2,7 @@ add_library(engine STATIC
     runtime/EngineContext.cpp
     runtime/FrameScheduler.cpp
     api/GameAPI.cpp
+    api/EditorAPI.cpp
     systems/RenderSystem.cpp
     systems/AudioSystem.cpp
     systems/PhysicsSystem.cpp
