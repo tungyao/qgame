@@ -12,6 +12,9 @@ void RenderSystem::init() {
 }
 
 void RenderSystem::update(float /*dt*/) {
+    if (!ctx_.renderToSwapchain) {
+        return;
+    }
     buildCommandBuffer();
 }
 

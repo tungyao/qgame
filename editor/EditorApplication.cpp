@@ -8,6 +8,7 @@
 
 #include <backend/renderer/sdl_gpu/SDLGPURenderDevice.h>
 #include <engine/components/RenderComponents.h>
+#include <core/Logger.h>
 
 #include "ComponentEditors.h"
 
@@ -133,6 +134,7 @@ void EditorApplication::run() {
     config.resizable = true;
 
     ctx_.init(config);
+    ctx_.renderToSwapchain = false;  // Editor 使用离屏渲染，不直接渲染到 swapchain
     registerComponentEditors();
     ctx_.beforePresentCallback = [this]() { editor_.submitImGuiDrawData(); };
     setupDemoScene();
@@ -305,13 +307,15 @@ void EditorApplication::drawViewport() {
     const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
     if (viewportSize.x > 0.0f && viewportSize.y > 0.0f) {
         editor_.setEditorCamera(editorCameraX_, editorCameraY_, editorCameraZoom_);
-        const TextureHandle preview = editor_.renderSceneToTexture(
+
+        const TextureHandle preview = viewportRenderer_.render(
             static_cast<int>(viewportSize.x),
             static_cast<int>(viewportSize.y)
         );
 
-        auto* renderDevice = dynamic_cast<backend::SDLGPURenderDevice*>(&ctx_.renderDevice());
-        SDL_GPUTexture* previewTexture = renderDevice ? renderDevice->getSDLTexture(preview) : nullptr;
+        SDL_GPUTexture* previewTexture = viewportRenderer_.getTexture(preview);
+
+        core::logInfo("drawViewport: previewTexture=%p", previewTexture);
 
         if (previewTexture != nullptr) {
             ImGui::Image(reinterpret_cast<ImTextureID>(previewTexture), viewportSize);

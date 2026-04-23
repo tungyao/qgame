@@ -39,6 +39,7 @@ public:
     uint64_t frameCounter = 0;
     float deltaTime = 0.0f;
     std::function<void()> beforePresentCallback;
+    bool renderToSwapchain = true;  // 设为 false 可禁用自动渲染到 swapchain（editor 模式）
 
     void init(const EngineConfig& cfg);
     void run();

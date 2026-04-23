@@ -35,6 +35,8 @@ public:
     virtual void present() = 0;
 
     virtual TextureHandle renderToTexture(const CommandBuffer&, int w, int h) = 0;
+
+    virtual TextureHandle renderToTextureOffscreen(const CommandBuffer&, int w, int h) = 0;
 };
 
 } // namespace backend

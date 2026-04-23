@@ -7,6 +7,7 @@ namespace core {
 enum class LogLevel { Debug, Info, Warn, Error };
 
 namespace detail {
+
 inline const char* levelTag(LogLevel l) {
     switch (l) {
         case LogLevel::Debug: return "DBG";
@@ -17,9 +18,32 @@ inline const char* levelTag(LogLevel l) {
     return "???";
 }
 
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+
+inline bool attachConsoleOnce() {
+    static bool attached = false;
+    if (!attached) {
+        if (AllocConsole()) {
+            freopen("CONOUT$", "w", stdout);
+            freopen("CONOUT$", "w", stderr);
+            setvbuf(stdout, nullptr, _IONBF, 0);
+            setvbuf(stderr, nullptr, _IONBF, 0);
+        }
+        attached = true;
+    }
+    return true;
+}
+#endif
+
 inline void logV(LogLevel l, const char* fmt, va_list args) {
 #ifdef NDEBUG
     if (l == LogLevel::Debug) return;
+#endif
+#ifdef _WIN32
+    static bool _ = attachConsoleOnce();
 #endif
     ::fprintf(stderr, "[%s] ", levelTag(l));
     ::vfprintf(stderr, fmt, args);

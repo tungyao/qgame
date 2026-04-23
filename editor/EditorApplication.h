@@ -8,6 +8,7 @@
 #include <engine/runtime/EngineContext.h>
 
 #include "Inspector.h"
+#include "EditorViewportRenderer.h"
 
 namespace editor {
 
@@ -32,6 +33,7 @@ private:
     engine::EngineContext ctx_;
     engine::GameAPI game_{ ctx_ };
     engine::EditorAPI editor_{ ctx_ };
+    EditorViewportRenderer viewportRenderer_{ ctx_ };
     InspectorPanel inspector_;
     entt::entity selectedEntity_ = entt::null;
     float editorCameraX_ = 0.0f;

@@ -127,7 +127,13 @@ void SDLGPURenderDevice::shutdown() {
         editorRenderTarget_ = {};
     }
 
+    if (textures_.valid(offscreenRenderTarget_)) {
+        destroyTexture(offscreenRenderTarget_);
+        offscreenRenderTarget_ = {};
+    }
+
     if (pipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, pipeline_); pipeline_ = nullptr; }
+    if (offscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, offscreenPipeline_); offscreenPipeline_ = nullptr; }
     if (vertexBuf_) { SDL_ReleaseGPUBuffer(device_, vertexBuf_); vertexBuf_ = nullptr; }
     if (indexBuf_) { SDL_ReleaseGPUBuffer(device_, indexBuf_); indexBuf_ = nullptr; }
     if (transferBuf_) { SDL_ReleaseGPUTransferBuffer(device_, transferBuf_); transferBuf_ = nullptr; }
@@ -252,7 +258,7 @@ void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     if (!gpuCmdBuf_ || !swapchainTex_) {
         return;
     }
-    renderCommandBufferToTarget(cb, swapchainTex_, swapW_, swapH_, true);
+    renderCommandBufferToTarget(gpuCmdBuf_, pipeline_, cb, swapchainTex_, swapW_, swapH_, true);
 }
 
 SDL_GPUTexture* SDLGPURenderDevice::getSDLTexture(TextureHandle handle) const {
@@ -260,8 +266,9 @@ SDL_GPUTexture* SDLGPURenderDevice::getSDLTexture(TextureHandle handle) const {
     return entry ? entry->gpuTex : nullptr;
 }
 
-void SDLGPURenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb, SDL_GPUTexture* target, uint32_t targetWidth, uint32_t targetHeight, bool clearTarget) {
-    if (!gpuCmdBuf_ || !target) {
+void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBuf, SDL_GPUGraphicsPipeline* pipeline, const CommandBuffer& cb, SDL_GPUTexture* target, uint32_t targetWidth, uint32_t targetHeight, bool clearTarget) {
+    if (!cmdBuf || !target || !pipeline) {
+        core::logError("renderCommandBufferToTarget: invalid params cmdBuf=%p target=%p pipeline=%p", cmdBuf, target, pipeline);
         return;
     }
 
@@ -278,6 +285,8 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb, SD
         }, cmd);
     }
 
+    core::logInfo("renderCommandBufferToTarget: sprites=%zu tiles=%zu", sprites.size(), tiles.size());
+
     std::stable_sort(sprites.begin(), sprites.end(),
         [](const DrawSpriteCmd& a, const DrawSpriteCmd& b) { return a.layer < b.layer; });
 
@@ -288,6 +297,9 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb, SD
     buildSpriteGeometry(sprites, spriteBatches);
     buildTileGeometry(tiles, tileBatches);
 
+    core::logInfo("renderCommandBufferToTarget: verts=%zu idx=%zu spriteBatches=%zu tileBatches=%zu", 
+                  batchVerts_.size(), batchIdx_.size(), spriteBatches.size(), tileBatches.size());
+
     if (!batchVerts_.empty()) {
         const size_t vSize = batchVerts_.size() * sizeof(SpriteVertex);
         const size_t iSize = batchIdx_.size() * sizeof(uint16_t);
@@ -297,7 +309,7 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb, SD
         memcpy(mapped + vSize, batchIdx_.data(), iSize);
         SDL_UnmapGPUTransferBuffer(device_, transferBuf_);
 
-        SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(gpuCmdBuf_);
+        SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmdBuf);
         SDL_GPUTransferBufferLocation vSrc{ transferBuf_, 0 };
         SDL_GPUBufferRegion vDst{ vertexBuf_, 0, static_cast<uint32_t>(vSize) };
         SDL_UploadToGPUBuffer(copyPass, &vSrc, &vDst, true);
@@ -322,9 +334,9 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb, SD
         clearColor.a / 255.0f
     };
 
-    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
-    SDL_BindGPUGraphicsPipeline(pass, pipeline_);
-    SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, proj, sizeof(proj));
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmdBuf, &colorTarget, 1, nullptr);
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    SDL_PushGPUVertexUniformData(cmdBuf, 0, proj, sizeof(proj));
 
     if (!batchVerts_.empty()) {
         SDL_GPUBufferBinding vertexBinding{ vertexBuf_, 0 };
@@ -402,8 +414,50 @@ TextureHandle SDLGPURenderDevice::renderToTexture(const CommandBuffer& cb, int w
         return {};
     }
 
-    renderCommandBufferToTarget(cb, entry->gpuTex, static_cast<uint32_t>(width), static_cast<uint32_t>(height), true);
+    renderCommandBufferToTarget(gpuCmdBuf_, pipeline_, cb, entry->gpuTex, static_cast<uint32_t>(width), static_cast<uint32_t>(height), true);
     return editorRenderTarget_;
+}
+
+TextureHandle SDLGPURenderDevice::renderToTextureOffscreen(const CommandBuffer& cb, int width, int height) {
+    if (!device_ || width <= 0 || height <= 0) {
+        core::logError("renderToTextureOffscreen: invalid params device=%p w=%d h=%d", device_, width, height);
+        return {};
+    }
+
+    if (!offscreenPipeline_) {
+        core::logError("renderToTextureOffscreen: offscreenPipeline_ is null");
+        return {};
+    }
+
+    if (!textures_.valid(offscreenRenderTarget_) ||
+        offscreenRenderTargetWidth_ != width ||
+        offscreenRenderTargetHeight_ != height) {
+        if (textures_.valid(offscreenRenderTarget_)) {
+            destroyTexture(offscreenRenderTarget_);
+        }
+        offscreenRenderTarget_ = createRenderTargetTexture(width, height);
+        offscreenRenderTargetWidth_ = width;
+        offscreenRenderTargetHeight_ = height;
+        core::logInfo("renderToTextureOffscreen: created render target %dx%d handle=%u", width, height, offscreenRenderTarget_.index);
+    }
+
+    TextureEntry* entry = textures_.tryGet(offscreenRenderTarget_);
+    if (!entry || !entry->gpuTex) {
+        core::logError("renderToTextureOffscreen: failed to get texture entry");
+        return {};
+    }
+
+    SDL_GPUCommandBuffer* cmdBuf = SDL_AcquireGPUCommandBuffer(device_);
+    if (!cmdBuf) {
+        core::logError("renderToTextureOffscreen: SDL_AcquireGPUCommandBuffer failed");
+        return {};
+    }
+
+    renderCommandBufferToTarget(cmdBuf, offscreenPipeline_, cb, entry->gpuTex, static_cast<uint32_t>(width), static_cast<uint32_t>(height), true);
+    SDL_SubmitGPUCommandBuffer(cmdBuf);
+    SDL_WaitForGPUIdle(device_);
+
+    return offscreenRenderTarget_;
 }
 
 SDL_GPUShader* SDLGPURenderDevice::loadShader(const uint8_t* code, size_t size, SDL_GPUShaderStage stage, int numSamplers, int numUBOs, SDL_GPUShaderFormat fmt) {
@@ -423,6 +477,17 @@ void SDLGPURenderDevice::createPipeline() {
         return;
     }
 
+    SDL_GPUTextureFormat swapchainFormat = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+    pipeline_ = createPipelineForFormat(swapchainFormat);
+    ASSERT_MSG(pipeline_, "Failed to create swapchain pipeline");
+
+    offscreenPipeline_ = createPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+    ASSERT_MSG(offscreenPipeline_, "Failed to create offscreen pipeline");
+
+    core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8)", static_cast<int>(swapchainFormat));
+}
+
+SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUTextureFormat format) {
     SDL_GPUShader* vs = nullptr;
     SDL_GPUShader* fs = nullptr;
     if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
@@ -434,7 +499,11 @@ void SDLGPURenderDevice::createPipeline() {
         fs = loadShader(sprite_frag_dxil, sprite_frag_dxil_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, SDL_GPU_SHADERFORMAT_DXIL);
 #endif
     }
-    ASSERT(vs && fs);
+    if (!vs || !fs) {
+        if (vs) SDL_ReleaseGPUShader(device_, vs);
+        if (fs) SDL_ReleaseGPUShader(device_, fs);
+        return nullptr;
+    }
 
     SDL_GPUVertexBufferDescription vbDesc{};
     vbDesc.slot = 0;
@@ -448,7 +517,7 @@ void SDLGPURenderDevice::createPipeline() {
     attrs[2] = { 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(SpriteVertex, r) };
 
     SDL_GPUColorTargetDescription colorTarget{};
-    colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+    colorTarget.format = format;
     colorTarget.blend_state.enable_blend = true;
     colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
     colorTarget.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -470,12 +539,11 @@ void SDLGPURenderDevice::createPipeline() {
     pipeInfo.target_info.color_target_descriptions = &colorTarget;
     pipeInfo.target_info.num_color_targets = 1;
 
-    pipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
-    ASSERT_MSG(pipeline_, "SDL_CreateGPUGraphicsPipeline failed");
+    SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
 
     SDL_ReleaseGPUShader(device_, vs);
     SDL_ReleaseGPUShader(device_, fs);
-    core::logInfo("Sprite pipeline created");
+    return pipeline;
 }
 
 void SDLGPURenderDevice::buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds, std::vector<BatchSegment>& batches) {
