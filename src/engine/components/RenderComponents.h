@@ -37,7 +37,9 @@ struct TileMap {
     int tileAt(int layer, int x, int y) const {
         if (layer < 0 || layer >= MAX_LAYERS) return -1;
         if (x < 0 || x >= width || y < 0 || y >= height) return -1;
-        return layers[layer][y * width + x];
+        size_t idx = static_cast<size_t>(y) * width + x;
+        if (idx >= layers[layer].size()) return -1;
+        return layers[layer][idx];
     }
 };
 

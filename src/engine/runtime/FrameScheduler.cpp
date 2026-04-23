@@ -24,6 +24,9 @@ bool FrameScheduler::tick() {
         if (!ctx_.systems.get<InputSystem>().pollInput()) return false;
     }
 
+    // ── Step 1b: 开始渲染帧（获取 swapchain 纹理）────────────────────────────
+    ctx_.renderDevice().beginFrame();
+
     for (auto& s : ctx_.systems.systems()) s->preUpdate();
 
     // ── Step 2: 物理 ─────────────────────────────────────────────────────────
@@ -39,6 +42,8 @@ bool FrameScheduler::tick() {
 
     // ── Step 8: 清除单帧状态 ─────────────────────────────────────────────────
     for (auto& s : ctx_.systems.systems()) s->postUpdate();
+
+    ctx_.renderDevice().endFrame();
 
     if (frameCount_ > 0 && frameCount_ % 300 == 0 && dt > 0.f) {
         core::logInfo("frame %llu  fps %.1f", (unsigned long long)frameCount_, 1.f / dt);

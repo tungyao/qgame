@@ -55,24 +55,31 @@ private:
 
     // ── 初始化辅助 ────────────────────────────────────────────────────────────
     void createPipeline();
-    SDL_GPUShader* loadSPIRV(const uint8_t* code, size_t size,
-                             SDL_GPUShaderStage stage,
-                             int numSamplers, int numUniformBuffers);
+    SDL_GPUShader* loadShader(const uint8_t* code, size_t size,
+                              SDL_GPUShaderStage stage,
+                              int numSamplers, int numUniformBuffers,
+                              SDL_GPUShaderFormat fmt);
 
     // ── 绘制辅助 ──────────────────────────────────────────────────────────────
-    void flushBatch(SDL_GPURenderPass* pass);
-    void drawSpriteBatch(SDL_GPURenderPass* pass,
-                         const std::vector<DrawSpriteCmd>& cmds);
-    void drawTileBatch(SDL_GPURenderPass* pass,
-                       const std::vector<DrawTileCmd>& cmds);
+    struct BatchSegment {
+        TextureHandle tex;
+        uint32_t      idxOffset;
+        uint32_t      idxCount;
+        int32_t       vertOffset;
+    };
+    void buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds,
+                             std::vector<BatchSegment>& batches);
+    void buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
+                           std::vector<BatchSegment>& batches);
 
     // 将像素空间 (0,0)-(w,h) 映射到 NDC 的正交投影矩阵（列主序）
     void buildOrthoMatrix(float w, float h, float out[16]);
 
     // ── 成员 ──────────────────────────────────────────────────────────────────
-    SDL_Window*              window_   = nullptr;
-    SDL_GPUDevice*           device_   = nullptr;
-    SDL_GPUGraphicsPipeline* pipeline_ = nullptr;
+    SDL_Window*              window_        = nullptr;
+    SDL_GPUDevice*           device_        = nullptr;
+    SDL_GPUGraphicsPipeline* pipeline_      = nullptr;
+    SDL_GPUShaderFormat      shaderFormat_  = SDL_GPU_SHADERFORMAT_INVALID;
 
     // 每帧动态顶点/索引缓冲（CPU→GPU transfer）
     SDL_GPUBuffer*           vertexBuf_ = nullptr;

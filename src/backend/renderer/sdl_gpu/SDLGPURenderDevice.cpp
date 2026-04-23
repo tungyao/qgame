@@ -7,9 +7,13 @@
 #include <algorithm>
 #include <variant>
 
-// 编译期生成的 SPIRV 头文件（由 CMake shader 编译步骤生成）
+// 编译期生成的 shader 头文件（由 CMake shader 编译步骤生成）
 #include "sprite_vert_spv.h"
 #include "sprite_frag_spv.h"
+#ifdef QGAME_HAS_DXIL_SHADERS
+#include "sprite_vert_dxil.h"
+#include "sprite_frag_dxil.h"
+#endif
 
 namespace backend {
 
@@ -28,11 +32,11 @@ SDLGPURenderDevice::~SDLGPURenderDevice() {
 // ── IBackendSystem ────────────────────────────────────────────────────────────
 
 void SDLGPURenderDevice::init() {
-    // 按平台偏好顺序请求 shader format
-    SDL_GPUShaderFormat fmts =
-        SDL_GPU_SHADERFORMAT_SPIRV |
-        SDL_GPU_SHADERFORMAT_DXIL  |
-        SDL_GPU_SHADERFORMAT_MSL;
+    // 仅声明我们实际拥有 bytecode 的格式，SDL 据此选择合适的后端
+    SDL_GPUShaderFormat fmts = SDL_GPU_SHADERFORMAT_SPIRV;
+#ifdef QGAME_HAS_DXIL_SHADERS
+    fmts |= SDL_GPU_SHADERFORMAT_DXIL;
+#endif
 
     device_ = SDL_CreateGPUDevice(fmts, /*debug=*/false, nullptr);
     if (!device_) {
@@ -50,13 +54,25 @@ void SDLGPURenderDevice::init() {
     SDL_GPUShaderFormat supported = SDL_GetGPUShaderFormats(device_);
     const char* backend = SDL_GetGPUDeviceDriver(device_);
     core::logInfo("GPU backend: %s  shader formats: 0x%x", backend, (int)supported);
-    if (!(supported & SDL_GPU_SHADERFORMAT_SPIRV)) {
-        core::logError("GPU device does not support SPIRV. On Windows ensure Vulkan drivers are installed.");
+
+    // 选择实际使用的 shader 格式（优先 SPIRV）
+    if (supported & SDL_GPU_SHADERFORMAT_SPIRV) {
+        shaderFormat_ = SDL_GPU_SHADERFORMAT_SPIRV;
+#ifdef QGAME_HAS_DXIL_SHADERS
+    } else if (supported & SDL_GPU_SHADERFORMAT_DXIL) {
+        shaderFormat_ = SDL_GPU_SHADERFORMAT_DXIL;
+#endif
+    } else {
+        core::logError("GPU backend '%s' requires a shader format not available in this build. "
+                       "On Windows, install Vulkan drivers or rebuild with dxc.exe for D3D12 support.",
+                       backend);
         SDL_ReleaseWindowFromGPUDevice(device_, window_);
         SDL_DestroyGPUDevice(device_);
         device_ = nullptr;
         return;
     }
+    core::logInfo("Using shader format: %s",
+                  shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV ? "SPIRV" : "DXIL");
 
     // 分配顶点/索引缓冲（静态大小，每帧映射写入）
     SDL_GPUBufferCreateInfo vbInfo{};
@@ -75,7 +91,10 @@ void SDLGPURenderDevice::init() {
     tbInfo.size  = vbInfo.size + ibInfo.size;
     transferBuf_ = SDL_CreateGPUTransferBuffer(device_, &tbInfo);
 
-    ASSERT(vertexBuf_ && indexBuf_ && transferBuf_);
+    if (!vertexBuf_ || !indexBuf_ || !transferBuf_) {
+        core::logError("GPU buffer allocation failed: %s", SDL_GetError());
+        return;
+    }
 
     createPipeline();
     core::logInfo("SDLGPURenderDevice initialized");
@@ -125,18 +144,27 @@ void SDLGPURenderDevice::shutdown() {
 
 TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
     ASSERT(desc.data && desc.width > 0 && desc.height > 0);
+    if (!device_) {
+        core::logError("createTexture: GPU device not initialized");
+        return {};
+    }
 
     // 创建 GPU 纹理
     SDL_GPUTextureCreateInfo info{};
-    info.type             = SDL_GPU_TEXTURETYPE_2D;
-    info.format           = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    info.usage            = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    info.width            = static_cast<uint32_t>(desc.width);
-    info.height           = static_cast<uint32_t>(desc.height);
+    info.type                 = SDL_GPU_TEXTURETYPE_2D;
+    info.format               = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.usage                = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width                = static_cast<uint32_t>(desc.width);
+    info.height               = static_cast<uint32_t>(desc.height);
     info.layer_count_or_depth = 1;
-    info.num_levels       = 1;
+    info.num_levels           = 1;
+    info.sample_count         = SDL_GPU_SAMPLECOUNT_1;
     SDL_GPUTexture* gpuTex = SDL_CreateGPUTexture(device_, &info);
-    ASSERT_MSG(gpuTex, "SDL_CreateGPUTexture failed");
+    if (!gpuTex) {
+        core::logError("SDL_CreateGPUTexture failed (%dx%d): %s",
+                       desc.width, desc.height, SDL_GetError());
+        return {};
+    }
 
     // 上传像素数据
     size_t dataSize = (size_t)desc.width * desc.height * 4;
@@ -201,7 +229,7 @@ void SDLGPURenderDevice::destroyShader(ShaderHandle) {}
 void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     if (!gpuCmdBuf_ || !swapchainTex_) return;
 
-    // 收集并按 layer 排序 DrawSpriteCmd
+    // ── 1. 解析命令 ───────────────────────────────────────────────────────────
     std::vector<DrawSpriteCmd> sprites;
     std::vector<DrawTileCmd>   tiles;
     core::Color clearColor = core::Color::Black;
@@ -218,26 +246,74 @@ void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     std::stable_sort(sprites.begin(), sprites.end(),
         [](const DrawSpriteCmd& a, const DrawSpriteCmd& b){ return a.layer < b.layer; });
 
-    // 构建正交投影矩阵
+    // ── 2. 在 CPU 侧构建所有几何数据，记录各批次区间 ──────────────────────────
+    batchVerts_.clear();
+    batchIdx_.clear();
+    std::vector<BatchSegment> spriteBatches, tileBatches;
+
+    buildSpriteGeometry(sprites, spriteBatches);
+    buildTileGeometry(tiles, tileBatches);
+
+    // ── 3. Copy pass：上传顶点 / 索引（必须在 render pass 之前）────────────────
+    if (!batchVerts_.empty()) {
+        size_t vSize = batchVerts_.size() * sizeof(SpriteVertex);
+        size_t iSize = batchIdx_.size()   * sizeof(uint16_t);
+
+        uint8_t* mapped = static_cast<uint8_t*>(
+            SDL_MapGPUTransferBuffer(device_, transferBuf_, true));
+        memcpy(mapped,         batchVerts_.data(), vSize);
+        memcpy(mapped + vSize, batchIdx_.data(),   iSize);
+        SDL_UnmapGPUTransferBuffer(device_, transferBuf_);
+
+        SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(gpuCmdBuf_);
+
+        SDL_GPUTransferBufferLocation vSrc{ transferBuf_, 0 };
+        SDL_GPUBufferRegion vDst{ vertexBuf_, 0, static_cast<uint32_t>(vSize) };
+        SDL_UploadToGPUBuffer(cp, &vSrc, &vDst, true);
+
+        SDL_GPUTransferBufferLocation iSrc{ transferBuf_, static_cast<uint32_t>(vSize) };
+        SDL_GPUBufferRegion iDst{ indexBuf_, 0, static_cast<uint32_t>(iSize) };
+        SDL_UploadToGPUBuffer(cp, &iSrc, &iDst, true);
+
+        SDL_EndGPUCopyPass(cp);
+    }
+
+    // ── 4. Render pass ────────────────────────────────────────────────────────
     float proj[16];
     buildOrthoMatrix(static_cast<float>(swapW_), static_cast<float>(swapH_), proj);
 
-    // 开始 render pass
     SDL_GPUColorTargetInfo ct{};
-    ct.texture            = swapchainTex_;
-    ct.load_op            = SDL_GPU_LOADOP_CLEAR;
-    ct.store_op           = SDL_GPU_STOREOP_STORE;
-    ct.clear_color        = { clearColor.r / 255.f, clearColor.g / 255.f,
-                               clearColor.b / 255.f, clearColor.a / 255.f };
+    ct.texture   = swapchainTex_;
+    ct.load_op   = SDL_GPU_LOADOP_CLEAR;
+    ct.store_op  = SDL_GPU_STOREOP_STORE;
+    ct.clear_color = { clearColor.r / 255.f, clearColor.g / 255.f,
+                       clearColor.b / 255.f, clearColor.a / 255.f };
 
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &ct, 1, nullptr);
     SDL_BindGPUGraphicsPipeline(pass, pipeline_);
-
-    // 上传 projection matrix（uniform buffer slot 0, vertex stage）
     SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, proj, sizeof(proj));
 
-    drawSpriteBatch(pass, sprites);
-    drawTileBatch(pass, tiles);
+    if (!batchVerts_.empty()) {
+        SDL_GPUBufferBinding vBind{ vertexBuf_, 0 };
+        SDL_BindGPUVertexBuffers(pass, 0, &vBind, 1);
+        SDL_GPUBufferBinding iBind{ indexBuf_, 0 };
+        SDL_BindGPUIndexBuffer(pass, &iBind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+        auto drawBatches = [&](const std::vector<BatchSegment>& batches) {
+            for (const auto& seg : batches) {
+                if (textures_.valid(seg.tex)) {
+                    TextureEntry& e = textures_.get(seg.tex);
+                    SDL_GPUTextureSamplerBinding tsb{ e.gpuTex, e.sampler };
+                    SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
+                }
+                SDL_DrawGPUIndexedPrimitives(
+                    pass, seg.idxCount, 1, seg.idxOffset, seg.vertOffset, 0);
+            }
+        };
+
+        drawBatches(spriteBatches);
+        drawBatches(tileBatches);
+    }
 
     SDL_EndGPURenderPass(pass);
 }
@@ -256,27 +332,39 @@ TextureHandle SDLGPURenderDevice::renderToTexture(const CommandBuffer&, int, int
 
 // ── 内部实现 ──────────────────────────────────────────────────────────────────
 
-SDL_GPUShader* SDLGPURenderDevice::loadSPIRV(const uint8_t* code, size_t size,
-                                              SDL_GPUShaderStage stage,
-                                              int numSamplers, int numUBOs) {
+SDL_GPUShader* SDLGPURenderDevice::loadShader(const uint8_t* code, size_t size,
+                                               SDL_GPUShaderStage stage,
+                                               int numSamplers, int numUBOs,
+                                               SDL_GPUShaderFormat fmt) {
     SDL_GPUShaderCreateInfo info{};
-    info.code                  = code;
-    info.code_size             = size;
-    info.entrypoint            = "main";
-    info.format                = SDL_GPU_SHADERFORMAT_SPIRV;
-    info.stage                 = stage;
-    info.num_samplers          = static_cast<uint32_t>(numSamplers);
-    info.num_uniform_buffers   = static_cast<uint32_t>(numUBOs);
+    info.code                = code;
+    info.code_size           = size;
+    info.entrypoint          = "main";
+    info.format              = fmt;
+    info.stage               = stage;
+    info.num_samplers        = static_cast<uint32_t>(numSamplers);
+    info.num_uniform_buffers = static_cast<uint32_t>(numUBOs);
     return SDL_CreateGPUShader(device_, &info);
 }
 
 void SDLGPURenderDevice::createPipeline() {
     if (!device_) return;
 
-    SDL_GPUShader* vs = loadSPIRV(sprite_vert_spv, sprite_vert_spv_size,
-                                   SDL_GPU_SHADERSTAGE_VERTEX, 0, 1);
-    SDL_GPUShader* fs = loadSPIRV(sprite_frag_spv, sprite_frag_spv_size,
-                                   SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
+    SDL_GPUShader* vs = nullptr;
+    SDL_GPUShader* fs = nullptr;
+    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+        vs = loadShader(sprite_vert_spv, sprite_vert_spv_size,
+                        SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+        fs = loadShader(sprite_frag_spv, sprite_frag_spv_size,
+                        SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, SDL_GPU_SHADERFORMAT_SPIRV);
+#ifdef QGAME_HAS_DXIL_SHADERS
+    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
+        vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size,
+                        SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
+        fs = loadShader(sprite_frag_dxil, sprite_frag_dxil_size,
+                        SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, SDL_GPU_SHADERFORMAT_DXIL);
+#endif
+    }
     ASSERT(vs && fs);
 
     // 顶点布局：pos(float2) + uv(float2) + color(ubyte4)
@@ -323,46 +411,35 @@ void SDLGPURenderDevice::createPipeline() {
     core::logInfo("Sprite pipeline created");
 }
 
-void SDLGPURenderDevice::drawSpriteBatch(SDL_GPURenderPass* pass,
-                                          const std::vector<DrawSpriteCmd>& cmds) {
+void SDLGPURenderDevice::buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds,
+                                              std::vector<BatchSegment>& batches) {
     if (cmds.empty()) return;
 
-    batchVerts_.clear();
-    batchIdx_.clear();
-
-    auto flush = [&]() {
-        if (batchVerts_.empty()) return;
-        flushBatch(pass);
-        batchVerts_.clear();
-        batchIdx_.clear();
-    };
-
     TextureHandle curTex{};
+    uint32_t batchIdxStart  = 0;
+    int32_t  batchVertStart = 0;
 
     for (const auto& cmd : cmds) {
-        if (cmd.texture != curTex || batchVerts_.size() >= MAX_SPRITES_PER_BATCH * 4) {
-            flush();
-            curTex = cmd.texture;
-
-            // 绑定纹理
-            if (textures_.valid(curTex)) {
-                TextureEntry& e = textures_.get(curTex);
-                SDL_GPUTextureSamplerBinding tsb{ e.gpuTex, e.sampler };
-                SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
-            }
+        bool needFlush = (cmd.texture != curTex ||
+                          batchVerts_.size() - (size_t)batchVertStart >= MAX_SPRITES_PER_BATCH * 4);
+        if (needFlush && !batchVerts_.empty() && (uint32_t)batchIdx_.size() > batchIdxStart) {
+            batches.push_back({ curTex,
+                                batchIdxStart,
+                                (uint32_t)batchIdx_.size() - batchIdxStart,
+                                batchVertStart });
+            batchIdxStart  = (uint32_t)batchIdx_.size();
+            batchVertStart = (int32_t)batchVerts_.size();
         }
+        curTex = cmd.texture;
 
-        // 计算 sprite 四顶点（支持旋转/缩放）
         float hw = cmd.srcRect.w * cmd.scaleX * 0.5f;
         float hh = cmd.srcRect.h * cmd.scaleY * 0.5f;
         float cos_r = cosf(cmd.rotation);
         float sin_r = sinf(cmd.rotation);
 
-        // 本地坐标（以锚点为原点）
         float lx[4] = {-hw,  hw,  hw, -hw};
         float ly[4] = {-hh, -hh,  hh,  hh};
 
-        // UV（归一化）
         TextureEntry* te = textures_.tryGet(curTex);
         float tw = te ? te->width  : 1.f;
         float th = te ? te->height : 1.f;
@@ -373,7 +450,8 @@ void SDLGPURenderDevice::drawSpriteBatch(SDL_GPURenderPass* pass,
         float us[4] = {u0, u1, u1, u0};
         float vs_[4]= {v0, v0, v1, v1};
 
-        uint16_t base = static_cast<uint16_t>(batchVerts_.size());
+        // 索引相对于当前批次的 batchVertStart（base vertex 机制处理偏移）
+        uint16_t base = static_cast<uint16_t>(batchVerts_.size() - (size_t)batchVertStart);
         for (int i = 0; i < 4; ++i) {
             batchVerts_.push_back({
                 cmd.x + lx[i] * cos_r - ly[i] * sin_r,
@@ -382,46 +460,44 @@ void SDLGPURenderDevice::drawSpriteBatch(SDL_GPURenderPass* pass,
                 cmd.tint.r, cmd.tint.g, cmd.tint.b, cmd.tint.a
             });
         }
-        // 两个三角形：0-1-2, 0-2-3
         batchIdx_.insert(batchIdx_.end(),
             {base, (uint16_t)(base+1), (uint16_t)(base+2),
              base, (uint16_t)(base+2), (uint16_t)(base+3)});
     }
-    flush();
+
+    if ((uint32_t)batchIdx_.size() > batchIdxStart) {
+        batches.push_back({ curTex,
+                            batchIdxStart,
+                            (uint32_t)batchIdx_.size() - batchIdxStart,
+                            batchVertStart });
+    }
 }
 
-void SDLGPURenderDevice::drawTileBatch(SDL_GPURenderPass* pass,
-                                        const std::vector<DrawTileCmd>& cmds) {
+void SDLGPURenderDevice::buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
+                                            std::vector<BatchSegment>& batches) {
     if (cmds.empty()) return;
 
-    batchVerts_.clear();
-    batchIdx_.clear();
-
     TextureHandle curTex{};
-
-    auto flush = [&]() {
-        if (batchVerts_.empty()) return;
-        flushBatch(pass);
-        batchVerts_.clear();
-        batchIdx_.clear();
-    };
+    uint32_t batchIdxStart  = 0;
+    int32_t  batchVertStart = 0;
 
     for (const auto& cmd : cmds) {
-        if (cmd.tileset != curTex || batchVerts_.size() >= MAX_SPRITES_PER_BATCH * 4) {
-            flush();
-            curTex = cmd.tileset;
-            if (textures_.valid(curTex)) {
-                TextureEntry& e = textures_.get(curTex);
-                SDL_GPUTextureSamplerBinding tsb{ e.gpuTex, e.sampler };
-                SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
-            }
+        bool needFlush = (cmd.tileset != curTex ||
+                          batchVerts_.size() - (size_t)batchVertStart >= MAX_SPRITES_PER_BATCH * 4);
+        if (needFlush && !batchVerts_.empty() && (uint32_t)batchIdx_.size() > batchIdxStart) {
+            batches.push_back({ curTex,
+                                batchIdxStart,
+                                (uint32_t)batchIdx_.size() - batchIdxStart,
+                                batchVertStart });
+            batchIdxStart  = (uint32_t)batchIdx_.size();
+            batchVertStart = (int32_t)batchVerts_.size();
         }
+        curTex = cmd.tileset;
 
         TextureEntry* te = textures_.tryGet(curTex);
         float tw = te ? te->width  : 1.f;
         float th = te ? te->height : 1.f;
         int tileSize = cmd.tileSize > 0 ? cmd.tileSize : 16;
-        // 假设 tileset 是等宽格子，每行 tilesetCols 列（DrawTileCmd 暂无此字段，用 tw/tileSize 推算）
         int tsetCols = static_cast<int>(tw) / tileSize;
         if (tsetCols < 1) tsetCols = 1;
 
@@ -432,12 +508,12 @@ void SDLGPURenderDevice::drawTileBatch(SDL_GPURenderPass* pass,
         float u1 = u0 + tileSize / tw;
         float v1 = v0 + tileSize / th;
 
-        float px = static_cast<float>(cmd.gridX * tileSize);
-        float py = static_cast<float>(cmd.gridY * tileSize);
+        float px  = static_cast<float>(cmd.gridX * tileSize);
+        float py  = static_cast<float>(cmd.gridY * tileSize);
         float px1 = px + tileSize;
         float py1 = py + tileSize;
 
-        uint16_t base = static_cast<uint16_t>(batchVerts_.size());
+        uint16_t base = static_cast<uint16_t>(batchVerts_.size() - (size_t)batchVertStart);
         batchVerts_.push_back({ px,  py,  u0, v0, 255,255,255,255 });
         batchVerts_.push_back({ px1, py,  u1, v0, 255,255,255,255 });
         batchVerts_.push_back({ px1, py1, u1, v1, 255,255,255,255 });
@@ -446,43 +522,13 @@ void SDLGPURenderDevice::drawTileBatch(SDL_GPURenderPass* pass,
             {base, (uint16_t)(base+1), (uint16_t)(base+2),
              base, (uint16_t)(base+2), (uint16_t)(base+3)});
     }
-    flush();
-}
 
-void SDLGPURenderDevice::flushBatch(SDL_GPURenderPass* pass) {
-    if (batchVerts_.empty()) return;
-
-    size_t vSize = batchVerts_.size() * sizeof(SpriteVertex);
-    size_t iSize = batchIdx_.size()   * sizeof(uint16_t);
-
-    // 写入 transfer buffer
-    uint8_t* mapped = static_cast<uint8_t*>(
-        SDL_MapGPUTransferBuffer(device_, transferBuf_, true));
-    memcpy(mapped,         batchVerts_.data(), vSize);
-    memcpy(mapped + vSize, batchIdx_.data(),   iSize);
-    SDL_UnmapGPUTransferBuffer(device_, transferBuf_);
-
-    // Copy pass: transfer → vertex/index buffer
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(gpuCmdBuf_);
-
-    SDL_GPUTransferBufferLocation vSrc{ transferBuf_, 0 };
-    SDL_GPUBufferRegion vDst{ vertexBuf_, 0, static_cast<uint32_t>(vSize) };
-    SDL_UploadToGPUBuffer(cp, &vSrc, &vDst, true);
-
-    SDL_GPUTransferBufferLocation iSrc{ transferBuf_, static_cast<uint32_t>(vSize) };
-    SDL_GPUBufferRegion iDst{ indexBuf_, 0, static_cast<uint32_t>(iSize) };
-    SDL_UploadToGPUBuffer(cp, &iSrc, &iDst, true);
-
-    SDL_EndGPUCopyPass(cp);
-
-    // Draw
-    SDL_GPUBufferBinding vBind{ vertexBuf_, 0 };
-    SDL_BindGPUVertexBuffers(pass, 0, &vBind, 1);
-    SDL_GPUBufferBinding iBind{ indexBuf_, 0 };
-    SDL_BindGPUIndexBuffer(pass, &iBind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-
-    SDL_DrawGPUIndexedPrimitives(pass,
-        static_cast<uint32_t>(batchIdx_.size()), 1, 0, 0, 0);
+    if ((uint32_t)batchIdx_.size() > batchIdxStart) {
+        batches.push_back({ curTex,
+                            batchIdxStart,
+                            (uint32_t)batchIdx_.size() - batchIdxStart,
+                            batchVertStart });
+    }
 }
 
 void SDLGPURenderDevice::buildOrthoMatrix(float w, float h, float out[16]) {

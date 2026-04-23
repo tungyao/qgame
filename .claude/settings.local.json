@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build build --config Debug)",
+      "Bash(./build/game/Debug/game.exe)",
+      "Bash(tasklist)",
+      "Bash(taskkill /F /IM game.exe)",
+      "Bash(cmake --build build --config Debug --target backend engine game)",
+      "Bash(echo \"exit: $?\")"
+    ]
+  }
+}
