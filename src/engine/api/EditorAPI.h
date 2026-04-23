@@ -21,6 +21,7 @@ public:
 
     entt::entity createTransientEntity();
     void destroyTransientEntities();
+    void submitImGuiDrawData();
 
     entt::registry& world();
     const std::vector<entt::entity>& transientEntities() const;

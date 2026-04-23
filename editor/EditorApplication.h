@@ -21,6 +21,7 @@ private:
     void setupImGui();
     void shutdownImGui();
     void beginImGuiFrame();
+    void syncInputToImGui();
     void drawDockspace();
     void drawHierarchy();
     void drawInspector();

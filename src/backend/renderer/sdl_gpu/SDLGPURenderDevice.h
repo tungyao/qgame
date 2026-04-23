@@ -29,9 +29,11 @@ public:
     void          destroyShader(ShaderHandle)       override;
 
     void submitCommandBuffer(const CommandBuffer&) override;
+    void submitImGuiDrawData(const ImDrawData* drawData) override;
     void present()                                 override;
 
     TextureHandle renderToTexture(const CommandBuffer&, int w, int h) override;
+    SDL_GPUTexture* getSDLTexture(TextureHandle handle) const;
 
     // 供 RenderSystem 查询设备，上传纹理用
     SDL_GPUDevice* gpuDevice() const { return device_; }
@@ -90,6 +92,9 @@ private:
     // SDL3 GPU API 支持 SDL_PushGPUVertexUniformData
 
     core::HandleMap<TextureHandle, TextureEntry> textures_;
+    TextureHandle             editorRenderTarget_{};
+    int                       editorRenderTargetWidth_ = 0;
+    int                       editorRenderTargetHeight_ = 0;
 
     // 当前帧 command buffer（SDL3 GPU 概念，不是我们的 backend::CommandBuffer）
     SDL_GPUCommandBuffer* gpuCmdBuf_ = nullptr;
@@ -103,6 +108,8 @@ private:
     std::vector<uint16_t>     batchIdx_;
     TextureHandle             batchTex_;
     int                       batchLayer_ = 0;
+    void renderCommandBufferToTarget(const CommandBuffer& cb, SDL_GPUTexture* target, uint32_t width, uint32_t height, bool clearTarget);
+    TextureHandle createRenderTargetTexture(int width, int height);
 };
 
 } // namespace backend

@@ -4,7 +4,9 @@
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
+#include <imgui_impl_sdlgpu3.h>
 
+#include <backend/renderer/sdl_gpu/SDLGPURenderDevice.h>
 #include <engine/components/RenderComponents.h>
 
 namespace editor {
@@ -33,6 +35,87 @@ const char* entityLabel(entt::entity entity) {
     return buffer;
 }
 
+ImGuiKey mapSDLKey(int keyCode) {
+    switch (keyCode) {
+    case SDLK_TAB: return ImGuiKey_Tab;
+    case SDLK_LEFT: return ImGuiKey_LeftArrow;
+    case SDLK_RIGHT: return ImGuiKey_RightArrow;
+    case SDLK_UP: return ImGuiKey_UpArrow;
+    case SDLK_DOWN: return ImGuiKey_DownArrow;
+    case SDLK_PAGEUP: return ImGuiKey_PageUp;
+    case SDLK_PAGEDOWN: return ImGuiKey_PageDown;
+    case SDLK_HOME: return ImGuiKey_Home;
+    case SDLK_END: return ImGuiKey_End;
+    case SDLK_INSERT: return ImGuiKey_Insert;
+    case SDLK_DELETE: return ImGuiKey_Delete;
+    case SDLK_BACKSPACE: return ImGuiKey_Backspace;
+    case SDLK_SPACE: return ImGuiKey_Space;
+    case SDLK_RETURN: return ImGuiKey_Enter;
+    case SDLK_ESCAPE: return ImGuiKey_Escape;
+    case SDLK_APOSTROPHE: return ImGuiKey_Apostrophe;
+    case SDLK_COMMA: return ImGuiKey_Comma;
+    case SDLK_MINUS: return ImGuiKey_Minus;
+    case SDLK_PERIOD: return ImGuiKey_Period;
+    case SDLK_SLASH: return ImGuiKey_Slash;
+    case SDLK_SEMICOLON: return ImGuiKey_Semicolon;
+    case SDLK_EQUALS: return ImGuiKey_Equal;
+    case SDLK_LEFTBRACKET: return ImGuiKey_LeftBracket;
+    case SDLK_BACKSLASH: return ImGuiKey_Backslash;
+    case SDLK_RIGHTBRACKET: return ImGuiKey_RightBracket;
+    case SDLK_GRAVE: return ImGuiKey_GraveAccent;
+    case SDLK_CAPSLOCK: return ImGuiKey_CapsLock;
+    case SDLK_SCROLLLOCK: return ImGuiKey_ScrollLock;
+    case SDLK_NUMLOCKCLEAR: return ImGuiKey_NumLock;
+    case SDLK_PRINTSCREEN: return ImGuiKey_PrintScreen;
+    case SDLK_PAUSE: return ImGuiKey_Pause;
+    case SDLK_LCTRL: return ImGuiKey_LeftCtrl;
+    case SDLK_LSHIFT: return ImGuiKey_LeftShift;
+    case SDLK_LALT: return ImGuiKey_LeftAlt;
+    case SDLK_LGUI: return ImGuiKey_LeftSuper;
+    case SDLK_RCTRL: return ImGuiKey_RightCtrl;
+    case SDLK_RSHIFT: return ImGuiKey_RightShift;
+    case SDLK_RALT: return ImGuiKey_RightAlt;
+    case SDLK_RGUI: return ImGuiKey_RightSuper;
+    case SDLK_0: return ImGuiKey_0;
+    case SDLK_1: return ImGuiKey_1;
+    case SDLK_2: return ImGuiKey_2;
+    case SDLK_3: return ImGuiKey_3;
+    case SDLK_4: return ImGuiKey_4;
+    case SDLK_5: return ImGuiKey_5;
+    case SDLK_6: return ImGuiKey_6;
+    case SDLK_7: return ImGuiKey_7;
+    case SDLK_8: return ImGuiKey_8;
+    case SDLK_9: return ImGuiKey_9;
+    case SDLK_A: return ImGuiKey_A;
+    case SDLK_B: return ImGuiKey_B;
+    case SDLK_C: return ImGuiKey_C;
+    case SDLK_D: return ImGuiKey_D;
+    case SDLK_E: return ImGuiKey_E;
+    case SDLK_F: return ImGuiKey_F;
+    case SDLK_G: return ImGuiKey_G;
+    case SDLK_H: return ImGuiKey_H;
+    case SDLK_I: return ImGuiKey_I;
+    case SDLK_J: return ImGuiKey_J;
+    case SDLK_K: return ImGuiKey_K;
+    case SDLK_L: return ImGuiKey_L;
+    case SDLK_M: return ImGuiKey_M;
+    case SDLK_N: return ImGuiKey_N;
+    case SDLK_O: return ImGuiKey_O;
+    case SDLK_P: return ImGuiKey_P;
+    case SDLK_Q: return ImGuiKey_Q;
+    case SDLK_R: return ImGuiKey_R;
+    case SDLK_S: return ImGuiKey_S;
+    case SDLK_T: return ImGuiKey_T;
+    case SDLK_U: return ImGuiKey_U;
+    case SDLK_V: return ImGuiKey_V;
+    case SDLK_W: return ImGuiKey_W;
+    case SDLK_X: return ImGuiKey_X;
+    case SDLK_Y: return ImGuiKey_Y;
+    case SDLK_Z: return ImGuiKey_Z;
+    default: return ImGuiKey_None;
+    }
+}
+
 } // namespace
 
 EditorApplication::~EditorApplication() {
@@ -48,6 +131,7 @@ void EditorApplication::run() {
     config.resizable = true;
 
     ctx_.init(config);
+    ctx_.beforePresentCallback = [this]() { editor_.submitImGuiDrawData(); };
     setupDemoScene();
     setupImGui();
 
@@ -98,9 +182,20 @@ void EditorApplication::setupImGui() {
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
 
+    auto* renderDevice = dynamic_cast<backend::SDLGPURenderDevice*>(&ctx_.renderDevice());
+    IM_ASSERT(renderDevice != nullptr);
+
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.DisplaySize = ImVec2(static_cast<float>(ctx_.window->width()), static_cast<float>(ctx_.window->height()));
+
+    ImGui_ImplSDLGPU3_InitInfo initInfo{};
+    initInfo.Device = renderDevice->gpuDevice();
+    initInfo.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(
+        renderDevice->gpuDevice(),
+        static_cast<SDL_Window*>(ctx_.window->sdlWindow())
+    );
+    ImGui_ImplSDLGPU3_Init(&initInfo);
 
     imguiReady_ = true;
 }
@@ -109,6 +204,7 @@ void EditorApplication::shutdownImGui() {
     if (!imguiReady_) {
         return;
     }
+    ImGui_ImplSDLGPU3_Shutdown();
     ImGui::DestroyContext();
     imguiReady_ = false;
 }
@@ -121,7 +217,33 @@ void EditorApplication::beginImGuiFrame() {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(ctx_.window->width()), static_cast<float>(ctx_.window->height()));
     io.DeltaTime = ctx_.deltaTime > 0.0f ? ctx_.deltaTime : (1.0f / 60.0f);
+    ImGui_ImplSDLGPU3_NewFrame();
+    syncInputToImGui();
     ImGui::NewFrame();
+}
+
+void EditorApplication::syncInputToImGui() {
+    ImGuiIO& io = ImGui::GetIO();
+
+    io.AddMousePosEvent(
+        ctx_.inputState.pointerX() * static_cast<float>(ctx_.window->width()),
+        ctx_.inputState.pointerY() * static_cast<float>(ctx_.window->height())
+    );
+    io.AddMouseButtonEvent(0, ctx_.inputState.pointerDown(0));
+
+    for (const auto& event : ctx_.inputState.frameEvents()) {
+        if (event.type == platform::InputRawEvent::Type::KEY_DOWN || event.type == platform::InputRawEvent::Type::KEY_UP) {
+            const ImGuiKey key = mapSDLKey(event.keyCode);
+            if (key != ImGuiKey_None) {
+                io.AddKeyEvent(key, event.type == platform::InputRawEvent::Type::KEY_DOWN);
+            }
+        }
+    }
+
+    io.AddKeyEvent(static_cast<ImGuiKey>(ImGuiMod_Ctrl), ctx_.inputState.isKeyDown(SDLK_LCTRL) || ctx_.inputState.isKeyDown(SDLK_RCTRL));
+    io.AddKeyEvent(static_cast<ImGuiKey>(ImGuiMod_Shift), ctx_.inputState.isKeyDown(SDLK_LSHIFT) || ctx_.inputState.isKeyDown(SDLK_RSHIFT));
+    io.AddKeyEvent(static_cast<ImGuiKey>(ImGuiMod_Alt), ctx_.inputState.isKeyDown(SDLK_LALT) || ctx_.inputState.isKeyDown(SDLK_RALT));
+    io.AddKeyEvent(static_cast<ImGuiKey>(ImGuiMod_Super), ctx_.inputState.isKeyDown(SDLK_LGUI) || ctx_.inputState.isKeyDown(SDLK_RGUI));
 }
 
 void EditorApplication::drawDockspace() {
@@ -212,8 +334,11 @@ void EditorApplication::drawViewport() {
             static_cast<int>(viewportSize.y)
         );
 
-        if (preview.valid()) {
-            ImGui::Text("Preview handle: %u", preview.index);
+        auto* renderDevice = dynamic_cast<backend::SDLGPURenderDevice*>(&ctx_.renderDevice());
+        SDL_GPUTexture* previewTexture = renderDevice ? renderDevice->getSDLTexture(preview) : nullptr;
+
+        if (previewTexture != nullptr) {
+            ImGui::Image(reinterpret_cast<ImTextureID>(previewTexture), viewportSize);
         } else {
             ImGui::Button("Scene preview backend pending", viewportSize);
         }

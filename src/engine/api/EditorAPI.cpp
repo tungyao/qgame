@@ -7,6 +7,7 @@
 #include "../systems/RenderSystem.h"
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/IRenderDevice.h"
+#include <imgui.h>
 
 namespace engine {
 
@@ -15,7 +16,6 @@ TextureHandle EditorAPI::renderSceneToTexture(int w, int h) {
         return {};
     }
 
-    ctx_.systems.get<RenderSystem>().update(ctx_.deltaTime);
     return ctx_.renderDevice().renderToTexture(ctx_.renderCommandBuffer(), w, h);
 }
 
@@ -52,6 +52,10 @@ void EditorAPI::destroyTransientEntities() {
         }
     }
     transientEntities_.clear();
+}
+
+void EditorAPI::submitImGuiDrawData() {
+    ctx_.renderDevice().submitImGuiDrawData(ImGui::GetDrawData());
 }
 
 entt::registry& EditorAPI::world() {

@@ -80,7 +80,6 @@ void RenderSystem::buildCommandBuffer() {
 
     // 提交到 GPU
     ctx_.renderDevice().submitCommandBuffer(cb);
-    ctx_.renderDevice().present();
 }
 
 } // namespace engine
