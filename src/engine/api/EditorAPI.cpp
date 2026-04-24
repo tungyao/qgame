@@ -49,7 +49,7 @@ void EditorAPI::setEditorCamera(float x, float y, float zoom) {
 
     const entt::entity entity = ctx_.world.create();
     ctx_.world.emplace<Transform>(entity, Transform{ x, y, 0.0f, 1.0f, 1.0f });
-    ctx_.world.emplace<Camera>(entity, Camera{ zoom, true });
+    ctx_.world.emplace<Camera>(entity, Camera{ zoom, 0.f, true });
 }
 
 entt::entity EditorAPI::createTransientEntity() {
