@@ -1,5 +1,6 @@
 #include "CommandBuffer.h"
 #include "../../core/Assert.h"
+#include <algorithm>
 
 namespace backend {
 
@@ -24,19 +25,9 @@ void CommandBuffer::clear(const core::Color& color) {
     cmds_.emplace_back(ClearCmd{color});
 }
 
-void CommandBuffer::setCamera(const CameraData& cam) {
+void CommandBuffer::setCamera(const CameraData& cam, engine::RenderPass pass) {
     ASSERT_MSG(recording_, "CommandBuffer not recording");
-    cmds_.emplace_back(SetCameraCmd{cam});
-}
-
-void CommandBuffer::beginPass(engine::RenderPass pass) {
-    ASSERT_MSG(recording_, "CommandBuffer not recording");
-    cmds_.emplace_back(BeginPassCmd{pass});
-}
-
-void CommandBuffer::endPass(engine::RenderPass pass) {
-    ASSERT_MSG(recording_, "CommandBuffer not recording");
-    cmds_.emplace_back(EndPassCmd{pass});
+    cmds_.emplace_back(SetCameraCmd{cam, pass});
 }
 
 void CommandBuffer::drawSprite(const DrawSpriteCmd& cmd) {
@@ -48,5 +39,6 @@ void CommandBuffer::drawTile(const DrawTileCmd& cmd) {
     ASSERT_MSG(recording_, "CommandBuffer not recording");
     cmds_.emplace_back(cmd);
 }
+
 
 } // namespace backend

@@ -61,21 +61,14 @@ struct DrawTileCmd {
 
 struct SetCameraCmd {
     CameraData camera;
-};
-
-struct BeginPassCmd {
-    engine::RenderPass pass;
-};
-
-struct EndPassCmd {
-    engine::RenderPass pass;
+    engine::RenderPass pass = engine::RenderPass::World;
 };
 
 struct ClearCmd {
     core::Color color = core::Color::Black;
 };
 
-using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, SetCameraCmd, ClearCmd, BeginPassCmd, EndPassCmd>;
+using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, SetCameraCmd, ClearCmd>;
 
 class CommandBuffer {
 public:
@@ -83,15 +76,14 @@ public:
     void end();
 
     void clear(const core::Color& color = core::Color::Black);
-    void setCamera(const CameraData& cam);
-    void beginPass(engine::RenderPass pass);
-    void endPass(engine::RenderPass pass);
+    void setCamera(const CameraData& cam, engine::RenderPass pass = engine::RenderPass::World);
     void drawSprite(const DrawSpriteCmd& cmd);
     void drawTile(const DrawTileCmd& cmd);
 
     const std::vector<RenderCmd>& commands() const { return cmds_; }
     bool isRecording() const { return recording_; }
     void reset();
+
 
 private:
     std::vector<RenderCmd> cmds_;

@@ -277,6 +277,16 @@ void GLRenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     renderCommandBufferToTarget(cb, 0 /*default framebuffer*/, w, h);
 }
 
+void GLRenderDevice::submitPass(const PassSubmitInfo& info,
+                                const std::vector<const RenderCmd*>& cmds) {
+    int w = 0, h = 0;
+    SDL_GetWindowSize(window_, &w, &h);
+    CameraData cam = info.camera;
+    if (cam.viewportW == 0) cam.viewportW = w;
+    if (cam.viewportH == 0) cam.viewportH = h;
+    renderCmdsToTarget(cmds, cam, info.clearEnabled, info.clearColor, 0, w, h);
+}
+
 void GLRenderDevice::submitImGuiDrawData(const ImDrawData* drawData) {
     if (!drawData) return;
     ImGui_ImplOpenGL3_RenderDrawData(const_cast<ImDrawData*>(drawData));
@@ -448,22 +458,41 @@ void GLRenderDevice::destroyFbo(FboEntry& fbo, TextureHandle& colorHandle) {
 void GLRenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb,
                                                   unsigned int fbo,
                                                   int width, int height) {
-    std::vector<DrawSpriteCmd> sprites;
-    std::vector<DrawTileCmd>   tiles;
+    // 兼容 editor 路径：从命令流中提取 ClearCmd/SetCameraCmd，转交给指针版本
+    std::vector<const RenderCmd*> cmdPtrs;
+    cmdPtrs.reserve(cb.commands().size());
     core::Color clearColor = core::Color::Black;
-
     CameraData camera{};
     camera.viewportW = width;
     camera.viewportH = height;
 
     for (const auto& cmd : cb.commands()) {
-        std::visit([&](const auto& c) {
-            using T = std::decay_t<decltype(c)>;
-            if constexpr (std::is_same_v<T, DrawSpriteCmd>)  sprites.push_back(c);
-            else if constexpr (std::is_same_v<T, DrawTileCmd>)  tiles.push_back(c);
-            else if constexpr (std::is_same_v<T, ClearCmd>)     clearColor = c.color;
-            else if constexpr (std::is_same_v<T, SetCameraCmd>) camera = c.camera;
-        }, cmd);
+        if (std::holds_alternative<ClearCmd>(cmd)) {
+            clearColor = std::get<ClearCmd>(cmd).color;
+        } else if (std::holds_alternative<SetCameraCmd>(cmd)) {
+            camera = std::get<SetCameraCmd>(cmd).camera;
+        } else {
+            cmdPtrs.push_back(&cmd);
+        }
+    }
+    renderCmdsToTarget(cmdPtrs, camera, true, clearColor, fbo, width, height);
+}
+
+void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmds,
+                                         const CameraData& cameraIn,
+                                         bool clearEnabled,
+                                         core::Color clearColor,
+                                         unsigned int fbo,
+                                         int width, int height) {
+    std::vector<DrawSpriteCmd> sprites;
+    std::vector<DrawTileCmd>   tiles;
+    CameraData camera = cameraIn;
+    if (camera.viewportW == 0) camera.viewportW = width;
+    if (camera.viewportH == 0) camera.viewportH = height;
+
+    for (const RenderCmd* cmd : cmds) {
+        if (auto* s = std::get_if<DrawSpriteCmd>(cmd)) sprites.push_back(*s);
+        else if (auto* t = std::get_if<DrawTileCmd>(cmd)) tiles.push_back(*t);
     }
 
     std::stable_sort(sprites.begin(), sprites.end(),
@@ -478,9 +507,11 @@ void GLRenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb,
     // --- GL state setup ---
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, width, height);
-    glClearColor(clearColor.r / 255.f, clearColor.g / 255.f,
-                 clearColor.b / 255.f, clearColor.a / 255.f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    if (clearEnabled) {
+        glClearColor(clearColor.r / 255.f, clearColor.g / 255.f,
+                     clearColor.b / 255.f, clearColor.a / 255.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
 
     if (batchVerts_.empty()) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);

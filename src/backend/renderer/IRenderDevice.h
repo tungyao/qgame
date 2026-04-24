@@ -31,6 +31,17 @@ public:
     virtual void destroyShader(ShaderHandle) = 0;
 
     virtual void submitCommandBuffer(const CommandBuffer&) = 0;
+
+    // Pipeline-driven path：pass 的 camera/clear 由调用方显式传入，cmd 列表以指针形式给出，
+    // 避免 pipeline 为每个 pass 再录制一个 CommandBuffer。目标固定为 swapchain。
+    struct PassSubmitInfo {
+        CameraData  camera;
+        bool        clearEnabled = true;
+        core::Color clearColor   = core::Color::Black;
+    };
+    virtual void submitPass(const PassSubmitInfo& info,
+                            const std::vector<const RenderCmd*>& cmds) = 0;
+
     virtual void submitImGuiDrawData(const ImDrawData* drawData) = 0;
     virtual void present() = 0;
 

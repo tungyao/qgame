@@ -35,6 +35,7 @@ endif()
 
 add_library(backend STATIC
     renderer/CommandBuffer.cpp
+    renderer/RenderPipeline.cpp
     renderer/sdl_gpu/SDLGPURenderDevice.cpp
     renderer/opengl/GLRenderDevice.cpp
     audio/sdl_mixer/SDLMixerAudioDevice.cpp

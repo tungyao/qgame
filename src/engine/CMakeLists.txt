@@ -7,6 +7,7 @@ add_library(engine STATIC
     systems/AudioSystem.cpp
     systems/PhysicsSystem.cpp
     systems/InputSystem.cpp
+    systems/AnimatorSystem.cpp
     input/SDLInputProvider.cpp
     assets/AssetManager.cpp
     scene/SceneSerializer.cpp

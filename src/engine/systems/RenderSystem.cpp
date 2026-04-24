@@ -8,6 +8,11 @@
 namespace engine {
 
 void RenderSystem::init() {
+    // 默认两个 pass：World 先、UI 后；World 清屏，UI 叠加
+    pipeline_.addPass(RenderPass::World);
+    pipeline_.addPass(RenderPass::UI);
+    pipeline_.setPassClear(RenderPass::World, true, core::Color::Black);
+    pipeline_.setPassClear(RenderPass::UI,    false);
     core::logInfo("RenderSystem initialized");
 }
 
@@ -57,22 +62,10 @@ static int compareSprite(const void* a, const void* b) {
 }
 
 void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb, int viewportW, int viewportH) {
+    // 场景命令流中不再包含 Clear/SetCamera：
+    //   - swapchain 路径由 RenderPipeline 通过 PassState 统一管理
+    //   - editor 离屏路径需自行在 submit 前 cb.clear()/cb.setCamera()
     cb.begin();
-    cb.clear(core::Color::Black);
-
-    backend::CameraData worldCam{};
-    worldCam.viewportW = viewportW;
-    worldCam.viewportH = viewportH;
-
-    auto camView = ctx.world.view<Transform, Camera>();
-    for (auto [ent, tf, camera] : camView.each()) {
-        if (camera.type == CameraType::World && camera.primary) {
-            worldCam.x        = tf.x;
-            worldCam.y        = tf.y;
-            worldCam.zoom     = camera.zoom;
-            worldCam.rotation = camera.rotation;
-        }
-    }
 
     spriteCount = 0;
     auto* spritePtr = spriteBuffer;
@@ -108,36 +101,46 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         qsort(spriteBuffer, spriteCount, sizeof(backend::DrawSpriteCmd), compareSprite);
     }
 
-    RenderPass currentPass = RenderPass::World;
-    cb.beginPass(currentPass);
-    cb.setCamera(worldCam);
-
     for (int i = 0; i < spriteCount; ++i) {
         const auto& cmd = spriteBuffer[i];
-        if (cmd.pass != currentPass) {
-            cb.endPass(currentPass);
-            currentPass = cmd.pass;
-            cb.beginPass(currentPass);
-            if (currentPass == RenderPass::World) {
-                cb.setCamera(worldCam);
-            } else {
-                backend::CameraData screenCam{};
-                screenCam.viewportW = viewportW;
-                screenCam.viewportH = viewportH;
-                cb.setCamera(screenCam);
-            }
-        }
         cb.drawSprite(cmd);
     }
-    cb.endPass(currentPass);
 
     cb.end();
 }
 
+void RenderSystem::syncCamerasToPassStates(int viewportW, int viewportH) {
+    backend::CameraData worldCam{};
+    worldCam.viewportW = viewportW;
+    worldCam.viewportH = viewportH;
+
+    auto camView = ctx_.world.view<Transform, Camera>();
+    for (auto [ent, tf, camera] : camView.each()) {
+        if (camera.type == CameraType::World && camera.primary) {
+            worldCam.x        = tf.x;
+            worldCam.y        = tf.y;
+            worldCam.zoom     = camera.zoom;
+            worldCam.rotation = camera.rotation;
+        }
+    }
+
+    backend::CameraData screenCam{};
+    screenCam.viewportW = viewportW;
+    screenCam.viewportH = viewportH;
+
+    pipeline_.setPassCamera(RenderPass::World, worldCam);
+    pipeline_.setPassCamera(RenderPass::UI,    screenCam);
+}
+
 void RenderSystem::buildCommandBuffer() {
+    const int w = ctx_.window->width();
+    const int h = ctx_.window->height();
+
     backend::CommandBuffer& cb = ctx_.renderCommandBuffer();
-    buildSceneCommands(ctx_, cb, ctx_.window->width(), ctx_.window->height());
-    ctx_.renderDevice().submitCommandBuffer(cb);
+    buildSceneCommands(ctx_, cb, w, h);
+
+    syncCamerasToPassStates(w, h);
+    pipeline_.execute(cb, ctx_.renderDevice());
 }
 
 } // namespace engine

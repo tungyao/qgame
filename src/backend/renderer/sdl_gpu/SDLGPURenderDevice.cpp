@@ -261,6 +261,17 @@ void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     renderCommandBufferToTarget(gpuCmdBuf_, pipeline_, cb, swapchainTex_, swapW_, swapH_, true);
 }
 
+void SDLGPURenderDevice::submitPass(const PassSubmitInfo& info,
+                                     const std::vector<const RenderCmd*>& cmds) {
+    if (!gpuCmdBuf_ || !swapchainTex_) return;
+    CameraData cam = info.camera;
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(swapW_);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(swapH_);
+    renderCmdsToTarget(gpuCmdBuf_, pipeline_, cmds, cam,
+                       info.clearEnabled, info.clearColor,
+                       swapchainTex_, swapW_, swapH_);
+}
+
 SDL_GPUTexture* SDLGPURenderDevice::getSDLTexture(TextureHandle handle) const {
     const TextureEntry* entry = textures_.valid(handle) ? &textures_.get(handle) : nullptr;
     return entry ? entry->gpuTex : nullptr;
@@ -275,22 +286,48 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBu
         core::logError("renderCommandBufferToTarget: invalid params cmdBuf=%p target=%p pipeline=%p", cmdBuf, target, pipeline);
         return;
     }
-
-    std::vector<DrawSpriteCmd> sprites;
-    std::vector<DrawTileCmd> tiles;
+    // 兼容 editor 路径：从命令流中提取 ClearCmd/SetCameraCmd，转交给指针版本
+    std::vector<const RenderCmd*> cmdPtrs;
+    cmdPtrs.reserve(cb.commands().size());
     core::Color clearColor = core::Color::Black;
     CameraData camera{};
     camera.viewportW = static_cast<int>(targetWidth);
     camera.viewportH = static_cast<int>(targetHeight);
-
     for (const auto& cmd : cb.commands()) {
-        std::visit([&](const auto& c) {
-            using T = std::decay_t<decltype(c)>;
-            if constexpr (std::is_same_v<T, DrawSpriteCmd>)  sprites.push_back(c);
-            else if constexpr (std::is_same_v<T, DrawTileCmd>)  tiles.push_back(c);
-            else if constexpr (std::is_same_v<T, ClearCmd>)     clearColor = c.color;
-            else if constexpr (std::is_same_v<T, SetCameraCmd>) camera = c.camera;
-        }, cmd);
+        if (std::holds_alternative<ClearCmd>(cmd)) {
+            clearColor = std::get<ClearCmd>(cmd).color;
+        } else if (std::holds_alternative<SetCameraCmd>(cmd)) {
+            camera = std::get<SetCameraCmd>(cmd).camera;
+        } else {
+            cmdPtrs.push_back(&cmd);
+        }
+    }
+    renderCmdsToTarget(cmdBuf, pipeline, cmdPtrs, camera, clearTarget, clearColor,
+                       target, targetWidth, targetHeight);
+}
+
+void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
+                                             SDL_GPUGraphicsPipeline* pipeline,
+                                             const std::vector<const RenderCmd*>& cmds,
+                                             const CameraData& cameraIn,
+                                             bool clearEnabled,
+                                             core::Color clearColor,
+                                             SDL_GPUTexture* target,
+                                             uint32_t targetWidth, uint32_t targetHeight) {
+    if (!cmdBuf || !target || !pipeline) {
+        core::logError("renderCmdsToTarget: invalid params cmdBuf=%p target=%p pipeline=%p", cmdBuf, target, pipeline);
+        return;
+    }
+
+    std::vector<DrawSpriteCmd> sprites;
+    std::vector<DrawTileCmd> tiles;
+    CameraData camera = cameraIn;
+    if (camera.viewportW == 0) camera.viewportW = static_cast<int>(targetWidth);
+    if (camera.viewportH == 0) camera.viewportH = static_cast<int>(targetHeight);
+
+    for (const RenderCmd* cmd : cmds) {
+        if (auto* s = std::get_if<DrawSpriteCmd>(cmd)) sprites.push_back(*s);
+        else if (auto* t = std::get_if<DrawTileCmd>(cmd)) tiles.push_back(*t);
     }
 
     std::stable_sort(sprites.begin(), sprites.end(),
@@ -341,7 +378,7 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBu
 
     SDL_GPUColorTargetInfo colorTarget{};
     colorTarget.texture = target;
-    colorTarget.load_op = clearTarget ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+    colorTarget.load_op = clearEnabled ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     colorTarget.store_op = SDL_GPU_STOREOP_STORE;
     colorTarget.clear_color = {
         clearColor.r / 255.0f,

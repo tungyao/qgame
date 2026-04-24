@@ -29,6 +29,7 @@ public:
     void          destroyShader(ShaderHandle)       override;
 
     void submitCommandBuffer(const CommandBuffer&) override;
+    void submitPass(const PassSubmitInfo&, const std::vector<const RenderCmd*>&) override;
     void submitImGuiDrawData(const ImDrawData* drawData) override;
     void present()                                 override;
 
@@ -124,6 +125,13 @@ private:
     TextureHandle             batchTex_;
     int                       batchLayer_ = 0;
     void renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBuf, SDL_GPUGraphicsPipeline* pipeline, const CommandBuffer& cb, SDL_GPUTexture* target, uint32_t width, uint32_t height, bool clearTarget);
+    void renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf, SDL_GPUGraphicsPipeline* pipeline,
+                            const std::vector<const RenderCmd*>& cmds,
+                            const CameraData& camera,
+                            bool clearEnabled,
+                            core::Color clearColor,
+                            SDL_GPUTexture* target,
+                            uint32_t width, uint32_t height);
     TextureHandle createRenderTargetTexture(int width, int height);
 };
 

@@ -29,7 +29,8 @@
       "Bash(./tests/tests_input)",
       "Bash(./tests/tests_physics)",
       "Bash(grep -E \"\\\\.\\(h|cpp\\)$\")",
-      "Bash(awk '/^void SDLGPURenderDevice::|^TextureHandle SDLGPURenderDevice::|^SDL_GPU/{print NR\": \"$0}' /root/server/qgame/src/backend/renderer/sdl_gpu/SDLGPURenderDevice.cpp)"
+      "Bash(awk '/^void SDLGPURenderDevice::|^TextureHandle SDLGPURenderDevice::|^SDL_GPU/{print NR\": \"$0}' /root/server/qgame/src/backend/renderer/sdl_gpu/SDLGPURenderDevice.cpp)",
+      "Bash(grep -v \"RenderPipeline\\\\.\\\\\\(cpp\\\\|h\\\\\\)$\")"
     ]
   }
 }

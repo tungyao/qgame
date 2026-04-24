@@ -27,6 +27,7 @@ public:
 
     // IRenderDevice — 提交 & 帧控制
     void submitCommandBuffer(const CommandBuffer&) override;
+    void submitPass(const PassSubmitInfo&, const std::vector<const RenderCmd*>&) override;
     void submitImGuiDrawData(const ImDrawData*)    override;
     void present()                                 override;
     void initImGui()                               override;
@@ -74,6 +75,12 @@ private:
     void renderCommandBufferToTarget(const CommandBuffer& cb,
                                      unsigned int fbo,
                                      int width, int height);
+    void renderCmdsToTarget(const std::vector<const RenderCmd*>& cmds,
+                            const CameraData& camera,
+                            bool clearEnabled,
+                            core::Color clearColor,
+                            unsigned int fbo,
+                            int width, int height);
     void buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds,
                              std::vector<BatchSegment>& batches);
     void buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
