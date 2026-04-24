@@ -1,17 +1,23 @@
 #include "GameAPI.h"
 #include "../runtime/EngineContext.h"
 #include "../scene/SceneSerializer.h"
+#include "../components/RenderComponents.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../backend/audio/AudioCommandQueue.h"
 #include "../../backend/audio/IAudioDevice.h"
 #include <SDL3/SDL.h>
 #include <cstring>
+#include <cstdio>
 
 
 namespace engine {
 
 entt::entity GameAPI::spawnEntity() {
-    return ctx_.world.create();
+    entt::entity e = ctx_.world.create();
+    char buf[EntityID::MAX_LEN];
+    std::snprintf(buf, sizeof(buf), "entity_%08x", static_cast<uint32_t>(e));
+    ctx_.world.emplace<EntityID>(e, buf);
+    return e;
 }
 
 void GameAPI::destroyEntity(entt::entity e) {

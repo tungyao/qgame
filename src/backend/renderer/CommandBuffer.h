@@ -41,6 +41,7 @@ struct DrawSpriteCmd {
     float                x, y;
     float                rotation = 0.f;
     float                scaleX   = 1.f, scaleY = 1.f;
+    float                pivotX   = 0.5f, pivotY = 0.5f;
     core::Rect           srcRect;
     int                  layer = 0;
     int                  sortKey = 0;

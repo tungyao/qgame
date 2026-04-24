@@ -7,6 +7,23 @@
 
 namespace engine {
 
+struct EntityID {
+    static constexpr int MAX_LEN = 64;
+    std::array<char, MAX_LEN> buf{};
+
+    EntityID() { buf[0] = '\0'; }
+    explicit EntityID(const char* s) {
+        buf[0] = '\0';
+        if (s) {
+            size_t i = 0;
+            while (s[i] && i < MAX_LEN - 1) { buf[i] = s[i]; ++i; }
+            buf[i] = '\0';
+        }
+    }
+    const char* c_str() const { return buf.data(); }
+    bool valid() const { return buf[0] != '\0'; }
+};
+
 // Entity 显示名称（编辑器 Hierarchy 用）
 struct Name {
     static constexpr int MAX_LEN = 64;

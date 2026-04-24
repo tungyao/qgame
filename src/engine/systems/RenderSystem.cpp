@@ -31,6 +31,8 @@ static void collectSprites(backend::DrawSpriteCmd*& out, Transform& tf, Sprite& 
     out->rotation = tf.rotation;
     out->scaleX   = tf.scaleX;
     out->scaleY   = tf.scaleY;
+    out->pivotX   = spr.pivotX;
+    out->pivotY   = spr.pivotY;
     out->srcRect  = spr.srcRect;
     out->layer    = spr.layer;
     out->sortKey  = spr.sortOrder;

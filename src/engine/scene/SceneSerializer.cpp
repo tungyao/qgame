@@ -9,12 +9,20 @@
 #include <fstream>
 #include <vector>
 #include <cstdint>
+#include <unordered_map>
 
 using json = nlohmann::json;
 
 namespace engine {
 
 // ── JSON 序列化辅助（组件 to/from json）────────────────────────────────────────
+
+static json entityIdToJson(const EntityID& id) {
+    return {{"id", id.c_str()}};
+}
+static EntityID entityIdFromJson(const json& j) {
+    return EntityID{j.value("id", "").c_str()};
+}
 
 static json nameToJson(const Name& n) {
     return {{"s", n.c_str()}};
@@ -140,8 +148,9 @@ bool SceneSerializer::saveScene(entt::registry& reg,
 
     for (auto e : reg.storage<entt::entity>()) {
         json je;
-        je["id"] = static_cast<uint32_t>(e);
 
+        if (auto* c = reg.try_get<EntityID>(e))
+            je["EntityID"] = entityIdToJson(*c);
         if (auto* c = reg.try_get<Name>(e))
             je["Name"] = nameToJson(*c);
         if (auto* c = reg.try_get<Transform>(e))
@@ -189,8 +198,19 @@ bool SceneSerializer::loadScene(entt::registry& reg,
 
     reg.clear();
 
+    std::unordered_map<std::string, entt::entity> idToEntity;
+
     for (const auto& je : root["entities"]) {
+        EntityID eid;
+        if (je.contains("EntityID"))
+            eid = entityIdFromJson(je["EntityID"]);
+
         entt::entity e = reg.create();
+
+        if (eid.valid()) {
+            idToEntity[eid.c_str()] = e;
+            reg.emplace<EntityID>(e, eid);
+        }
 
         if (je.contains("Name"))
             reg.emplace<Name>(e, nameFromJson(je["Name"]));
