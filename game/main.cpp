@@ -129,8 +129,10 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     // ── 可控精灵（Month 5：WASD 移动，Escape 退出）────────────────────────────
     entt::entity player;
+    entt::entity statusText;
     AnimationHandle playerAnim;
     float animTime = 0.f;
+    bool wasMoving = false;
     // 程序化创建动画帧数据（4帧，每帧0.25秒）
     struct AnimFrame { core::Rect rect; float duration; };
     std::vector<AnimFrame> animFrames = {
@@ -139,6 +141,33 @@ int main(int /*argc*/, char* /*argv*/[]) {
         {{0.f, 32.f, 32.f, 32.f}, 0.25f},
         {{32.f, 32.f, 32.f, 32.f}, 0.25f},
     };
+
+    // 生成状态文字纹理（Moving/Stopped）
+    auto genTextTexture = [&](const std::string& text, core::Color color) -> TextureHandle {
+        int charW = 8, charH = 16;
+        int texW = static_cast<int>(text.length()) * charW;
+        int texH = charH;
+        std::vector<uint8_t> pixels(texW * texH * 4, 0);
+        // 简单位图：用方块表示字符（实际项目应用freetype）
+        for (size_t i = 0; i < text.length(); ++i) {
+            int cx = static_cast<int>(i) * charW;
+            // 画一个简单的"方块字符"
+            for (int py = 2; py < charH-2; ++py) {
+                for (int px = cx+1; px < cx+charW-1; ++px) {
+                    int idx = (py * texW + px) * 4;
+                    pixels[idx]   = color.r;
+                    pixels[idx+1] = color.g;
+                    pixels[idx+2] = color.b;
+                    pixels[idx+3] = color.a;
+                }
+            }
+        }
+        return api.createTextureFromMemory(pixels.data(), texW, texH);
+    };
+
+    TextureHandle movingTex = genTextTexture("Moving", {100, 255, 100, 255});
+    TextureHandle stoppedTex = genTextTexture("Stopped", {255, 100, 100, 255});
+
     {
         player = api.spawnEntity();
         engine::Transform tf{}; tf.x = 640.f; tf.y = 300.f;
@@ -150,6 +179,19 @@ int main(int /*argc*/, char* /*argv*/[]) {
         api.addComponent(player, sp);
     }
 
+    // 状态文字实体
+    {
+        statusText = api.spawnEntity();
+        engine::Transform tf{}; tf.x = 640.f; tf.y = 250.f;
+        api.addComponent(statusText, tf);
+        engine::Sprite sp{};
+        sp.texture = stoppedTex;
+        sp.srcRect = {0.f, 0.f, 56.f, 16.f}; // 7字符 * 8px
+        sp.layer = 10;
+        sp.ySort = false;
+        api.addComponent(statusText, sp);
+    }
+
     // 手动主循环：tick() 完成后 inputState 已更新，直接修改 Transform
     constexpr float kSpeed = 200.f;
     constexpr float kAnimTotalDuration = 1.0f; // 4帧 * 0.25秒
@@ -157,31 +199,48 @@ int main(int /*argc*/, char* /*argv*/[]) {
         float dt = ctx.scheduler.deltaTime();
 
         auto& tf = api.getComponent<engine::Transform>(player);
-        if (api.isKeyDown(SDLK_W) || api.isKeyDown(SDLK_UP))   tf.y -= kSpeed * dt;
-        if (api.isKeyDown(SDLK_S) || api.isKeyDown(SDLK_DOWN))  tf.y += kSpeed * dt;
-        if (api.isKeyDown(SDLK_A) || api.isKeyDown(SDLK_LEFT))  tf.x -= kSpeed * dt;
-        if (api.isKeyDown(SDLK_D) || api.isKeyDown(SDLK_RIGHT)) tf.x += kSpeed * dt;
 
-        // 手动更新动画帧
-        animTime += dt;
-        if (animTime >= kAnimTotalDuration) {
-            animTime = std::fmod(animTime, kAnimTotalDuration);
-        }
-        // 计算当前帧
-        float t = animTime;
-        size_t frameIdx = 0;
-        for (size_t i = 0; i < animFrames.size(); ++i) {
-            if (t < animFrames[i].duration) { frameIdx = i; break; }
-            t -= animFrames[i].duration;
-        }
-        // 更新 Sprite 的 srcRect 和 tint（用不同颜色区分帧）
+        // 检测是否在移动
+        bool isMoving = false;
+        if (api.isKeyDown(SDLK_W) || api.isKeyDown(SDLK_UP))   { tf.y -= kSpeed * dt; isMoving = true; }
+        if (api.isKeyDown(SDLK_S) || api.isKeyDown(SDLK_DOWN))  { tf.y += kSpeed * dt; isMoving = true; }
+        if (api.isKeyDown(SDLK_A) || api.isKeyDown(SDLK_LEFT))  { tf.x -= kSpeed * dt; isMoving = true; }
+        if (api.isKeyDown(SDLK_D) || api.isKeyDown(SDLK_RIGHT)) { tf.x += kSpeed * dt; isMoving = true; }
+
+        // 移动时播放动画，停止时立即停止
         auto& spr = api.getComponent<engine::Sprite>(player);
-        spr.srcRect = animFrames[frameIdx].rect;
-        // 每帧使用不同颜色 tint
-        if (frameIdx == 0) spr.tint = {255, 255, 100, 255}; // 黄
-        else if (frameIdx == 1) spr.tint = {255, 100, 100, 255}; // 红
-        else if (frameIdx == 2) spr.tint = {100, 255, 100, 255}; // 绿
-        else spr.tint = {100, 100, 255, 255}; // 蓝
+        if (isMoving) {
+            animTime += dt;
+            if (animTime >= kAnimTotalDuration) {
+                animTime = std::fmod(animTime, kAnimTotalDuration);
+            }
+            float t = animTime;
+            size_t frameIdx = 0;
+            for (size_t i = 0; i < animFrames.size(); ++i) {
+                if (t < animFrames[i].duration) { frameIdx = i; break; }
+                t -= animFrames[i].duration;
+            }
+            spr.srcRect = animFrames[frameIdx].rect;
+            spr.tint = {255, 255, 100, 255}; // 移动时黄色
+        } else {
+            animTime = 0.f; // 停止时重置时间，停在首帧
+            spr.srcRect = animFrames[0].rect;
+            spr.tint = {150, 150, 150, 255}; // 停止时灰色
+        }
+
+        // 更新状态文字
+        auto& statusSpr = api.getComponent<engine::Sprite>(statusText);
+        if (isMoving) {
+            statusSpr.texture = movingTex;
+        } else {
+            statusSpr.texture = stoppedTex;
+        }
+
+        // 状态变化时打印（用于调试）
+        if (isMoving != wasMoving) {
+            puts(isMoving ? "Player: Moving" : "Player: Stopped");
+            wasMoving = isMoving;
+        }
 
         if (api.isKeyJustPressed(SDLK_ESCAPE)) { api.quit(); break; }
     }
