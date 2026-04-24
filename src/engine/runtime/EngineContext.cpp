@@ -18,6 +18,7 @@
 #include "../systems/AudioSystem.h"
 #include "../systems/PhysicsSystem.h"
 #include "../systems/InputSystem.h"
+#include "../systems/AnimatorSystem.h"
 #include "../input/SDLInputProvider.h"
 #include "../../backend/audio/sdl_mixer/SDLMixerAudioDevice.h"
 
@@ -67,6 +68,7 @@ void EngineContext::init(const EngineConfig& cfg) {
     systems.registerSystem<RenderSystem>(*this);
     systems.registerSystem<AudioSystem>(*this);
     systems.registerSystem<PhysicsSystem>(world, dispatcher);
+    systems.registerSystem<AnimatorSystem>(*this);
 
     systems.initAll();
 
