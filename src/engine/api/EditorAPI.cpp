@@ -16,7 +16,20 @@ TextureHandle EditorAPI::renderSceneToTexture(int w, int h) {
         return {};
     }
 
-    return ctx_.renderDevice().renderToTexture(ctx_.renderCommandBuffer(), w, h);
+    RenderSystem::buildSceneCommands(ctx_, ctx_.renderCommandBuffer(), w, h);
+    return ctx_.renderDevice().renderToTextureOffscreen(ctx_.renderCommandBuffer(), w, h);
+}
+
+void* EditorAPI::getRawTexture(TextureHandle handle) const {
+    return ctx_.renderDevice().getRawTexture(handle);
+}
+
+void EditorAPI::initImGui() {
+    ctx_.renderDevice().initImGui();
+}
+
+void EditorAPI::shutdownImGui() {
+    ctx_.renderDevice().shutdownImGui();
 }
 
 void EditorAPI::setEditorCamera(float x, float y, float zoom) {

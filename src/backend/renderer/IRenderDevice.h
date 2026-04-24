@@ -34,9 +34,14 @@ public:
     virtual void submitImGuiDrawData(const ImDrawData* drawData) = 0;
     virtual void present() = 0;
 
-    virtual TextureHandle renderToTexture(const CommandBuffer&, int w, int h) = 0;
+    virtual void initImGui()     = 0;
+    virtual void shutdownImGui() = 0;
 
+    virtual TextureHandle renderToTexture(const CommandBuffer&, int w, int h) = 0;
     virtual TextureHandle renderToTextureOffscreen(const CommandBuffer&, int w, int h) = 0;
+
+    // 返回底层 GPU 纹理指针（供 ImGui::Image 使用），editor 层无需感知具体后端
+    virtual void* getRawTexture(TextureHandle) const = 0;
 };
 
 } // namespace backend

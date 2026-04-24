@@ -32,8 +32,12 @@ public:
     void submitImGuiDrawData(const ImDrawData* drawData) override;
     void present()                                 override;
 
+    void initImGui()     override;
+    void shutdownImGui() override;
+
     TextureHandle renderToTexture(const CommandBuffer&, int w, int h) override;
     TextureHandle renderToTextureOffscreen(const CommandBuffer&, int w, int h) override;
+    void*         getRawTexture(TextureHandle handle) const override;
     SDL_GPUTexture* getSDLTexture(TextureHandle handle) const;
 
     // 供 RenderSystem 查询设备，上传纹理用

@@ -4,9 +4,10 @@
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
+#include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlgpu3.h>
+#include <imgui_impl_opengl3.h>
 
-#include <backend/renderer/sdl_gpu/SDLGPURenderDevice.h>
 #include <engine/components/RenderComponents.h>
 #include <core/Logger.h>
 
@@ -133,6 +134,7 @@ void EditorApplication::run() {
     config.windowHeight = 900;
     config.resizable = true;
 
+    renderBackend_ = config.renderBackend;
     ctx_.init(config);
     ctx_.renderToSwapchain = false;  // Editor 使用离屏渲染，不直接渲染到 swapchain
     registerComponentEditors();
@@ -229,20 +231,7 @@ void EditorApplication::setupImGui() {
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
 
-    auto* renderDevice = dynamic_cast<backend::SDLGPURenderDevice*>(&ctx_.renderDevice());
-    IM_ASSERT(renderDevice != nullptr);
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.DisplaySize = ImVec2(static_cast<float>(ctx_.window->width()), static_cast<float>(ctx_.window->height()));
-
-    ImGui_ImplSDLGPU3_InitInfo initInfo{};
-    initInfo.Device = renderDevice->gpuDevice();
-    initInfo.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(
-        renderDevice->gpuDevice(),
-        static_cast<SDL_Window*>(ctx_.window->sdlWindow())
-    );
-    ImGui_ImplSDLGPU3_Init(&initInfo);
+    editor_.initImGui();
 
     imguiReady_ = true;
 }
@@ -251,7 +240,7 @@ void EditorApplication::shutdownImGui() {
     if (!imguiReady_) {
         return;
     }
-    ImGui_ImplSDLGPU3_Shutdown();
+    editor_.shutdownImGui();
     ImGui::DestroyContext();
     imguiReady_ = false;
 }
@@ -264,7 +253,12 @@ void EditorApplication::beginImGuiFrame() {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(ctx_.window->width()), static_cast<float>(ctx_.window->height()));
     io.DeltaTime = ctx_.deltaTime > 0.0f ? ctx_.deltaTime : (1.0f / 60.0f);
-    ImGui_ImplSDLGPU3_NewFrame();
+    if (renderBackend_ == engine::RenderBackend::OpenGL) {
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+    } else {
+        ImGui_ImplSDLGPU3_NewFrame();
+    }
     syncInputToImGui();
     ImGui::NewFrame();
 }
@@ -308,14 +302,12 @@ void EditorApplication::drawViewport() {
     if (viewportSize.x > 0.0f && viewportSize.y > 0.0f) {
         editor_.setEditorCamera(editorCameraX_, editorCameraY_, editorCameraZoom_);
 
-        const TextureHandle preview = viewportRenderer_.render(
+        const TextureHandle preview = editor_.renderSceneToTexture(
             static_cast<int>(viewportSize.x),
             static_cast<int>(viewportSize.y)
         );
 
-        SDL_GPUTexture* previewTexture = viewportRenderer_.getTexture(preview);
-
-        core::logInfo("drawViewport: previewTexture=%p", previewTexture);
+        void* previewTexture = editor_.getRawTexture(preview);
 
         if (previewTexture != nullptr) {
             ImGui::Image(reinterpret_cast<ImTextureID>(previewTexture), viewportSize);

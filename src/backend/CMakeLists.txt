@@ -36,6 +36,7 @@ endif()
 add_library(backend STATIC
     renderer/CommandBuffer.cpp
     renderer/sdl_gpu/SDLGPURenderDevice.cpp
+    renderer/opengl/GLRenderDevice.cpp
     audio/sdl_mixer/SDLMixerAudioDevice.cpp
 )
 
@@ -61,6 +62,14 @@ target_include_directories(backend
     PRIVATE "${imgui_SOURCE_DIR}"
     PRIVATE "${imgui_SOURCE_DIR}/backends"
 )
+
+# OpenGL 链接（跨平台）
+find_package(OpenGL QUIET)
+if(OpenGL_FOUND)
+    target_link_libraries(backend PRIVATE OpenGL::GL)
+elseif(UNIX)
+    target_link_libraries(backend PRIVATE GL)
+endif()
 
 target_link_libraries(backend
     PRIVATE core

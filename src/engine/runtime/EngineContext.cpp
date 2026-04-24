@@ -5,6 +5,7 @@
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/sdl_gpu/SDLGPURenderDevice.h"
+#include "../../backend/renderer/opengl/GLRenderDevice.h"
 #include "../../backend/audio/IAudioDevice.h"
 #include "../../backend/audio/AudioCommandQueue.h"
 #include "../../backend/audio/AudioThread.h"
@@ -30,21 +31,26 @@ void EngineContext::init(const EngineConfig& cfg) {
 
     // 窗口
     platform::WindowConfig wcfg;
-    wcfg.title     = cfg.windowTitle;
-    wcfg.width     = cfg.windowWidth;
-    wcfg.height    = cfg.windowHeight;
-    wcfg.vsync     = cfg.vsync;
-    wcfg.resizable = cfg.resizable;
+    wcfg.title      = cfg.windowTitle;
+    wcfg.width      = cfg.windowWidth;
+    wcfg.height     = cfg.windowHeight;
+    wcfg.vsync      = cfg.vsync;
+    wcfg.resizable  = cfg.resizable;
+    wcfg.openglMode = (cfg.renderBackend == RenderBackend::OpenGL);
     window = std::make_unique<platform::Window>(wcfg);
 
     // Command buffer
     renderCmdBuf_ = std::make_unique<backend::CommandBuffer>();
 
-    // SDL3 GPU 渲染设备（需要 SDL_Window* 句柄）
-    auto sdlGpu = std::make_unique<backend::SDLGPURenderDevice>(
-        static_cast<SDL_Window*>(window->sdlWindow())
-    );
-    renderDevice_ = std::move(sdlGpu);
+    // 渲染后端选择
+    SDL_Window* sdlWin = static_cast<SDL_Window*>(window->sdlWindow());
+    if (cfg.renderBackend == RenderBackend::OpenGL) {
+        core::logInfo("Render backend: OpenGL 3.3");
+        renderDevice_ = std::make_unique<backend::GLRenderDevice>(sdlWin);
+    } else {
+        core::logInfo("Render backend: SDL_GPU (Vulkan/Metal/D3D12)");
+        renderDevice_ = std::make_unique<backend::SDLGPURenderDevice>(sdlWin);
+    }
     renderDevice_->init();
 
     // Audio device + command queue

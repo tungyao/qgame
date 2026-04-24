@@ -1,7 +1,6 @@
 add_executable(editor
     main.cpp
     EditorApplication.cpp
-    EditorViewportRenderer.cpp
     ComponentReflect.cpp
     ComponentEditors.cpp
     Inspector.cpp

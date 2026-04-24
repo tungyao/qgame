@@ -20,19 +20,15 @@ void RenderSystem::update(float /*dt*/) {
 
 void RenderSystem::shutdown() {}
 
-void RenderSystem::buildCommandBuffer() {
-    backend::CommandBuffer& cb = ctx_.renderCommandBuffer();
+void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb, int viewportW, int viewportH) {
     cb.begin();
-
-    // Clear
     cb.clear(core::Color::Black);
 
-    // ── 摄像机 ───────────────────────────────────────────────────────────────
     backend::CameraData cam{};
-    cam.viewportW = ctx_.window->width();
-    cam.viewportH = ctx_.window->height();
+    cam.viewportW = viewportW;
+    cam.viewportH = viewportH;
 
-    auto camView = ctx_.world.view<Transform, Camera>();
+    auto camView = ctx.world.view<Transform, Camera>();
     for (auto [ent, tf, camera] : camView.each()) {
         if (!camera.primary) continue;
         cam.x    = tf.x;
@@ -42,8 +38,7 @@ void RenderSystem::buildCommandBuffer() {
     }
     cb.setCamera(cam);
 
-    // ── TileMap（先画，在 Sprite 下方）────────────────────────────────────────
-    auto tileView = ctx_.world.view<Transform, TileMap>();
+    auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
         for (int layer = 0; layer < TileMap::MAX_LAYERS; ++layer) {
             for (int y = 0; y < tmap.height; ++y) {
@@ -63,8 +58,7 @@ void RenderSystem::buildCommandBuffer() {
         }
     }
 
-    // ── Sprite ───────────────────────────────────────────────────────────────
-    auto spriteView = ctx_.world.view<Transform, Sprite>();
+    auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
         backend::DrawSpriteCmd cmd{};
         cmd.texture  = sprite.texture;
@@ -80,8 +74,11 @@ void RenderSystem::buildCommandBuffer() {
     }
 
     cb.end();
+}
 
-    // 提交到 GPU
+void RenderSystem::buildCommandBuffer() {
+    backend::CommandBuffer& cb = ctx_.renderCommandBuffer();
+    buildSceneCommands(ctx_, cb, ctx_.window->width(), ctx_.window->height());
     ctx_.renderDevice().submitCommandBuffer(cb);
 }
 

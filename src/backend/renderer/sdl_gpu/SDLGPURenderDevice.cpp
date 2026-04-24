@@ -266,6 +266,10 @@ SDL_GPUTexture* SDLGPURenderDevice::getSDLTexture(TextureHandle handle) const {
     return entry ? entry->gpuTex : nullptr;
 }
 
+void* SDLGPURenderDevice::getRawTexture(TextureHandle handle) const {
+    return getSDLTexture(handle);
+}
+
 void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBuf, SDL_GPUGraphicsPipeline* pipeline, const CommandBuffer& cb, SDL_GPUTexture* target, uint32_t targetWidth, uint32_t targetHeight, bool clearTarget) {
     if (!cmdBuf || !target || !pipeline) {
         core::logError("renderCommandBufferToTarget: invalid params cmdBuf=%p target=%p pipeline=%p", cmdBuf, target, pipeline);
@@ -285,8 +289,6 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBu
         }, cmd);
     }
 
-    core::logInfo("renderCommandBufferToTarget: sprites=%zu tiles=%zu", sprites.size(), tiles.size());
-
     std::stable_sort(sprites.begin(), sprites.end(),
         [](const DrawSpriteCmd& a, const DrawSpriteCmd& b) { return a.layer < b.layer; });
 
@@ -296,9 +298,6 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBu
     std::vector<BatchSegment> tileBatches;
     buildSpriteGeometry(sprites, spriteBatches);
     buildTileGeometry(tiles, tileBatches);
-
-    core::logInfo("renderCommandBufferToTarget: verts=%zu idx=%zu spriteBatches=%zu tileBatches=%zu", 
-                  batchVerts_.size(), batchIdx_.size(), spriteBatches.size(), tileBatches.size());
 
     if (!batchVerts_.empty()) {
         const size_t vSize = batchVerts_.size() * sizeof(SpriteVertex);
@@ -393,6 +392,24 @@ void SDLGPURenderDevice::present() {
     swapchainTex_ = nullptr;
 }
 
+void SDLGPURenderDevice::initImGui() {
+    int w = 0, h = 0;
+    SDL_GetWindowSize(window_, &w, &h);
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.DisplaySize = ImVec2(static_cast<float>(w), static_cast<float>(h));
+
+    ImGui_ImplSDLGPU3_InitInfo initInfo{};
+    initInfo.Device = device_;
+    initInfo.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+    ImGui_ImplSDLGPU3_Init(&initInfo);
+}
+
+void SDLGPURenderDevice::shutdownImGui() {
+    ImGui_ImplSDLGPU3_Shutdown();
+}
+
 TextureHandle SDLGPURenderDevice::renderToTexture(const CommandBuffer& cb, int width, int height) {
     if (!gpuCmdBuf_ || width <= 0 || height <= 0) {
         return {};
@@ -438,7 +455,7 @@ TextureHandle SDLGPURenderDevice::renderToTextureOffscreen(const CommandBuffer& 
         offscreenRenderTarget_ = createRenderTargetTexture(width, height);
         offscreenRenderTargetWidth_ = width;
         offscreenRenderTargetHeight_ = height;
-        core::logInfo("renderToTextureOffscreen: created render target %dx%d handle=%u", width, height, offscreenRenderTarget_.index);
+        core::logInfo("renderToTextureOffscreen: resized render target %dx%d", width, height);
     }
 
     TextureEntry* entry = textures_.tryGet(offscreenRenderTarget_);
@@ -454,8 +471,11 @@ TextureHandle SDLGPURenderDevice::renderToTextureOffscreen(const CommandBuffer& 
     }
 
     renderCommandBufferToTarget(cmdBuf, offscreenPipeline_, cb, entry->gpuTex, static_cast<uint32_t>(width), static_cast<uint32_t>(height), true);
-    SDL_SubmitGPUCommandBuffer(cmdBuf);
-    SDL_WaitForGPUIdle(device_);
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmdBuf);
+    if (fence) {
+        SDL_WaitForGPUFences(device_, true, &fence, 1);
+        SDL_ReleaseGPUFence(device_, fence);
+    }
 
     return offscreenRenderTarget_;
 }

@@ -17,7 +17,10 @@ public:
         : ctx_(ctx) {}
 
     TextureHandle renderSceneToTexture(int w, int h);
+    void*         getRawTexture(TextureHandle handle) const;
     void setEditorCamera(float x, float y, float zoom);
+    void initImGui();
+    void shutdownImGui();
 
     entt::entity createTransientEntity();
     void destroyTransientEntities();

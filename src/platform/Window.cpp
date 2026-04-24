@@ -23,7 +23,8 @@ Window::Window(const WindowConfig& cfg) {
     }
 
     SDL_WindowFlags flags = 0;
-    if (cfg.resizable) flags |= SDL_WINDOW_RESIZABLE;
+    if (cfg.resizable)  flags |= SDL_WINDOW_RESIZABLE;
+    if (cfg.openglMode) flags |= SDL_WINDOW_OPENGL;
 
     impl_ = new Impl{};
     impl_->width  = cfg.width;
