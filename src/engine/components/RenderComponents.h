@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <vector>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../../core/math/Rect.h"
@@ -6,21 +7,29 @@
 
 namespace engine {
 
+// Entity 显示名称（编辑器 Hierarchy 用）
+struct Name {
+    static constexpr int MAX_LEN = 64;
+    std::array<char, MAX_LEN> buf{};
+
+    Name() { buf[0] = '\0'; }
+    explicit Name(const char* s) {
+        buf[0] = '\0';
+        if (s) {
+            size_t i = 0;
+            while (s[i] && i < MAX_LEN - 1) { buf[i] = s[i]; ++i; }
+            buf[i] = '\0';
+        }
+    }
+    const char* c_str() const { return buf.data(); }
+};
+
 struct Transform {
     float x        = 0.f;
     float y        = 0.f;
     float rotation = 0.f;   // 弧度
     float scaleX   = 1.f;
     float scaleY   = 1.f;
-};
-
-struct Sprite {
-    TextureHandle texture;
-    core::Rect    srcRect;   // spritesheet 中的 UV 区域（像素坐标）
-    int           layer = 0;
-    core::Color   tint  = core::Color::White;
-    float         pivotX = 0.5f;  // 锚点，相对于 sprite 宽高的比例
-    float         pivotY = 0.5f;
 };
 
 struct TileMap {
@@ -43,10 +52,43 @@ struct TileMap {
     }
 };
 
-// 摄像机（每个场景至多一个有效摄像机）
-struct Camera {
-    float zoom    = 1.f;
-    bool  primary = true;  // 标记主摄像机
+enum class RenderPass : int {
+    World = 0,   // 世界渲染（3D/2D场景）
+    UI     = 1,  // UI渲染（跟随世界变换）
+    Screen = 2   // 屏幕UI（固定屏幕位置）
 };
+
+enum class CameraType : int {
+    World = 0,   // 主世界摄像机
+    UI     = 1,  // UI摄像机
+    Screen = 2   // 屏幕摄像机
+};
+
+struct Camera {
+    float       zoom       = 1.f;
+    float       rotation   = 0.f;   // 弧度
+    bool        primary    = true;
+    RenderPass  renderPass = RenderPass::World;
+    CameraType  type       = CameraType::World;
+};
+
+struct Sprite {
+    TextureHandle texture;
+    core::Rect    srcRect;
+    int           layer = 0;
+    int           sortOrder = 0;
+    bool          ySort = false;
+    core::Color   tint  = core::Color::White;
+    float         pivotX = 0.5f;
+    float         pivotY = 0.5f;
+    RenderPass    pass   = RenderPass::World;
+};
+
+inline float getSortKey(const Transform& tf, const Sprite& spr) {
+    if (spr.ySort) {
+        return tf.y + spr.sortOrder * 0.001f;
+    }
+    return spr.sortOrder + tf.y * 0.001f;
+}
 
 } // namespace engine

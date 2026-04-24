@@ -39,6 +39,7 @@ private:
     float editorCameraY_ = 0.0f;
     float editorCameraZoom_ = 1.0f;
     bool imguiReady_ = false;
+    char scenePathBuf_[256] = "scene.json";
 };
 
 } // namespace editor

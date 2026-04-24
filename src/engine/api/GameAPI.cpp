@@ -1,5 +1,6 @@
 #include "GameAPI.h"
 #include "../runtime/EngineContext.h"
+#include "../scene/SceneSerializer.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../backend/audio/AudioCommandQueue.h"
 #include "../../backend/audio/IAudioDevice.h"
@@ -77,10 +78,31 @@ void GameAPI::setGravity(float x, float y) {
 
 // ── Scene ────────────────────────────────────────────────────────────────────
 
-void        GameAPI::loadScene(const char*)           {}
-void        GameAPI::unloadScene()                    {}
+bool GameAPI::loadScene(const char* path) {
+    return SceneSerializer::loadScene(ctx_.world, ctx_.assetManager, path);
+}
 
-TextureHandle GameAPI::loadTexture(const char*)       { return {}; }
+bool GameAPI::saveScene(const char* path) {
+    return SceneSerializer::saveScene(ctx_.world, ctx_.assetManager, path);
+}
+
+void GameAPI::unloadScene() {
+    ctx_.world.clear();
+}
+
+// ── Asset ─────────────────────────────────────────────────────────────────────
+
+TextureHandle GameAPI::loadTexture(const char* path) {
+    return ctx_.assetManager.loadTexture(path);
+}
+
+void GameAPI::releaseTexture(TextureHandle h) {
+    ctx_.assetManager.releaseTexture(h);
+}
+
+AssetManager& GameAPI::assetManager() {
+    return ctx_.assetManager;
+}
 
 TextureHandle GameAPI::createTextureFromMemory(const void* rgbaPixels, int w, int h) {
     backend::TextureDesc desc{};

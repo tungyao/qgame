@@ -228,7 +228,9 @@ void InspectorPanel::drawAddComponentMenu(entt::entity selected, entt::registry&
 }
 
 void InspectorPanel::addComponentByName(entt::entity entity, entt::registry& world, const char* componentName) {
-    if (strcmp(componentName, "Transform") == 0) {
+    if (strcmp(componentName, "Name") == 0) {
+        world.emplace<engine::Name>(entity);
+    } else if (strcmp(componentName, "Transform") == 0) {
         world.emplace<engine::Transform>(entity);
     } else if (strcmp(componentName, "Sprite") == 0) {
         world.emplace<engine::Sprite>(entity);

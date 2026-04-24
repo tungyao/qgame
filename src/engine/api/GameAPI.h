@@ -2,6 +2,7 @@
 #include <entt/entt.hpp>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../runtime/EngineContext.h"
+#include "../assets/AssetManager.h"
 #include "../components/PhysicsComponents.h"
 #include "../systems/PhysicsSystem.h"
 
@@ -48,12 +49,15 @@ public:
     template<typename Listener>
     void onCollision(Listener& listener, void(Listener::*fn)(const CollisionInfo&));
 
-    // ── Scene（Month 7 实现）─────────────────────────────────────────────
-    void loadScene(const char* path);
+    // ── Scene（Month 8 实现）─────────────────────────────────────────────
+    bool loadScene(const char* path);
+    bool saveScene(const char* path);
     void unloadScene();
 
     // ── Asset ─────────────────────────────────────────────────────────────
     TextureHandle loadTexture(const char* assetPath);
+    void          releaseTexture(TextureHandle h);
+    AssetManager& assetManager();
 
     // 从内存像素数据上传纹理（RGBA8，测试/程序化纹理用）
     TextureHandle createTextureFromMemory(const void* rgbaPixels, int w, int h);

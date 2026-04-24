@@ -33,9 +33,12 @@ std::vector<uint8_t> makeCheckerTexture(int width, int height) {
     return pixels;
 }
 
-const char* entityLabel(entt::entity entity) {
-    static char buffer[32];
-    SDL_snprintf(buffer, sizeof(buffer), "Entity %u", static_cast<unsigned>(entt::to_integral(entity)));
+const char* entityLabel(entt::entity entity, const entt::registry& world) {
+    static char buffer[80];
+    if (auto* n = world.try_get<engine::Name>(entity); n && n->c_str()[0] != '\0')
+        SDL_snprintf(buffer, sizeof(buffer), "%s##%u", n->c_str(), static_cast<unsigned>(entt::to_integral(entity)));
+    else
+        SDL_snprintf(buffer, sizeof(buffer), "Entity %u", static_cast<unsigned>(entt::to_integral(entity)));
     return buffer;
 }
 
@@ -153,11 +156,30 @@ void EditorApplication::run() {
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(displaySize.x, menuBarHeight));
-        ImGui::Begin("##menubar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+        ImGui::Begin("##menubar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar);
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Exit")) {
                     game_.quit();
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Scene")) {
+                ImGui::SetNextItemWidth(200.f);
+                ImGui::InputText("##scenepath", scenePathBuf_, sizeof(scenePathBuf_));
+                ImGui::SameLine();
+                ImGui::TextDisabled("path");
+                ImGui::Separator();
+                if (ImGui::MenuItem("Save Scene")) {
+                    game_.saveScene(scenePathBuf_);
+                }
+                if (ImGui::MenuItem("Load Scene")) {
+                    game_.loadScene(scenePathBuf_);
+                    selectedEntity_ = entt::null;
+                }
+                if (ImGui::MenuItem("Unload Scene")) {
+                    game_.unloadScene();
+                    selectedEntity_ = entt::null;
                 }
                 ImGui::EndMenu();
             }
@@ -204,14 +226,17 @@ void EditorApplication::setupDemoScene() {
     const TextureHandle texture = game_.createTextureFromMemory(texturePixels.data(), 64, 64);
 
     const auto camera = game_.spawnEntity();
+    game_.addComponent(camera, engine::Name{"Camera"});
     game_.addComponent(camera, engine::Transform{ 0.0f, 0.0f, 0.0f, 1.0f, 1.0f });
     game_.addComponent(camera, engine::Camera{ 1.0f, true });
 
     const auto sprite = game_.spawnEntity();
+    game_.addComponent(sprite, engine::Name{"Sprite"});
     game_.addComponent(sprite, engine::Transform{ 320.0f, 180.0f, 0.0f, 2.0f, 2.0f });
-    game_.addComponent(sprite, engine::Sprite{ texture, { 0.0f, 0.0f, 64.0f, 64.0f }, 1, core::Color::White, 0.5f, 0.5f });
+    game_.addComponent(sprite, engine::Sprite{ texture, { 0.0f, 0.0f, 64.0f, 64.0f }, 1, 0, false, core::Color::White, 0.5f, 0.5f, engine::RenderPass::World });
 
     const auto tilemap = game_.spawnEntity();
+    game_.addComponent(tilemap, engine::Name{"TileMap"});
     game_.addComponent(tilemap, engine::Transform{ 2.0f, 8.0f, 0.0f, 1.0f, 1.0f });
     engine::TileMap map;
     map.width = 16;
@@ -291,7 +316,7 @@ void EditorApplication::drawHierarchy() {
     auto& entityStorage = ctx_.world.storage<entt::entity>();
     for (const entt::entity entity : entityStorage) {
         const bool selected = entity == selectedEntity_;
-        if (ImGui::Selectable(entityLabel(entity), selected)) {
+        if (ImGui::Selectable(entityLabel(entity, ctx_.world), selected)) {
             selectedEntity_ = entity;
         }
     }
@@ -300,7 +325,17 @@ void EditorApplication::drawHierarchy() {
 void EditorApplication::drawViewport() {
     const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
     if (viewportSize.x > 0.0f && viewportSize.y > 0.0f) {
-        editor_.setEditorCamera(editorCameraX_, editorCameraY_, editorCameraZoom_);
+        // 从 registry 读取当前主摄像机参数，同步到成员变量（不覆盖 registry）
+        auto camView = ctx_.world.view<engine::Transform, engine::Camera>();
+        for (auto e : camView) {
+            if (camView.get<engine::Camera>(e).primary) {
+                auto& t = camView.get<engine::Transform>(e);
+                editorCameraX_    = t.x;
+                editorCameraY_    = t.y;
+                editorCameraZoom_ = camView.get<engine::Camera>(e).zoom;
+                break;
+            }
+        }
 
         const TextureHandle preview = editor_.renderSceneToTexture(
             static_cast<int>(viewportSize.x),

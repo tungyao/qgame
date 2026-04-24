@@ -20,23 +20,60 @@ void RenderSystem::update(float /*dt*/) {
 
 void RenderSystem::shutdown() {}
 
+static constexpr int MAX_SPRITES = 4096;
+static backend::DrawSpriteCmd spriteBuffer[MAX_SPRITES];
+static int spriteCount = 0;
+
+static void collectSprites(backend::DrawSpriteCmd*& out, Transform& tf, Sprite& spr) {
+    out->texture  = spr.texture;
+    out->x        = tf.x;
+    out->y        = tf.y;
+    out->rotation = tf.rotation;
+    out->scaleX   = tf.scaleX;
+    out->scaleY   = tf.scaleY;
+    out->srcRect  = spr.srcRect;
+    out->layer    = spr.layer;
+    out->sortKey  = spr.sortOrder;
+    out->ySort    = spr.ySort;
+    out->tint     = spr.tint;
+    out->pass     = spr.pass;
+    ++out;
+}
+
+static int compareSprite(const void* a, const void* b) {
+    const auto& A = *(const backend::DrawSpriteCmd*)a;
+    const auto& B = *(const backend::DrawSpriteCmd*)b;
+    if (A.pass != B.pass) return static_cast<int>(A.pass) - static_cast<int>(B.pass);
+    if (A.layer != B.layer) return A.layer - B.layer;
+    if (A.ySort && B.ySort) {
+        int ay = static_cast<int>(A.y);
+        int by = static_cast<int>(B.y);
+        if (ay != by) return ay - by;
+    }
+    if (A.ySort != B.ySort) return A.ySort ? 1 : -1;
+    return A.sortKey - B.sortKey;
+}
+
 void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb, int viewportW, int viewportH) {
     cb.begin();
     cb.clear(core::Color::Black);
 
-    backend::CameraData cam{};
-    cam.viewportW = viewportW;
-    cam.viewportH = viewportH;
+    backend::CameraData worldCam{};
+    worldCam.viewportW = viewportW;
+    worldCam.viewportH = viewportH;
 
     auto camView = ctx.world.view<Transform, Camera>();
     for (auto [ent, tf, camera] : camView.each()) {
-        if (!camera.primary) continue;
-        cam.x    = tf.x;
-        cam.y    = tf.y;
-        cam.zoom = camera.zoom;
-        break;
+        if (camera.type == CameraType::World && camera.primary) {
+            worldCam.x        = tf.x;
+            worldCam.y        = tf.y;
+            worldCam.zoom     = camera.zoom;
+            worldCam.rotation = camera.rotation;
+        }
     }
-    cb.setCamera(cam);
+
+    spriteCount = 0;
+    auto* spritePtr = spriteBuffer;
 
     auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
@@ -52,6 +89,7 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
                     cmd.gridY    = static_cast<int>(tf.y) + y;
                     cmd.tileSize = tmap.tileSize;
                     cmd.layer    = layer;
+                    cmd.pass     = RenderPass::World;
                     cb.drawTile(cmd);
                 }
             }
@@ -60,18 +98,36 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
 
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
-        backend::DrawSpriteCmd cmd{};
-        cmd.texture  = sprite.texture;
-        cmd.x        = tf.x;
-        cmd.y        = tf.y;
-        cmd.rotation = tf.rotation;
-        cmd.scaleX   = tf.scaleX;
-        cmd.scaleY   = tf.scaleY;
-        cmd.srcRect  = sprite.srcRect;
-        cmd.layer    = sprite.layer;
-        cmd.tint     = sprite.tint;
+        collectSprites(spritePtr, tf, sprite);
+        ++spriteCount;
+    }
+
+    if (spriteCount > 1) {
+        qsort(spriteBuffer, spriteCount, sizeof(backend::DrawSpriteCmd), compareSprite);
+    }
+
+    RenderPass currentPass = RenderPass::World;
+    cb.beginPass(currentPass);
+    cb.setCamera(worldCam);
+
+    for (int i = 0; i < spriteCount; ++i) {
+        const auto& cmd = spriteBuffer[i];
+        if (cmd.pass != currentPass) {
+            cb.endPass(currentPass);
+            currentPass = cmd.pass;
+            cb.beginPass(currentPass);
+            if (currentPass == RenderPass::World) {
+                cb.setCamera(worldCam);
+            } else {
+                backend::CameraData screenCam{};
+                screenCam.viewportW = viewportW;
+                screenCam.viewportH = viewportH;
+                cb.setCamera(screenCam);
+            }
+        }
         cb.drawSprite(cmd);
     }
+    cb.endPass(currentPass);
 
     cb.end();
 }

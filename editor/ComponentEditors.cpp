@@ -7,6 +7,11 @@
 namespace editor {
 
 void registerComponentEditors() {
+    ComponentRegistry::registerComponent<engine::Name>("Name", [](entt::entity entity, entt::registry& world) {
+        auto& c = world.get<engine::Name>(entity);
+        ImGui::InputText("Name", c.buf.data(), engine::Name::MAX_LEN);
+    });
+
     ComponentRegistry::registerComponent<engine::Transform>("Transform", [](entt::entity entity, entt::registry& world) {
         auto& c = world.get<engine::Transform>(entity);
         editFloat(&c.x, "Position X");

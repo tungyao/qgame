@@ -29,6 +29,16 @@ void CommandBuffer::setCamera(const CameraData& cam) {
     cmds_.emplace_back(SetCameraCmd{cam});
 }
 
+void CommandBuffer::beginPass(engine::RenderPass pass) {
+    ASSERT_MSG(recording_, "CommandBuffer not recording");
+    cmds_.emplace_back(BeginPassCmd{pass});
+}
+
+void CommandBuffer::endPass(engine::RenderPass pass) {
+    ASSERT_MSG(recording_, "CommandBuffer not recording");
+    cmds_.emplace_back(EndPassCmd{pass});
+}
+
 void CommandBuffer::drawSprite(const DrawSpriteCmd& cmd) {
     ASSERT_MSG(recording_, "CommandBuffer not recording");
     cmds_.emplace_back(cmd);

@@ -79,6 +79,9 @@ private:
     void buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
                            std::vector<BatchSegment>& batches);
     void buildOrthoMatrix(float w, float h, float out[16]);
+    void buildOrthoProjectionMatrix(float w, float h, float out[16]);
+    void buildViewMatrix(float camX, float camY, float zoom, float rotation, float out[16]);
+    void buildOrthoMatrixCamera(float w, float h, float camX, float camY, float zoom, float rotation, float out[16]);
 
     // FBO 管理
     bool ensureFbo(FboEntry& fbo, TextureHandle& colorHandle, int w, int h);

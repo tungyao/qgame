@@ -452,12 +452,17 @@ void GLRenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb,
     std::vector<DrawTileCmd>   tiles;
     core::Color clearColor = core::Color::Black;
 
+    CameraData camera{};
+    camera.viewportW = width;
+    camera.viewportH = height;
+
     for (const auto& cmd : cb.commands()) {
         std::visit([&](const auto& c) {
             using T = std::decay_t<decltype(c)>;
             if constexpr (std::is_same_v<T, DrawSpriteCmd>)  sprites.push_back(c);
-            else if constexpr (std::is_same_v<T, DrawTileCmd>) tiles.push_back(c);
-            else if constexpr (std::is_same_v<T, ClearCmd>)    clearColor = c.color;
+            else if constexpr (std::is_same_v<T, DrawTileCmd>)  tiles.push_back(c);
+            else if constexpr (std::is_same_v<T, ClearCmd>)     clearColor = c.color;
+            else if constexpr (std::is_same_v<T, SetCameraCmd>) camera = c.camera;
         }, cmd);
     }
 
@@ -494,12 +499,24 @@ void GLRenderDevice::renderCommandBufferToTarget(const CommandBuffer& cb,
                  static_cast<GLsizeiptr>(batchIdx_.size() * sizeof(uint16_t)),
                  batchIdx_.data(), GL_STREAM_DRAW);
 
-    // Projection matrix
     float proj[16];
-    buildOrthoMatrix(static_cast<float>(width), static_cast<float>(height), proj);
+    float view[16];
+    const float zoom = (camera.zoom > 0.f) ? camera.zoom : 1.f;
+    buildOrthoProjectionMatrix(static_cast<float>(width), static_cast<float>(height), proj);
+    buildViewMatrix(camera.x, camera.y, zoom, camera.rotation, view);
+
+    float mvp[16];
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            mvp[i * 4 + j] = 0.f;
+            for (int k = 0; k < 4; ++k) {
+                mvp[i * 4 + j] += proj[i * 4 + k] * view[k * 4 + j];
+            }
+        }
+    }
 
     glUseProgram(shaderProgram_);
-    glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, proj);
+    glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
     glUniform1i(uTexLoc_, 0);
     glActiveTexture(GL_TEXTURE0);
 
@@ -660,13 +677,58 @@ void GLRenderDevice::buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
 }
 
 void GLRenderDevice::buildOrthoMatrix(float w, float h, float out[16]) {
+    buildOrthoProjectionMatrix(w, h, out);
+}
+
+void GLRenderDevice::buildOrthoProjectionMatrix(float w, float h, float out[16]) {
+    const float left   = -w * 0.5f;
+    const float right  =  w * 0.5f;
+    const float top    =  h * 0.5f;
+    const float bottom = -h * 0.5f;
+
     memset(out, 0, 16 * sizeof(float));
-    out[0]  =  2.f / w;
-    out[5]  = -2.f / h;  // Y 轴翻转，保持与 SDL_GPU backend 一致（屏幕坐标原点在左上）
+    out[0]  =  2.f / (right - left);
+    out[5]  = -2.f / (top - bottom);
     out[10] =  1.f;
-    out[12] = -1.f;
-    out[13] =  1.f;
+    out[12] = -(right + left)  / (right - left);
+    out[13] = -(top + bottom)  / (top - bottom);
     out[15] =  1.f;
+}
+
+void GLRenderDevice::buildViewMatrix(float camX, float camY, float zoom, float rotation, float out[16]) {
+    const float halfW = 0.5f / zoom;
+    const float halfH = 0.5f / zoom;
+    const float cosR  = cosf(rotation);
+    const float sinR  = sinf(rotation);
+
+    memset(out, 0, 16 * sizeof(float));
+    out[0]  =  cosR * halfW;
+    out[1]  =  sinR * halfW;
+    out[4]  = -sinR * halfH;
+    out[5]  =  cosR * halfH;
+    out[10] = 1.f;
+    out[12] = -camX * cosR * halfW + camY * sinR * halfW + halfW;
+    out[13] = -camX * sinR * halfH - camY * cosR * halfH + halfH;
+    out[15] = 1.f;
+}
+
+void GLRenderDevice::buildOrthoMatrixCamera(float w, float h,
+                                             float camX, float camY, float zoom,
+                                             float rotation,
+                                             float out[16]) {
+    float proj[16];
+    float view[16];
+    buildOrthoProjectionMatrix(w, h, proj);
+    buildViewMatrix(camX, camY, zoom, rotation, view);
+
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            out[i * 4 + j] = 0.f;
+            for (int k = 0; k < 4; ++k) {
+                out[i * 4 + j] += proj[i * 4 + k] * view[k * 4 + j];
+            }
+        }
+    }
 }
 
 } // namespace backend

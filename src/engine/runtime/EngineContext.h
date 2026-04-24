@@ -11,6 +11,7 @@
 #include "../../platform/Window.h"
 #include "../../core/Handle.h"
 #include "../input/InputState.h"
+#include "../assets/AssetManager.h"
 
 namespace backend {
 class IRenderDevice;
@@ -34,6 +35,7 @@ public:
     FrameScheduler scheduler{*this};
 
     InputState inputState;
+    AssetManager assetManager;
     std::unique_ptr<platform::Window> window;
 
     uint64_t frameCounter = 0;

@@ -8,6 +8,8 @@ add_library(engine STATIC
     systems/PhysicsSystem.cpp
     systems/InputSystem.cpp
     input/SDLInputProvider.cpp
+    assets/AssetManager.cpp
+    scene/SceneSerializer.cpp
 )
 
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
@@ -25,6 +27,8 @@ target_link_libraries(engine
     PRIVATE backend
     PRIVATE platform
     PRIVATE SDL3::SDL3-static
+    PRIVATE stb_image
+    PRIVATE nlohmann_json::nlohmann_json
 )
 
 if(BUILD_EDITOR)

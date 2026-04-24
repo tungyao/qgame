@@ -52,10 +52,12 @@ void EngineContext::init(const EngineConfig& cfg) {
         renderDevice_ = std::make_unique<backend::SDLGPURenderDevice>(sdlWin);
     }
     renderDevice_->init();
+    assetManager.init(renderDevice_.get(), nullptr); // audio device 还未创建，稍后在 audio init 后更新
 
     // Audio device + command queue
     audioCmdQueue_ = std::make_unique<backend::AudioCommandQueue>();
     audioDevice_ = std::make_unique<backend::SDLMixerAudioDevice>();
+    assetManager.init(renderDevice_.get(), audioDevice_.get()); // 重新初始化，补上 audio ptr
 
     // 注册 Systems
     systems.registerSystem<InputSystem>(
@@ -84,6 +86,7 @@ void EngineContext::run() {
 void EngineContext::shutdown() {
     core::logInfo("EngineContext::shutdown");
     systems.shutdownAll();
+    assetManager.shutdown();
     audioThread_.reset();
     audioDevice_.reset();
     renderDevice_->shutdown();

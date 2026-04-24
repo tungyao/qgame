@@ -32,7 +32,8 @@ std::vector<const ComponentMeta*> ComponentRegistry::getAvailableComponents(entt
         const size_t hash = entry.typeHash;
         bool hasComponent = false;
 
-        if (hash == entt::type_hash<engine::Transform>::value() && world.all_of<engine::Transform>(entity)) hasComponent = true;
+        if (hash == entt::type_hash<engine::Name>::value() && world.all_of<engine::Name>(entity)) hasComponent = true;
+        else if (hash == entt::type_hash<engine::Transform>::value() && world.all_of<engine::Transform>(entity)) hasComponent = true;
         else if (hash == entt::type_hash<engine::Sprite>::value() && world.all_of<engine::Sprite>(entity)) hasComponent = true;
         else if (hash == entt::type_hash<engine::TileMap>::value() && world.all_of<engine::TileMap>(entity)) hasComponent = true;
         else if (hash == entt::type_hash<engine::Camera>::value() && world.all_of<engine::Camera>(entity)) hasComponent = true;
