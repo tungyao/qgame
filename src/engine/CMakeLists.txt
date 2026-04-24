@@ -2,6 +2,7 @@ add_library(engine SHARED
     runtime/EngineContext.cpp
     runtime/FrameScheduler.cpp
     api/GameAPI.cpp
+    api/GameAPI_ExplicitInstantiation.cpp
     api/EditorAPI.cpp
     systems/RenderSystem.cpp
     systems/AudioSystem.cpp

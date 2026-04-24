@@ -9,7 +9,6 @@
 
 namespace engine {
 
-// game 层唯一对外接口 — 不暴露 backend，不暴露 EngineContext 内部
 class QGAME_ENGINE_API GameAPI {
 public:
     explicit GameAPI(EngineContext& ctx) : ctx_(ctx) {}
@@ -18,6 +17,7 @@ public:
     entt::entity spawnEntity();
     void         destroyEntity(entt::entity e);
 
+    // 组件操作：extern template 声明，实例化在 DLL 中
     template<typename T>
     T& addComponent(entt::entity e, T component);
 
@@ -74,7 +74,10 @@ private:
     EngineContext& ctx_;
 };
 
-// ── Template 实现（EngineContext 已完整声明，可访问 world）─────────────────────
+} // namespace engine
+
+// ── 模板实现（内联，但需要配合 extern template 实例化）───────────────────────
+namespace engine {
 
 template<typename T>
 T& GameAPI::addComponent(entt::entity e, T component) {
@@ -97,3 +100,6 @@ void GameAPI::onCollision(Listener& listener, void(Listener::*fn)(const Collisio
 }
 
 } // namespace engine
+
+// ── 包含 extern template 声明（防止客户端代码实例化）─────────────────────────
+#include "GameAPI_ExternTemplates.h"
