@@ -56,6 +56,8 @@ struct DrawTileCmd {
     int                  gridX, gridY;
     int                  tileSize = 16;
     int                  layer    = 0;
+    int                  sortKey  = 0;
+    bool                 ySort    = false;
     engine::RenderPass   pass     = engine::RenderPass::World;
 };
 

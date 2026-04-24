@@ -4,6 +4,8 @@
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../core/Logger.h"
+#include <algorithm>
+#include <vector>
 
 namespace engine {
 
@@ -25,41 +27,36 @@ void RenderSystem::update(float /*dt*/) {
 
 void RenderSystem::shutdown() {}
 
-static constexpr int MAX_SPRITES = 4096;
-static backend::DrawSpriteCmd spriteBuffer[MAX_SPRITES];
-static int spriteCount = 0;
+namespace {
+// 统一的 2D 可绘制条目：sprite 和 tile 走同一条排序流水线，保证
+// 不同命令类型在同 pass/layer 下也能按 ySort / sortKey 正确交错。
+struct Drawable {
+    engine::RenderPass pass;
+    int   layer;
+    bool  ySort;
+    float y;
+    int   sortKey;
+    int   seq;        // 稳定 tie-breaker
 
-static void collectSprites(backend::DrawSpriteCmd*& out, Transform& tf, Sprite& spr) {
-    out->texture  = spr.texture;
-    out->x        = tf.x;
-    out->y        = tf.y;
-    out->rotation = tf.rotation;
-    out->scaleX   = tf.scaleX;
-    out->scaleY   = tf.scaleY;
-    out->pivotX   = spr.pivotX;
-    out->pivotY   = spr.pivotY;
-    out->srcRect  = spr.srcRect;
-    out->layer    = spr.layer;
-    out->sortKey  = spr.sortOrder;
-    out->ySort    = spr.ySort;
-    out->tint     = spr.tint;
-    out->pass     = spr.pass;
-    ++out;
-}
+    bool isTile;
+    backend::DrawSpriteCmd sprite;
+    backend::DrawTileCmd   tile;
+};
 
-static int compareSprite(const void* a, const void* b) {
-    const auto& A = *(const backend::DrawSpriteCmd*)a;
-    const auto& B = *(const backend::DrawSpriteCmd*)b;
-    if (A.pass != B.pass) return static_cast<int>(A.pass) - static_cast<int>(B.pass);
-    if (A.layer != B.layer) return A.layer - B.layer;
-    if (A.ySort && B.ySort) {
+bool drawableLess(const Drawable& A, const Drawable& B) {
+    if (A.pass  != B.pass)  return static_cast<int>(A.pass) < static_cast<int>(B.pass);
+    if (A.layer != B.layer) return A.layer < B.layer;
+    // 非 ySort 在前（底层），ySort 在后（按 y 交错）
+    if (A.ySort != B.ySort) return !A.ySort;
+    if (A.ySort) {
         int ay = static_cast<int>(A.y);
         int by = static_cast<int>(B.y);
-        if (ay != by) return ay - by;
+        if (ay != by) return ay < by;
     }
-    if (A.ySort != B.ySort) return A.ySort ? 1 : -1;
-    return A.sortKey - B.sortKey;
+    if (A.sortKey != B.sortKey) return A.sortKey < B.sortKey;
+    return A.seq < B.seq;
 }
+} // namespace
 
 void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb, int viewportW, int viewportH) {
     // 场景命令流中不再包含 Clear/SetCamera：
@@ -67,9 +64,11 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
     //   - editor 离屏路径需自行在 submit 前 cb.clear()/cb.setCamera()
     cb.begin();
 
-    spriteCount = 0;
-    auto* spritePtr = spriteBuffer;
+    static std::vector<Drawable> drawables;
+    drawables.clear();
+    int seq = 0;
 
+    // tilemap
     auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
         for (int layer = 0; layer < TileMap::MAX_LAYERS; ++layer) {
@@ -77,33 +76,64 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
                 for (int x = 0; x < tmap.width; ++x) {
                     int tileId = tmap.tileAt(layer, x, y);
                     if (tileId < 0) continue;
-                    backend::DrawTileCmd cmd{};
-                    cmd.tileset  = tmap.tileset;
-                    cmd.tileId   = tileId;
-                    cmd.gridX    = static_cast<int>(tf.x) + x;
-                    cmd.gridY    = static_cast<int>(tf.y) + y;
-                    cmd.tileSize = tmap.tileSize;
-                    cmd.layer    = layer;
-                    cmd.pass     = RenderPass::World;
-                    cb.drawTile(cmd);
+                    Drawable d{};
+                    d.pass   = RenderPass::World;
+                    d.layer  = layer;
+                    d.ySort  = true;  // 启用 y-sorting 以支持正确的遮挡关系
+                    d.y      = tf.y + static_cast<float>(y * tmap.tileSize);
+                    d.sortKey = 0;
+                    d.seq    = seq++;
+                    d.isTile = true;
+                    d.tile.tileset  = tmap.tileset;
+                    d.tile.tileId   = tileId;
+                    d.tile.gridX    = static_cast<int>(tf.x) + x;
+                    d.tile.gridY    = static_cast<int>(tf.y) + y;
+                    d.tile.tileSize = tmap.tileSize;
+                    d.tile.layer    = layer;
+                    d.tile.sortKey  = 0;
+                    d.tile.ySort    = true;  // 启用 y-sorting
+                    d.tile.pass     = RenderPass::World;
+                    drawables.push_back(d);
                 }
             }
         }
     }
 
+    // sprite
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
-        collectSprites(spritePtr, tf, sprite);
-        ++spriteCount;
+        Drawable d{};
+        d.pass    = sprite.pass;
+        d.layer   = sprite.layer;
+        d.ySort   = sprite.ySort;
+        d.y       = tf.y;
+        d.sortKey = sprite.sortOrder;
+        d.seq     = seq++;
+        d.isTile  = false;
+        auto& s = d.sprite;
+        s.texture  = sprite.texture;
+        s.x        = tf.x;
+        s.y        = tf.y;
+        s.rotation = tf.rotation;
+        s.scaleX   = tf.scaleX;
+        s.scaleY   = tf.scaleY;
+        s.pivotX   = sprite.pivotX;
+        s.pivotY   = sprite.pivotY;
+        s.srcRect  = sprite.srcRect;
+        s.layer    = sprite.layer;
+        s.sortKey  = sprite.sortOrder;
+        s.ySort    = sprite.ySort;
+        s.tint     = sprite.tint;
+        s.pass     = sprite.pass;
+        drawables.push_back(d);
     }
 
-    if (spriteCount > 1) {
-        qsort(spriteBuffer, spriteCount, sizeof(backend::DrawSpriteCmd), compareSprite);
-    }
+    std::sort(drawables.begin(), drawables.end(), drawableLess);
 
-    for (int i = 0; i < spriteCount; ++i) {
-        const auto& cmd = spriteBuffer[i];
-        cb.drawSprite(cmd);
+    // 按排序顺序写入 CommandBuffer。后端必须按命令流顺序绘制，不再二次排序。
+    for (const Drawable& d : drawables) {
+        if (d.isTile) cb.drawTile(d.tile);
+        else          cb.drawSprite(d.sprite);
     }
 
     cb.end();

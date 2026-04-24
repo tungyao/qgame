@@ -484,25 +484,108 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
                                          core::Color clearColor,
                                          unsigned int fbo,
                                          int width, int height) {
-    std::vector<DrawSpriteCmd> sprites;
-    std::vector<DrawTileCmd>   tiles;
     CameraData camera = cameraIn;
     if (camera.viewportW == 0) camera.viewportW = width;
     if (camera.viewportH == 0) camera.viewportH = height;
 
-    for (const RenderCmd* cmd : cmds) {
-        if (auto* s = std::get_if<DrawSpriteCmd>(cmd)) sprites.push_back(*s);
-        else if (auto* t = std::get_if<DrawTileCmd>(cmd)) tiles.push_back(*t);
-    }
-
-    std::stable_sort(sprites.begin(), sprites.end(),
-        [](const DrawSpriteCmd& a, const DrawSpriteCmd& b){ return a.layer < b.layer; });
-
     batchVerts_.clear();
     batchIdx_.clear();
-    std::vector<BatchSegment> spriteBatches, tileBatches;
-    buildSpriteGeometry(sprites, spriteBatches);
-    buildTileGeometry(tiles, tileBatches);
+    std::vector<BatchSegment> batches;
+
+    // 按命令流顺序构建 batch：texture 变化或 batch 满时 flush。
+    // 不再按 cmd 类型分组——sprite/tile 完全按 CommandBuffer 提交顺序绘制。
+    TextureHandle currentTex{};
+    bool          hasCurrent = false;
+    uint32_t      batchIdxStart  = 0;
+    int32_t       batchVertStart = 0;
+
+    auto flush = [&]() {
+        if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
+            batches.push_back({ currentTex, batchIdxStart,
+                                static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
+                                batchVertStart });
+            batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
+            batchVertStart = static_cast<int32_t>(batchVerts_.size());
+        }
+    };
+
+    auto maybeFlush = [&](TextureHandle tex) {
+        const bool batchFull =
+            (batchVerts_.size() - static_cast<size_t>(batchVertStart) >= MAX_SPRITES_PER_BATCH * 4);
+        if (!hasCurrent || tex != currentTex || batchFull) {
+            flush();
+            currentTex = tex;
+            hasCurrent = true;
+        }
+    };
+
+    auto pushQuad = [&](float x0, float y0, float x1, float y1,
+                        float x2, float y2, float x3, float y3,
+                        float u0, float v0, float u1, float v1,
+                        const core::Color& tint)
+    {
+        const auto base = static_cast<uint16_t>(batchVerts_.size() - static_cast<size_t>(batchVertStart));
+        batchVerts_.push_back({ x0, y0, u0, v0, tint.r, tint.g, tint.b, tint.a });
+        batchVerts_.push_back({ x1, y1, u1, v0, tint.r, tint.g, tint.b, tint.a });
+        batchVerts_.push_back({ x2, y2, u1, v1, tint.r, tint.g, tint.b, tint.a });
+        batchVerts_.push_back({ x3, y3, u0, v1, tint.r, tint.g, tint.b, tint.a });
+        batchIdx_.insert(batchIdx_.end(), {
+            base,
+            static_cast<uint16_t>(base + 1),
+            static_cast<uint16_t>(base + 2),
+            base,
+            static_cast<uint16_t>(base + 2),
+            static_cast<uint16_t>(base + 3)
+        });
+    };
+
+    for (const RenderCmd* cmd : cmds) {
+        if (auto* s = std::get_if<DrawSpriteCmd>(cmd)) {
+            maybeFlush(s->texture);
+            const float hw = s->srcRect.w * s->scaleX * 0.5f;
+            const float hh = s->srcRect.h * s->scaleY * 0.5f;
+            const float cosR = cosf(s->rotation);
+            const float sinR = sinf(s->rotation);
+            const float lx[4] = { -hw,  hw,  hw, -hw };
+            const float ly[4] = { -hh, -hh,  hh,  hh };
+            const TextureEntry* entry = textures_.tryGet(s->texture);
+            const float tw = entry ? static_cast<float>(entry->width)  : 1.f;
+            const float th = entry ? static_cast<float>(entry->height) : 1.f;
+            const float u0 =  s->srcRect.x              / tw;
+            const float v0 =  s->srcRect.y              / th;
+            const float u1 = (s->srcRect.x + s->srcRect.w) / tw;
+            const float v1 = (s->srcRect.y + s->srcRect.h) / th;
+            float px[4], py[4];
+            for (int i = 0; i < 4; ++i) {
+                px[i] = s->x + lx[i] * cosR - ly[i] * sinR;
+                py[i] = s->y + lx[i] * sinR + ly[i] * cosR;
+            }
+            pushQuad(px[0],py[0], px[1],py[1], px[2],py[2], px[3],py[3],
+                     u0,v0, u1,v1, s->tint);
+        }
+        else if (auto* t = std::get_if<DrawTileCmd>(cmd)) {
+            maybeFlush(t->tileset);
+            const TextureEntry* entry = textures_.tryGet(t->tileset);
+            const float tw = entry ? static_cast<float>(entry->width)  : 1.f;
+            const float th = entry ? static_cast<float>(entry->height) : 1.f;
+            const int   ts = t->tileSize > 0 ? t->tileSize : 16;
+            int tilesetCols = static_cast<int>(tw) / ts;
+            if (tilesetCols < 1) tilesetCols = 1;
+            const int col = t->tileId % tilesetCols;
+            const int row = t->tileId / tilesetCols;
+            const float u0 = (col * ts) / tw;
+            const float v0 = (row * ts) / th;
+            const float u1 = u0 + ts / tw;
+            const float v1 = v0 + ts / th;
+            const float px  = static_cast<float>(t->gridX * ts);
+            const float py  = static_cast<float>(t->gridY * ts);
+            const float px1 = px + ts;
+            const float py1 = py + ts;
+            pushQuad(px,py, px1,py, px1,py1, px,py1, u0,v0, u1,v1,
+                     core::Color{255,255,255,255});
+        }
+    }
+    flush();
 
     // --- GL state setup ---
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -566,8 +649,7 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
         }
     };
 
-    drawBatches(spriteBatches);
-    drawBatches(tileBatches);
+    drawBatches(batches);
 
     glBindVertexArray(0);
     glUseProgram(0);

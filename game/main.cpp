@@ -135,6 +135,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         engine::Sprite sp{};
         sp.texture = spriteTex; sp.srcRect = {0.f, 0.f, 64.f, 64.f};
         sp.layer = 3; sp.tint = {255, 255, 100, 255};
+        sp.ySort = true;  // 启用 y-sorting 以支持正确的遮挡关系
         api.addComponent(player, sp);
     }
 
