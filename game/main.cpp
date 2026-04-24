@@ -5,6 +5,7 @@
 #include <engine/components/RenderComponents.h>
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/AnimatorComponent.h>
+#include <engine/components/TextComponent.h>
 #include <SDL3/SDL.h>   // SDLK_* key codes
 #include <vector>
 
@@ -189,6 +190,16 @@ int main(int /*argc*/, char* /*argv*/[]) {
 		sp.layer = 10;
 		sp.ySort = false;
 		api.addComponent(statusText, sp);
+	}
+
+	// ── MSDF 文字渲染实测 ─────────────────────────────────────────────────────
+	engine::FontHandle font = api.loadFont("assets/fonts/DejaVuSans.ttf");
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 40.f, 80.f });
+		api.addComponent(e, engine::TextComponent{
+			.text = "Hello, StarEngine! @#$%^&*()", .font = font, .fontSize = 48.f,
+			.color = { 255,255,255,255 } });
 	}
 
 	// 手动主循环：tick() 完成后 inputState 已更新，直接修改 Transform

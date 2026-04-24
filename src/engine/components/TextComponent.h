@@ -1,17 +1,21 @@
 #pragma once
 #include <string>
-#include "../../backend/shared/ResourceHandle.h"
+#include "FontData.h"
+#include "RenderComponents.h"
 #include "../../core/math/Color.h"
 
 namespace engine {
 
 struct TextComponent {
     std::string text;
-    TextureHandle fontTexture;  // 字体图集
-    float        fontSize = 16.f;
-    core::Color  color = core::Color::White;
-    int          layer = 10;
-    bool         visible = true;
+    FontHandle  font;
+    float       fontSize = 16.f;
+    core::Color color = core::Color::White;
+    int         layer = 10;
+    int         sortOrder = 0;
+    bool        ySort = false;
+    RenderPass  pass = RenderPass::UI;
+    bool        visible = true;
 };
 
 } // namespace engine

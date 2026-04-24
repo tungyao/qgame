@@ -24,6 +24,10 @@ public:
     void          destroyTexture(TextureHandle)     override;
     ShaderHandle  createShader(const ShaderDesc&)  override;
     void          destroyShader(ShaderHandle)       override;
+    
+    engine::FontHandle createFont(const engine::FontData& fontData) override;
+    void               destroyFont(engine::FontHandle)               override;
+    const engine::FontData* getFont(engine::FontHandle) const       override;
 
     // IRenderDevice — 提交 & 帧控制
     void submitCommandBuffer(const CommandBuffer&) override;
@@ -60,6 +64,8 @@ private:
         uint32_t      idxOffset;
         uint32_t      idxCount;
         int32_t       vertOffset;
+        bool          isFont = false;
+        float         pxRange = 4.0f;
     };
 
     static constexpr int MAX_SPRITES_PER_BATCH = 2048;
@@ -98,6 +104,12 @@ private:
     unsigned int shaderProgram_ = 0;
     int          uProjLoc_      = -1;
     int          uTexLoc_       = -1;
+    
+    // MSDF font shader
+    unsigned int msdfShaderProgram_ = 0;
+    int          msdfProjLoc_       = -1;
+    int          msdfTexLoc_        = -1;
+    int          msdfPxRangeLoc_    = -1;
 
     // 顶点/索引缓冲 (streaming, orphan each frame)
     unsigned int vao_ = 0;
@@ -105,6 +117,7 @@ private:
     unsigned int ibo_ = 0;
 
     core::HandleMap<TextureHandle, TextureEntry> textures_;
+    core::HandleMap<engine::FontHandle, engine::FontData> fonts_;
 
     // renderToTexture (swapchain-paired, 复用 FBO)
     FboEntry      screenFbo_{};

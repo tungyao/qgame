@@ -1,10 +1,12 @@
 #pragma once
+#include <string>
 #include <vector>
 #include <variant>
 #include "../shared/ResourceHandle.h"
 #include "../../core/math/Rect.h"
 #include "../../core/math/Color.h"
 #include "../../engine/components/RenderComponents.h"
+#include "../../engine/components/FontData.h"
 
 namespace backend {
 
@@ -61,6 +63,18 @@ struct DrawTileCmd {
     engine::RenderPass   pass     = engine::RenderPass::World;
 };
 
+struct DrawTextCmd {
+    engine::FontHandle   font;
+    std::string          text;
+    float                x, y;
+    float                fontSize = 16.f;
+    int                  layer = 10;
+    int                  sortKey = 0;
+    bool                 ySort = false;
+    core::Color          color = core::Color::White;
+    engine::RenderPass   pass = engine::RenderPass::UI;
+};
+
 struct SetCameraCmd {
     CameraData camera;
     engine::RenderPass pass = engine::RenderPass::World;
@@ -70,7 +84,7 @@ struct ClearCmd {
     core::Color color = core::Color::Black;
 };
 
-using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, SetCameraCmd, ClearCmd>;
+using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, DrawTextCmd, SetCameraCmd, ClearCmd>;
 
 class CommandBuffer {
 public:
@@ -81,6 +95,7 @@ public:
     void setCamera(const CameraData& cam, engine::RenderPass pass = engine::RenderPass::World);
     void drawSprite(const DrawSpriteCmd& cmd);
     void drawTile(const DrawTileCmd& cmd);
+    void drawText(const DrawTextCmd& cmd);
 
     const std::vector<RenderCmd>& commands() const { return cmds_; }
     bool isRecording() const { return recording_; }

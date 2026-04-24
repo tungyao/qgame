@@ -106,6 +106,14 @@ void GameAPI::releaseTexture(TextureHandle h) {
     ctx_.assetManager.releaseTexture(h);
 }
 
+FontHandle GameAPI::loadFont(const char* path) {
+    return ctx_.assetManager.loadFont(path);
+}
+
+void GameAPI::releaseFont(FontHandle h) {
+    ctx_.assetManager.releaseFont(h);
+}
+
 AssetManager& GameAPI::assetManager() {
     return ctx_.assetManager;
 }

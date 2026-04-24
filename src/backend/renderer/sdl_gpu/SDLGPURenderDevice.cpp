@@ -12,9 +12,11 @@
 
 #include "sprite_vert_spv.h"
 #include "sprite_frag_spv.h"
+#include "msdf_frag_spv.h"
 #ifdef QGAME_HAS_DXIL_SHADERS
 #include "sprite_vert_dxil.h"
 #include "sprite_frag_dxil.h"
+#include "msdf_frag_dxil.h"
 #endif
 
 namespace backend {
@@ -132,6 +134,8 @@ void SDLGPURenderDevice::shutdown() {
 
     if (pipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, pipeline_); pipeline_ = nullptr; }
     if (offscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, offscreenPipeline_); offscreenPipeline_ = nullptr; }
+    if (msdfPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfPipeline_); msdfPipeline_ = nullptr; }
+    if (msdfOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfOffscreenPipeline_); msdfOffscreenPipeline_ = nullptr; }
     if (vertexBuf_) { SDL_ReleaseGPUBuffer(device_, vertexBuf_); vertexBuf_ = nullptr; }
     if (indexBuf_) { SDL_ReleaseGPUBuffer(device_, indexBuf_); indexBuf_ = nullptr; }
     if (transferBuf_) { SDL_ReleaseGPUTransferBuffer(device_, transferBuf_); transferBuf_ = nullptr; }
@@ -192,9 +196,11 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
     SDL_SubmitGPUCommandBuffer(cmd);
     SDL_ReleaseGPUTransferBuffer(device_, tb);
 
+    const SDL_GPUFilter filter = (desc.filter == TextureFilter::Linear)
+        ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
     SDL_GPUSamplerCreateInfo samplerInfo{};
-    samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
-    samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
+    samplerInfo.min_filter = filter;
+    samplerInfo.mag_filter = filter;
     samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
     samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
@@ -250,6 +256,21 @@ ShaderHandle SDLGPURenderDevice::createShader(const ShaderDesc&) {
 }
 
 void SDLGPURenderDevice::destroyShader(ShaderHandle) {
+}
+
+engine::FontHandle SDLGPURenderDevice::createFont(const engine::FontData& fontData) {
+    engine::FontData data = fontData;
+    return fonts_.insert(std::move(data));
+}
+
+void SDLGPURenderDevice::destroyFont(engine::FontHandle h) {
+    if (fonts_.valid(h)) {
+        fonts_.remove(h);
+    }
+}
+
+const engine::FontData* SDLGPURenderDevice::getFont(engine::FontHandle h) const {
+    return fonts_.valid(h) ? &fonts_.get(h) : nullptr;
 }
 
 void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
@@ -325,10 +346,10 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     batchIdx_.clear();
     std::vector<BatchSegment> batches;
 
-    // 按命令流顺序构建 batch：texture 变化或 batch 满时 flush。
-    // sprite/tile 完全按 CommandBuffer 提交顺序绘制，不再二次排序或分组。
     TextureHandle currentTex{};
     bool          hasCurrent = false;
+    bool          currentIsFont = false;
+    float         currentPxRange = 4.0f;
     uint32_t      batchIdxStart  = 0;
     int32_t       batchVertStart = 0;
 
@@ -336,17 +357,20 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
         if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
             batches.push_back({ currentTex, batchIdxStart,
                                 static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                                batchVertStart });
+                                batchVertStart, currentIsFont, currentPxRange });
             batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
             batchVertStart = static_cast<int32_t>(batchVerts_.size());
         }
     };
-    auto maybeFlush = [&](TextureHandle tex) {
+    auto maybeFlush = [&](TextureHandle tex, bool isFont = false, float pxRange = 4.0f) {
         const bool batchFull =
             (batchVerts_.size() - static_cast<size_t>(batchVertStart) >= MAX_SPRITES_PER_BATCH * 4);
-        if (!hasCurrent || tex != currentTex || batchFull) {
+        if (!hasCurrent || tex != currentTex || batchFull ||
+            currentIsFont != isFont || (isFont && currentPxRange != pxRange)) {
             flush();
             currentTex = tex;
+            currentIsFont = isFont;
+            currentPxRange = pxRange;
             hasCurrent = true;
         }
     };
@@ -415,6 +439,63 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             pushQuad(px,py, px1,py, px1,py1, px,py1, u0,v0, u1,v1,
                      core::Color{255,255,255,255});
         }
+        else if (auto* text = std::get_if<DrawTextCmd>(cmd)) {
+            const engine::FontData* font = getFont(text->font);
+            if (!font || !textures_.valid(font->texture)) continue;
+
+            const float scale = text->fontSize / font->fontSize;
+            // screenPxRange = atlasPxRange * (screenPxPerEm / atlasPxPerEm) = pxRange * scale * cameraZoom。
+            const float camZoom = (camera.zoom > 0.f) ? camera.zoom : 1.f;
+            const float screenPxRange = font->pxRange * scale * camZoom;
+            maybeFlush(font->texture, true, screenPxRange);
+
+            float cursorX = text->x;
+            float cursorY = text->y;
+            const std::string& s = text->text;
+
+            for (size_t i = 0; i < s.size();) {
+                uint32_t cp = 0;
+                unsigned char c0 = static_cast<unsigned char>(s[i]);
+                size_t adv = 1;
+                if (c0 < 0x80) { cp = c0; adv = 1; }
+                else if ((c0 & 0xE0) == 0xC0 && i + 1 < s.size()) {
+                    cp = (c0 & 0x1F) << 6 | (static_cast<unsigned char>(s[i+1]) & 0x3F);
+                    adv = 2;
+                } else if ((c0 & 0xF0) == 0xE0 && i + 2 < s.size()) {
+                    cp = (c0 & 0x0F) << 12
+                       | (static_cast<unsigned char>(s[i+1]) & 0x3F) << 6
+                       | (static_cast<unsigned char>(s[i+2]) & 0x3F);
+                    adv = 3;
+                } else if ((c0 & 0xF8) == 0xF0 && i + 3 < s.size()) {
+                    cp = (c0 & 0x07) << 18
+                       | (static_cast<unsigned char>(s[i+1]) & 0x3F) << 12
+                       | (static_cast<unsigned char>(s[i+2]) & 0x3F) << 6
+                       | (static_cast<unsigned char>(s[i+3]) & 0x3F);
+                    adv = 4;
+                } else {
+                    cp = 0xFFFD; adv = 1;
+                }
+                i += adv;
+
+                const engine::Glyph* glyph = font->getGlyph(cp);
+                if (!glyph) {
+                    cursorX += font->fontSize * 0.5f * scale;
+                    continue;
+                }
+
+                // 屏幕为 y-down：字形顶端在屏幕上更靠上（y 更小）= baseline - bearingY。
+                const float x0 = cursorX + glyph->bearingX * scale;
+                const float y0 = cursorY - glyph->bearingY * scale;
+                const float x1 = x0 + glyph->width * scale;
+                const float y1 = y0 + glyph->height * scale;
+
+                pushQuad(x0, y0, x1, y0, x1, y1, x0, y1,
+                         glyph->u0, glyph->v0, glyph->u1, glyph->v1,
+                         text->color);
+
+                cursorX += glyph->advance * scale;
+            }
+        }
     }
     flush();
 
@@ -466,7 +547,6 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     };
 
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmdBuf, &colorTarget, 1, nullptr);
-    SDL_BindGPUGraphicsPipeline(pass, pipeline);
     SDL_PushGPUVertexUniformData(cmdBuf, 0, mvp, sizeof(mvp));
 
     if (!batchVerts_.empty()) {
@@ -476,11 +556,22 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
         SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
         for (const BatchSegment& segment : batches) {
+            SDL_GPUGraphicsPipeline* segPipeline = segment.isFont ? 
+                (pipeline == offscreenPipeline_ ? msdfOffscreenPipeline_ : msdfPipeline_) :
+                pipeline;
+            SDL_BindGPUGraphicsPipeline(pass, segPipeline);
+            
             if (textures_.valid(segment.tex)) {
                 TextureEntry& entry = textures_.get(segment.tex);
                 SDL_GPUTextureSamplerBinding binding{ entry.gpuTex, entry.sampler };
                 SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
             }
+            
+            if (segment.isFont) {
+                float pxRange = segment.pxRange;
+                SDL_PushGPUFragmentUniformData(cmdBuf, 0, &pxRange, sizeof(pxRange));
+            }
+            
             SDL_DrawGPUIndexedPrimitives(pass, segment.idxCount, 1, segment.idxOffset, segment.vertOffset, 0);
         }
     }
@@ -590,6 +681,12 @@ void SDLGPURenderDevice::createPipeline() {
 
     offscreenPipeline_ = createPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
     ASSERT_MSG(offscreenPipeline_, "Failed to create offscreen pipeline");
+    
+    msdfPipeline_ = createMSDFPipelineForFormat(swapchainFormat);
+    ASSERT_MSG(msdfPipeline_, "Failed to create MSDF swapchain pipeline");
+    
+    msdfOffscreenPipeline_ = createMSDFPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+    ASSERT_MSG(msdfOffscreenPipeline_, "Failed to create MSDF offscreen pipeline");
 
     core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8)", static_cast<int>(swapchainFormat));
 }
@@ -604,6 +701,65 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUText
     } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
         vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
         fs = loadShader(sprite_frag_dxil, sprite_frag_dxil_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, SDL_GPU_SHADERFORMAT_DXIL);
+#endif
+    }
+    if (!vs || !fs) {
+        if (vs) SDL_ReleaseGPUShader(device_, vs);
+        if (fs) SDL_ReleaseGPUShader(device_, fs);
+        return nullptr;
+    }
+
+    SDL_GPUVertexBufferDescription vbDesc{};
+    vbDesc.slot = 0;
+    vbDesc.pitch = sizeof(SpriteVertex);
+    vbDesc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    vbDesc.instance_step_rate = 0;
+
+    SDL_GPUVertexAttribute attrs[3]{};
+    attrs[0] = { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(SpriteVertex, x) };
+    attrs[1] = { 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(SpriteVertex, u) };
+    attrs[2] = { 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(SpriteVertex, r) };
+
+    SDL_GPUColorTargetDescription colorTarget{};
+    colorTarget.format = format;
+    colorTarget.blend_state.enable_blend = true;
+    colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    colorTarget.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    colorTarget.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+
+    SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+    pipeInfo.vertex_shader = vs;
+    pipeInfo.fragment_shader = fs;
+    pipeInfo.vertex_input_state.vertex_buffer_descriptions = &vbDesc;
+    pipeInfo.vertex_input_state.num_vertex_buffers = 1;
+    pipeInfo.vertex_input_state.vertex_attributes = attrs;
+    pipeInfo.vertex_input_state.num_vertex_attributes = 3;
+    pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    pipeInfo.target_info.color_target_descriptions = &colorTarget;
+    pipeInfo.target_info.num_color_targets = 1;
+
+    SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
+
+    SDL_ReleaseGPUShader(device_, vs);
+    SDL_ReleaseGPUShader(device_, fs);
+    return pipeline;
+}
+
+SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createMSDFPipelineForFormat(SDL_GPUTextureFormat format) {
+    SDL_GPUShader* vs = nullptr;
+    SDL_GPUShader* fs = nullptr;
+    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+        vs = loadShader(sprite_vert_spv, sprite_vert_spv_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+        fs = loadShader(msdf_frag_spv, msdf_frag_spv_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+#ifdef QGAME_HAS_DXIL_SHADERS
+    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
+        vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
+        fs = loadShader(msdf_frag_dxil, msdf_frag_dxil_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1, SDL_GPU_SHADERFORMAT_DXIL);
 #endif
     }
     if (!vs || !fs) {

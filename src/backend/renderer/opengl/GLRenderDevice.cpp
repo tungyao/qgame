@@ -37,6 +37,7 @@ static PFNGLDELETEPROGRAMPROC               s_glDeleteProgram           = nullpt
 static PFNGLGETUNIFORMLOCATIONPROC          s_glGetUniformLocation      = nullptr;
 static PFNGLUNIFORMMATRIX4FVPROC            s_glUniformMatrix4fv        = nullptr;
 static PFNGLUNIFORM1IPROC                   s_glUniform1i               = nullptr;
+static PFNGLUNIFORM1FPROC                   s_glUniform1f               = nullptr;
 static PFNGLENABLEVERTEXATTRIBARRAYPROC     s_glEnableVertexAttribArray = nullptr;
 static PFNGLVERTEXATTRIBPOINTERPROC         s_glVertexAttribPointer     = nullptr;
 // GL 3.0
@@ -78,6 +79,7 @@ static PFNGLDELETESYNCPROC                  s_glDeleteSync              = nullpt
 #define glGetUniformLocation      s_glGetUniformLocation
 #define glUniformMatrix4fv        s_glUniformMatrix4fv
 #define glUniform1i               s_glUniform1i
+#define glUniform1f               s_glUniform1f
 #define glEnableVertexAttribArray s_glEnableVertexAttribArray
 #define glVertexAttribPointer     s_glVertexAttribPointer
 #define glGenVertexArrays         s_glGenVertexArrays
@@ -121,6 +123,7 @@ static bool loadGLFunctions() {
     QGAME_GL_LOAD(UseProgram)              QGAME_GL_LOAD(DeleteShader)
     QGAME_GL_LOAD(DeleteProgram)           QGAME_GL_LOAD(GetUniformLocation)
     QGAME_GL_LOAD(UniformMatrix4fv)        QGAME_GL_LOAD(Uniform1i)
+    QGAME_GL_LOAD(Uniform1f)
     QGAME_GL_LOAD(EnableVertexAttribArray) QGAME_GL_LOAD(VertexAttribPointer)
     QGAME_GL_LOAD(GenVertexArrays)         QGAME_GL_LOAD(BindVertexArray)
     QGAME_GL_LOAD(DeleteVertexArrays)
@@ -159,6 +162,26 @@ uniform sampler2D uTexture;
 out vec4 fragColor;
 void main() {
     fragColor = texture(uTexture, vUV) * vColor;
+}
+)";
+
+static const char* k_msdfFragSrc = R"(
+#version 330 core
+in vec2 vUV;
+in vec4 vColor;
+uniform sampler2D uTexture;
+uniform float uPxRange = 4.0;
+out vec4 fragColor;
+
+float median(float r, float g, float b) {
+    return max(min(r, g), min(max(r, g), b));
+}
+
+void main() {
+    vec3 sampleVal = texture(uTexture, vUV).rgb;
+    float sigDist = median(sampleVal.r, sampleVal.g, sampleVal.b) - 0.5;
+    float opacity = clamp(sigDist * uPxRange + 0.5, 0.0, 1.0);
+    fragColor = vec4(vColor.rgb, vColor.a * opacity);
 }
 )";
 
@@ -243,8 +266,9 @@ TextureHandle GLRenderDevice::createTexture(const TextureDesc& desc) {
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const GLint filter = (desc.filter == TextureFilter::Linear) ? GL_LINEAR : GL_NEAREST;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
@@ -264,6 +288,21 @@ void GLRenderDevice::destroyTexture(TextureHandle h) {
 
 ShaderHandle GLRenderDevice::createShader(const ShaderDesc&) { return {}; }
 void         GLRenderDevice::destroyShader(ShaderHandle)     {}
+
+engine::FontHandle GLRenderDevice::createFont(const engine::FontData& fontData) {
+    engine::FontData data = fontData;
+    return fonts_.insert(std::move(data));
+}
+
+void GLRenderDevice::destroyFont(engine::FontHandle h) {
+    if (fonts_.valid(h)) {
+        fonts_.remove(h);
+    }
+}
+
+const engine::FontData* GLRenderDevice::getFont(engine::FontHandle h) const {
+    return fonts_.valid(h) ? &fonts_.get(h) : nullptr;
+}
 
 // ── 帧控制 ────────────────────────────────────────────────────────────────────
 
@@ -359,6 +398,29 @@ void GLRenderDevice::createShaderProgram() {
     uProjLoc_ = glGetUniformLocation(shaderProgram_, "uProj");
     uTexLoc_  = glGetUniformLocation(shaderProgram_, "uTexture");
     ASSERT_MSG(uProjLoc_ >= 0 && uTexLoc_ >= 0, "GL uniform location not found");
+    
+    GLuint msdfFs = compileShader(GL_FRAGMENT_SHADER, k_msdfFragSrc);
+    ASSERT_MSG(msdfFs, "MSDF shader compile failed");
+    
+    msdfShaderProgram_ = glCreateProgram();
+    glAttachShader(msdfShaderProgram_, vs);
+    glAttachShader(msdfShaderProgram_, msdfFs);
+    glLinkProgram(msdfShaderProgram_);
+    
+    glGetProgramiv(msdfShaderProgram_, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(msdfShaderProgram_, sizeof(log), nullptr, log);
+        core::logError("MSDF shader link error: %s", log);
+    }
+    
+    glDeleteShader(msdfFs);
+    
+    msdfProjLoc_    = glGetUniformLocation(msdfShaderProgram_, "uProj");
+    msdfTexLoc_     = glGetUniformLocation(msdfShaderProgram_, "uTexture");
+    msdfPxRangeLoc_ = glGetUniformLocation(msdfShaderProgram_, "uPxRange");
+    ASSERT_MSG(msdfProjLoc_ >= 0 && msdfTexLoc_ >= 0 && msdfPxRangeLoc_ >= 0, 
+               "MSDF shader uniform location not found");
 }
 
 void GLRenderDevice::createBuffers() {
@@ -466,10 +528,10 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     batchIdx_.clear();
     std::vector<BatchSegment> batches;
 
-    // 按命令流顺序构建 batch：texture 变化或 batch 满时 flush。
-    // 不再按 cmd 类型分组——sprite/tile 完全按 CommandBuffer 提交顺序绘制。
     TextureHandle currentTex{};
     bool          hasCurrent = false;
+    bool          currentIsFont = false;
+    float         currentPxRange = 4.0f;
     uint32_t      batchIdxStart  = 0;
     int32_t       batchVertStart = 0;
 
@@ -477,18 +539,21 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
         if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
             batches.push_back({ currentTex, batchIdxStart,
                                 static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                                batchVertStart });
+                                batchVertStart, currentIsFont, currentPxRange });
             batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
             batchVertStart = static_cast<int32_t>(batchVerts_.size());
         }
     };
 
-    auto maybeFlush = [&](TextureHandle tex) {
+    auto maybeFlush = [&](TextureHandle tex, bool isFont = false, float pxRange = 4.0f) {
         const bool batchFull =
             (batchVerts_.size() - static_cast<size_t>(batchVertStart) >= MAX_SPRITES_PER_BATCH * 4);
-        if (!hasCurrent || tex != currentTex || batchFull) {
+        if (!hasCurrent || tex != currentTex || batchFull ||
+            currentIsFont != isFont || (isFont && currentPxRange != pxRange)) {
             flush();
             currentTex = tex;
+            currentIsFont = isFont;
+            currentPxRange = pxRange;
             hasCurrent = true;
         }
     };
@@ -558,6 +623,61 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
             pushQuad(px,py, px1,py, px1,py1, px,py1, u0,v0, u1,v1,
                      core::Color{255,255,255,255});
         }
+        else if (auto* text = std::get_if<DrawTextCmd>(cmd)) {
+            const engine::FontData* font = getFont(text->font);
+            if (!font || !textures_.valid(font->texture)) continue;
+            
+            const float scale = text->fontSize / font->fontSize;
+            const float camZoom = (camera.zoom > 0.f) ? camera.zoom : 1.f;
+            const float screenPxRange = font->pxRange * scale * camZoom;
+            maybeFlush(font->texture, true, screenPxRange);
+
+            float cursorX = text->x;
+            float cursorY = text->y;
+            const std::string& s = text->text;
+
+            for (size_t i = 0; i < s.size();) {
+                uint32_t cp = 0;
+                unsigned char c0 = static_cast<unsigned char>(s[i]);
+                size_t adv = 1;
+                if (c0 < 0x80) { cp = c0; adv = 1; }
+                else if ((c0 & 0xE0) == 0xC0 && i + 1 < s.size()) {
+                    cp = (c0 & 0x1F) << 6 | (static_cast<unsigned char>(s[i+1]) & 0x3F);
+                    adv = 2;
+                } else if ((c0 & 0xF0) == 0xE0 && i + 2 < s.size()) {
+                    cp = (c0 & 0x0F) << 12
+                       | (static_cast<unsigned char>(s[i+1]) & 0x3F) << 6
+                       | (static_cast<unsigned char>(s[i+2]) & 0x3F);
+                    adv = 3;
+                } else if ((c0 & 0xF8) == 0xF0 && i + 3 < s.size()) {
+                    cp = (c0 & 0x07) << 18
+                       | (static_cast<unsigned char>(s[i+1]) & 0x3F) << 12
+                       | (static_cast<unsigned char>(s[i+2]) & 0x3F) << 6
+                       | (static_cast<unsigned char>(s[i+3]) & 0x3F);
+                    adv = 4;
+                } else {
+                    cp = 0xFFFD; adv = 1;
+                }
+                i += adv;
+
+                const engine::Glyph* glyph = font->getGlyph(cp);
+                if (!glyph) {
+                    cursorX += font->fontSize * 0.5f * scale;
+                    continue;
+                }
+
+                const float x0 = cursorX + glyph->bearingX * scale;
+                const float y0 = cursorY - glyph->bearingY * scale;
+                const float x1 = x0 + glyph->width * scale;
+                const float y1 = y0 + glyph->height * scale;
+
+                pushQuad(x0, y0, x1, y0, x1, y1, x0, y1,
+                         glyph->u0, glyph->v0, glyph->u1, glyph->v1,
+                         text->color);
+
+                cursorX += glyph->advance * scale;
+            }
+        }
     }
     flush();
 
@@ -608,22 +728,29 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     glUniform1i(uTexLoc_, 0);
     glActiveTexture(GL_TEXTURE0);
 
-    auto drawBatches = [&](const std::vector<BatchSegment>& batches) {
-        for (const BatchSegment& seg : batches) {
-            if (textures_.valid(seg.tex)) {
-                glBindTexture(GL_TEXTURE_2D, textures_.get(seg.tex).glTex);
-            }
-            glDrawElementsBaseVertex(
-                GL_TRIANGLES,
-                static_cast<GLsizei>(seg.idxCount),
-                GL_UNSIGNED_SHORT,
-                reinterpret_cast<const void*>(seg.idxOffset * sizeof(uint16_t)),
-                seg.vertOffset
-            );
+    for (const BatchSegment& seg : batches) {
+        if (seg.isFont) {
+            glUseProgram(msdfShaderProgram_);
+            glUniformMatrix4fv(msdfProjLoc_, 1, GL_FALSE, mvp);
+            glUniform1i(msdfTexLoc_, 0);
+            glUniform1f(msdfPxRangeLoc_, seg.pxRange);
+        } else {
+            glUseProgram(shaderProgram_);
+            glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
+            glUniform1i(uTexLoc_, 0);
         }
-    };
-
-    drawBatches(batches);
+        
+        if (textures_.valid(seg.tex)) {
+            glBindTexture(GL_TEXTURE_2D, textures_.get(seg.tex).glTex);
+        }
+        glDrawElementsBaseVertex(
+            GL_TRIANGLES,
+            static_cast<GLsizei>(seg.idxCount),
+            GL_UNSIGNED_SHORT,
+            reinterpret_cast<const void*>(seg.idxOffset * sizeof(uint16_t)),
+            seg.vertOffset
+        );
+    }
 
     glBindVertexArray(0);
     glUseProgram(0);

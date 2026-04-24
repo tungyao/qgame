@@ -30,7 +30,14 @@
       "Bash(./tests/tests_physics)",
       "Bash(grep -E \"\\\\.\\(h|cpp\\)$\")",
       "Bash(awk '/^void SDLGPURenderDevice::|^TextureHandle SDLGPURenderDevice::|^SDL_GPU/{print NR\": \"$0}' /root/server/qgame/src/backend/renderer/sdl_gpu/SDLGPURenderDevice.cpp)",
-      "Bash(grep -v \"RenderPipeline\\\\.\\\\\\(cpp\\\\|h\\\\\\)$\")"
+      "Bash(grep -v \"RenderPipeline\\\\.\\\\\\(cpp\\\\|h\\\\\\)$\")",
+      "Bash(grep -v \"\\\\.h$\")",
+      "Bash(apt list *)",
+      "Bash(apt-cache search *)",
+      "Bash(mkdir -p /root/server/qgame/assets/fonts)",
+      "Bash(cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /root/server/qgame/assets/fonts/DejaVuSans.ttf)",
+      "Bash(/tmp/msdf-atlas-gen/build/bin/msdf-atlas-gen -font *)",
+      "Bash(glslc -fshader-stage=frag assets/shaders/msdf.frag.glsl -o /tmp/msdf_frag.spv)"
     ]
   }
 }

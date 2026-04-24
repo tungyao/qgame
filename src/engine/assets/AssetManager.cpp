@@ -1,4 +1,5 @@
 #include "AssetManager.h"
+#include "FontLoader.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../backend/audio/IAudioDevice.h"
 #include "../../core/Logger.h"
@@ -23,6 +24,10 @@ void AssetManager::init(backend::IRenderDevice* render, backend::IAudioDevice* a
 void AssetManager::shutdown() {
     // 强制释放所有残留资源（不依赖 release 引用计数）
     if (render_) {
+        for (auto& [path, e] : fontByPath_) {
+            render_->destroyFont(e.handle);
+            if (e.atlas.valid()) render_->destroyTexture(e.atlas);
+        }
         for (auto& [path, e] : texByPath_)
             render_->destroyTexture(e.handle);
     }
@@ -32,8 +37,10 @@ void AssetManager::shutdown() {
     }
     texByPath_.clear();
     sndByPath_.clear();
+    fontByPath_.clear();
     texPathById_.clear();
     sndPathById_.clear();
+    fontPathById_.clear();
     animByPath_.clear();
     animPathById_.clear();
 }
@@ -302,6 +309,70 @@ const std::string& AssetManager::soundPath(SoundHandle h) const {
     uint32_t id = (uint32_t(h.index) << 12) | h.version;
     auto it = sndPathById_.find(id);
     return (it != sndPathById_.end()) ? it->second : kEmpty_;
+}
+
+FontHandle AssetManager::loadFont(const std::string& path) {
+    auto it = fontByPath_.find(path);
+    if (it != fontByPath_.end()) {
+        it->second.refCount++;
+        return it->second.handle;
+    }
+    if (!render_) return {};
+
+    const std::string binPath = path + ".font";
+    FontData data{};
+    std::vector<uint8_t> atlas;
+    if (!loadFontFile(binPath, data, atlas)) {
+        core::logError("[AssetManager] failed to load font: %s (expected baked file %s)",
+                       path.c_str(), binPath.c_str());
+        return {};
+    }
+
+    backend::TextureDesc desc{};
+    desc.data     = atlas.data();
+    desc.width    = static_cast<int>(data.atlasWidth);
+    desc.height   = static_cast<int>(data.atlasHeight);
+    desc.channels = 4;
+    desc.filter   = backend::TextureFilter::Linear;  // MSDF 必须线性
+    TextureHandle atlasTex = render_->createTexture(desc);
+    if (!atlasTex.valid()) {
+        core::logError("[AssetManager] failed to create font atlas texture: %s", path.c_str());
+        return {};
+    }
+    data.texture = atlasTex;
+
+    FontHandle fh = render_->createFont(data);
+    if (!fh.valid()) {
+        render_->destroyTexture(atlasTex);
+        return {};
+    }
+
+    uint32_t id = (uint32_t(fh.index) << 12) | fh.version;
+    fontByPath_[path]  = {fh, atlasTex, 1};
+    fontPathById_[id]  = path;
+    return fh;
+}
+
+void AssetManager::releaseFont(FontHandle h) {
+    if (!h.valid() || !render_) return;
+    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    auto pit = fontPathById_.find(id);
+    if (pit == fontPathById_.end()) return;
+
+    auto& entry = fontByPath_[pit->second];
+    if (--entry.refCount <= 0) {
+        render_->destroyFont(h);
+        if (entry.atlas.valid()) render_->destroyTexture(entry.atlas);
+        fontByPath_.erase(pit->second);
+        fontPathById_.erase(id);
+    }
+}
+
+const std::string& AssetManager::fontPath(FontHandle h) const {
+    if (!h.valid()) return kEmpty_;
+    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    auto it = fontPathById_.find(id);
+    return (it != fontPathById_.end()) ? it->second : kEmpty_;
 }
 
 } // namespace engine

@@ -1,6 +1,7 @@
 #include "RenderSystem.h"
 #include "../runtime/EngineContext.h"
 #include "../components/RenderComponents.h"
+#include "../components/TextComponent.h"
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../core/Logger.h"
@@ -30,6 +31,8 @@ void RenderSystem::shutdown() {}
 namespace {
 // 统一的 2D 可绘制条目：sprite 和 tile 走同一条排序流水线，保证
 // 不同命令类型在同 pass/layer 下也能按 ySort / sortKey 正确交错。
+enum class DrawKind { Sprite, Tile, Text };
+
 struct Drawable {
     engine::RenderPass pass;
     int   layer;
@@ -38,9 +41,10 @@ struct Drawable {
     int   sortKey;
     int   seq;        // 稳定 tie-breaker
 
-    bool isTile;
+    DrawKind kind;
     backend::DrawSpriteCmd sprite;
     backend::DrawTileCmd   tile;
+    backend::DrawTextCmd   text;
 };
 
 bool drawableLess(const Drawable& A, const Drawable& B) {
@@ -83,7 +87,7 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
                     d.y      = tf.y + static_cast<float>(y * tmap.tileSize);
                     d.sortKey = 0;
                     d.seq    = seq++;
-                    d.isTile = true;
+                    d.kind   = DrawKind::Tile;
                     d.tile.tileset  = tmap.tileset;
                     d.tile.tileId   = tileId;
                     d.tile.gridX    = static_cast<int>(tf.x) + x;
@@ -109,7 +113,7 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         d.y       = tf.y;
         d.sortKey = sprite.sortOrder;
         d.seq     = seq++;
-        d.isTile  = false;
+        d.kind    = DrawKind::Sprite;
         auto& s = d.sprite;
         s.texture  = sprite.texture;
         s.x        = tf.x;
@@ -128,12 +132,42 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         drawables.push_back(d);
     }
 
+    // text
+    auto textView = ctx.world.view<Transform, TextComponent>();
+    for (auto [ent, tf, text] : textView.each()) {
+        if (!text.visible || text.text.empty()) continue;
+
+        Drawable d{};
+        d.pass    = text.pass;
+        d.layer   = text.layer;
+        d.ySort   = text.ySort;
+        d.y       = tf.y;
+        d.sortKey = text.sortOrder;
+        d.seq     = seq++;
+        d.kind    = DrawKind::Text;
+        auto& t = d.text;
+        t.font     = text.font;
+        t.text     = text.text;
+        t.x        = tf.x;
+        t.y        = tf.y;
+        t.fontSize = text.fontSize;
+        t.layer    = text.layer;
+        t.sortKey  = text.sortOrder;
+        t.ySort    = text.ySort;
+        t.color    = text.color;
+        t.pass     = text.pass;
+        drawables.push_back(d);
+    }
+
     std::sort(drawables.begin(), drawables.end(), drawableLess);
 
     // 按排序顺序写入 CommandBuffer。后端必须按命令流顺序绘制，不再二次排序。
     for (const Drawable& d : drawables) {
-        if (d.isTile) cb.drawTile(d.tile);
-        else          cb.drawSprite(d.sprite);
+        switch (d.kind) {
+            case DrawKind::Tile:   cb.drawTile(d.tile);     break;
+            case DrawKind::Sprite: cb.drawSprite(d.sprite); break;
+            case DrawKind::Text:   cb.drawText(d.text);     break;
+        }
     }
 
     cb.end();

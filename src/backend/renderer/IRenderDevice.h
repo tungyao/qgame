@@ -3,8 +3,11 @@
 #include "IBackendSystem.h"
 #include "CommandBuffer.h"
 #include "../shared/ResourceHandle.h"
+#include "../../engine/components/FontData.h"
 
 namespace backend {
+
+enum class TextureFilter { Nearest, Linear };
 
 struct TextureDesc {
     int width = 0;
@@ -12,6 +15,7 @@ struct TextureDesc {
     int channels = 4;
     const void* data = nullptr;
     bool mips = false;
+    TextureFilter filter = TextureFilter::Nearest;
 };
 
 struct ShaderDesc {
@@ -27,6 +31,10 @@ public:
     virtual void destroyTexture(TextureHandle) = 0;
     virtual ShaderHandle createShader(const ShaderDesc&) = 0;
     virtual void destroyShader(ShaderHandle) = 0;
+    
+    virtual engine::FontHandle createFont(const engine::FontData& fontData) = 0;
+    virtual void               destroyFont(engine::FontHandle) = 0;
+    virtual const engine::FontData* getFont(engine::FontHandle) const = 0;
 
     virtual void submitCommandBuffer(const CommandBuffer&) = 0;
 

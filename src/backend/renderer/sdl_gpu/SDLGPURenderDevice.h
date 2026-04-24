@@ -27,6 +27,10 @@ public:
     void          destroyTexture(TextureHandle)     override;
     ShaderHandle  createShader(const ShaderDesc&)  override;
     void          destroyShader(ShaderHandle)       override;
+    
+    engine::FontHandle createFont(const engine::FontData& fontData) override;
+    void               destroyFont(engine::FontHandle)               override;
+    const engine::FontData* getFont(engine::FontHandle) const       override;
 
     void submitCommandBuffer(const CommandBuffer&) override;
     void submitPass(const PassSubmitInfo&, const std::vector<const RenderCmd*>&) override;
@@ -60,6 +64,7 @@ private:
     // ── 初始化辅助 ────────────────────────────────────────────────────────────
     void createPipeline();
     SDL_GPUGraphicsPipeline* createPipelineForFormat(SDL_GPUTextureFormat format);
+    SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUShader* loadShader(const uint8_t* code, size_t size,
                               SDL_GPUShaderStage stage,
                               int numSamplers, int numUniformBuffers,
@@ -71,6 +76,8 @@ private:
         uint32_t      idxOffset;
         uint32_t      idxCount;
         int32_t       vertOffset;
+        bool          isFont = false;
+        float         pxRange = 4.0f;
     };
     void buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds,
                              std::vector<BatchSegment>& batches);
@@ -88,6 +95,8 @@ private:
     SDL_GPUDevice*           device_             = nullptr;
     SDL_GPUGraphicsPipeline* pipeline_           = nullptr;
     SDL_GPUGraphicsPipeline* offscreenPipeline_  = nullptr;
+    SDL_GPUGraphicsPipeline* msdfPipeline_       = nullptr;
+    SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
     SDL_GPUShaderFormat      shaderFormat_       = SDL_GPU_SHADERFORMAT_INVALID;
 
     // 每帧动态顶点/索引缓冲（CPU→GPU transfer）
@@ -99,6 +108,7 @@ private:
     // SDL3 GPU API 支持 SDL_PushGPUVertexUniformData
 
     core::HandleMap<TextureHandle, TextureEntry> textures_;
+    core::HandleMap<engine::FontHandle, engine::FontData> fonts_;
     TextureHandle             editorRenderTarget_{};
     int                       editorRenderTargetWidth_ = 0;
     int                       editorRenderTargetHeight_ = 0;

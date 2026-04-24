@@ -40,5 +40,10 @@ void CommandBuffer::drawTile(const DrawTileCmd& cmd) {
     cmds_.emplace_back(cmd);
 }
 
+void CommandBuffer::drawText(const DrawTextCmd& cmd) {
+    ASSERT_MSG(recording_, "CommandBuffer not recording");
+    cmds_.emplace_back(cmd);
+}
+
 
 } // namespace backend

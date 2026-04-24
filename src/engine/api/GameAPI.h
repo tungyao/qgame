@@ -58,6 +58,8 @@ public:
     // ── Asset ─────────────────────────────────────────────────────────────
     TextureHandle loadTexture(const char* assetPath);
     void          releaseTexture(TextureHandle h);
+    FontHandle    loadFont(const char* assetPath);
+    void          releaseFont(FontHandle h);
     AssetManager& assetManager();
 
     // 从内存像素数据上传纹理（RGBA8，测试/程序化纹理用）

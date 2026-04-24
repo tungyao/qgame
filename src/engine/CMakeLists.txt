@@ -11,6 +11,7 @@ add_library(engine SHARED
     systems/AnimatorSystem.cpp
     input/SDLInputProvider.cpp
     assets/AssetManager.cpp
+    assets/FontLoader.cpp
     scene/SceneSerializer.cpp
 )
 
