@@ -1,7 +1,7 @@
 # StarEngine — 架构设计文档
 
 > 类星露谷物语 2D 游戏引擎  
-> 语言：C++20 | ECS：EnTT | 渲染：SDL3 GPU API | 窗口/输入：SDL3 | 编辑器：ImGui
+> 语言：C++20 | ECS：EnTT | 渲染：SDL3 GPU API | 窗口/输入：SDL3
 
 ---
 
@@ -379,7 +379,7 @@ private:
 #ifdef BUILD_EDITOR
 class EditorAPI {
 public:
-    // 场景预览（渲染到离屏纹理，给 ImGui 显示）
+    // 场景预览（渲染到离屏纹理）
     TextureHandle renderSceneToTexture(int w, int h);
 
     // 编辑器摄像机
@@ -461,7 +461,6 @@ set(CMAKE_CXX_STANDARD 20)
 add_subdirectory(third_party/SDL2)
 add_subdirectory(third_party/bgfx)
 add_subdirectory(third_party/entt)
-add_subdirectory(third_party/imgui)
 add_subdirectory(third_party/nlohmann_json)
 
 # 引擎模块（按依赖顺序）
@@ -541,7 +540,6 @@ StarEngine/
 │   ├── SDL2/
 │   ├── bgfx/
 │   ├── entt/
-│   ├── imgui/
 │   └── nlohmann_json/
 ├── assets/
 │   ├── textures/
@@ -563,7 +561,7 @@ StarEngine/
 | Month 3 | RenderSystem + bgfx 实现 + Tilemap 渲染 |
 | Month 4 | AudioSystem + AudioThread + SDL2_mixer 实现 |
 | Month 5 | InputSystem + PhysicsSystem(AABB) + EnTT ECS 集成 |
-| Month 6 | GameAPI + EditorAPI + ImGui 编辑器框架 |
+| Month 6 | GameAPI + EditorAPI + 编辑器框架 |
 | Month 7 | 场景保存/加载 + AssetManager |
 | Month 8 | iOS / Android 打包 + 平台适配 |
 | Month 9+ | 游戏逻辑（农场、NPC、背包、时间系统） |

@@ -70,7 +70,7 @@
 
 7. **EditorViewportRenderer.cpp** (新建)
    - `render()`: 调用 `renderToTextureOffscreen()`
-   - `getTexture()`: 获取 SDL_GPUTexture 指针供 ImGui 使用
+   - `getTexture()`: 获取 SDL_GPUTexture 指针
    - `buildCommandBuffer()`: 独立构建渲染命令（复制自 RenderSystem）
 
 8. **EditorApplication.h**
@@ -150,7 +150,8 @@ ctx_.renderToSwapchain = false;
 // 使用 ViewportRenderer 渲染
 TextureHandle texture = viewportRenderer_.render(width, height);
 SDL_GPUTexture* gpuTex = viewportRenderer_.getTexture(texture);
-ImGui::Image(reinterpret_cast<ImTextureID>(gpuTex), ImVec2(width, height));
+// 渲染纹理到视口
+renderTexture(gpuTex, width, height);
 ```
 
 ## 注意事项

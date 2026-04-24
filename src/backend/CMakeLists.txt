@@ -60,8 +60,6 @@ target_include_directories(backend
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
     PRIVATE "${SHADER_GEN}"
     PRIVATE "${SDL3_mixer_SOURCE_DIR}/include"
-    PRIVATE "${imgui_SOURCE_DIR}"
-    PRIVATE "${imgui_SOURCE_DIR}/backends"
 )
 
 # OpenGL 链接（跨平台）
@@ -74,8 +72,7 @@ endif()
 
 target_link_libraries(backend
     PRIVATE core
-    PRIVATE imgui
     PRIVATE platform
-    PRIVATE SDL3::SDL3-static
-    PRIVATE SDL3_mixer::SDL3_mixer-static
+    PRIVATE SDL3::SDL3
+    PRIVATE SDL3_mixer::SDL3_mixer
 )

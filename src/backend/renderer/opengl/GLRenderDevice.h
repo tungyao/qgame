@@ -28,10 +28,7 @@ public:
     // IRenderDevice — 提交 & 帧控制
     void submitCommandBuffer(const CommandBuffer&) override;
     void submitPass(const PassSubmitInfo&, const std::vector<const RenderCmd*>&) override;
-    void submitImGuiDrawData(const ImDrawData*)    override;
     void present()                                 override;
-    void initImGui()                               override;
-    void shutdownImGui()                           override;
 
     // IRenderDevice — 离屏渲染
     TextureHandle renderToTexture(const CommandBuffer&, int w, int h)          override;

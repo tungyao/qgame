@@ -5,11 +5,12 @@
 #include "../assets/AssetManager.h"
 #include "../components/PhysicsComponents.h"
 #include "../systems/PhysicsSystem.h"
+#include "../Export.h"
 
 namespace engine {
 
 // game 层唯一对外接口 — 不暴露 backend，不暴露 EngineContext 内部
-class GameAPI {
+class QGAME_ENGINE_API GameAPI {
 public:
     explicit GameAPI(EngineContext& ctx) : ctx_(ctx) {}
 

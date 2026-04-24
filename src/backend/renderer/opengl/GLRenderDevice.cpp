@@ -94,10 +94,6 @@ static PFNGLDELETESYNCPROC                  s_glDeleteSync              = nullpt
 #define glDeleteSync              s_glDeleteSync
 
 
-#include <imgui.h>
-#include <imgui_impl_sdl3.h>
-#include <imgui_impl_opengl3.h>
-
 #include "../CommandBuffer.h"
 #include "../../../core/Logger.h"
 #include "../../../core/Assert.h"
@@ -287,30 +283,8 @@ void GLRenderDevice::submitPass(const PassSubmitInfo& info,
     renderCmdsToTarget(cmds, cam, info.clearEnabled, info.clearColor, 0, w, h);
 }
 
-void GLRenderDevice::submitImGuiDrawData(const ImDrawData* drawData) {
-    if (!drawData) return;
-    ImGui_ImplOpenGL3_RenderDrawData(const_cast<ImDrawData*>(drawData));
-}
-
 void GLRenderDevice::present() {
     SDL_GL_SwapWindow(window_);
-}
-
-void GLRenderDevice::initImGui() {
-    int w = 0, h = 0;
-    SDL_GetWindowSize(window_, &w, &h);
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.DisplaySize = ImVec2(static_cast<float>(w), static_cast<float>(h));
-
-    ImGui_ImplSDL3_InitForOpenGL(window_, glContext_);
-    ImGui_ImplOpenGL3_Init("#version 330 core");
-}
-
-void GLRenderDevice::shutdownImGui() {
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplSDL3_Shutdown();
 }
 
 // ── 离屏渲染 ──────────────────────────────────────────────────────────────────
@@ -339,7 +313,7 @@ TextureHandle GLRenderDevice::renderToTextureOffscreen(const CommandBuffer& cb, 
 void* GLRenderDevice::getRawTexture(TextureHandle handle) const {
     if (!textures_.valid(handle)) return nullptr;
     const TextureEntry& e = textures_.get(handle);
-    // ImGui on OpenGL expects the texture ID as a GLuint cast to ImTextureID
+    // OpenGL backend expects the texture ID as a GLuint
     return reinterpret_cast<void*>(static_cast<uintptr_t>(e.glTex));
 }
 

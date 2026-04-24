@@ -1,6 +1,6 @@
 # Month 7: 组件编辑工作流实现计划
 
-> 当前状态：Month 6 已完成编辑器框架基础建设（ImGui 接入、视口离屏渲染、基础面板）
+> 当前状态：Month 6 已完成编辑器框架基础建设（视口离屏渲染、基础面板）
 > 本阶段目标：实现 Inspector 组件化系统，支持所有现有组件的可编辑
 
 ---
@@ -8,8 +8,7 @@
 ## 一、当前状态
 
 ### 已完成
-- EditorAPI 基础接口（离屏渲染、编辑器相机、临时实体、ImGui 提交）
-- ImGui 已接入 SDL GPU 渲染后端
+- EditorAPI 基础接口（离屏渲染、编辑器相机、临时实体）
 - 视口离屏预览链路已跑通
 - EditorApplication 有 5 个面板：Editor / Hierarchy / Inspector / Viewport / Stats
 - Inspector 已支持编辑 Transform、Camera、Sprite 三个组件（硬编码）
@@ -81,7 +80,7 @@ public:
 
 为常见字段类型提供模板函数：
 
-| 函数 | ImGui 控件 |
+| 函数 | 控件 |
 |------|-----------|
 | `editFloat(void* ptr, const char* label, float step = 1.0f, float min = 0, float max = 0)` | `DragFloat` |
 | `editInt(void* ptr, const char* label, int step = 1)` | `DragInt` |
@@ -98,49 +97,49 @@ public:
 // Transform: x, y, rotation, scaleX, scaleY
 ComponentRegistry::registerComponent<Transform>("Transform", [](auto entity, auto& world) {
     auto& c = world.get<Transform>(entity);
-    ImGui::DragFloat2("Position", &c.x);
-    ImGui::DragFloat("Rotation", &c.rotation, 0.01f);
-    ImGui::DragFloat2("Scale", &c.scaleX, 0.01f, 0.1f, 10.0f);
+    ("Position", &c.x);
+    ("Rotation", &c.rotation, 0.01f);
+    ("Scale", &c.scaleX, 0.01f, 0.1f, 10.0f);
 });
 
 // Sprite: texture, srcRect, layer, tint, pivotX, pivotY
 ComponentRegistry::registerComponent<Sprite>("Sprite", [](auto entity, auto& world) {
     auto& c = world.get<Sprite>(entity);
-    ImGui::Text("Texture: %u", c.texture.index);
-    ImGui::DragInt("Layer", &c.layer);
+    ("Texture: %u", c.texture.index);
+    ("Layer", &c.layer);
     // ColorEdit4, DragFloat2 for pivot...
 });
 
 // TileMap: width, height, tileSize, tileset, layers
 ComponentRegistry::registerComponent<TileMap>("TileMap", [](auto entity, auto& world) {
     auto& c = world.get<TileMap>(entity);
-    ImGui::DragInt("Width", &c.width);
-    ImGui::DragInt("Height", &c.height);
-    ImGui::DragInt("Tile Size", &c.tileSize);
+    ("Width", &c.width);
+    ("Height", &c.height);
+    ("Tile Size", &c.tileSize);
     // tile editing (future)
 });
 
 // Camera: zoom, primary
 ComponentRegistry::registerComponent<Camera>("Camera", [](auto entity, auto& world) {
     auto& c = world.get<Camera>(entity);
-    ImGui::Checkbox("Primary", &c.primary);
-    ImGui::DragFloat("Zoom", &c.zoom, 0.01f, 0.1f, 8.0f);
+    ("Primary", &c.primary);
+    ("Zoom", &c.zoom, 0.01f, 0.1f, 8.0f);
 });
 
 // RigidBody: velocityX, velocityY, gravityScale, isKinematic
 ComponentRegistry::registerComponent<RigidBody>("RigidBody", [](auto entity, auto& world) {
     auto& c = world.get<RigidBody>(entity);
-    ImGui::DragFloat2("Velocity", &c.velocityX);
-    ImGui::DragFloat("Gravity Scale", &c.gravityScale);
-    ImGui::Checkbox("Is Kinematic", &c.isKinematic);
+    ("Velocity", &c.velocityX);
+    ("Gravity Scale", &c.gravityScale);
+    ("Is Kinematic", &c.isKinematic);
 });
 
 // Collider: width, height, offsetX, offsetY, isTrigger
 ComponentRegistry::registerComponent<Collider>("Collider", [](auto entity, auto& world) {
     auto& c = world.get<Collider>(entity);
-    ImGui::DragFloat2("Size", &c.width);
-    ImGui::DragFloat2("Offset", &c.offsetX);
-    ImGui::Checkbox("Is Trigger", &c.isTrigger);
+    ("Size", &c.width);
+    ("Offset", &c.offsetX);
+    ("Is Trigger", &c.isTrigger);
 });
 ```
 
@@ -206,8 +205,8 @@ void registerCustomComponentEditors() {
     // Harvestable 组件编辑器
     ComponentRegistry::registerComponent<Harvestable>("Harvestable", [](auto entity, auto& world) {
         auto& c = world.get<Harvestable>(entity);
-        ImGui::InputText("Item ID", &c.itemId);
-        ImGui::Checkbox("Ready", &c.ready);
+        ("Item ID", &c.itemId);
+        ("Ready", &c.ready);
     });
 }
 #endif
@@ -252,7 +251,7 @@ const char* getEntityName(entt::entity e);
 1. **不污染 backend**：所有代码在 `editor/` 目录（game 层扩展点除外）
 2. **不污染 engine**：EditorAPI 保持 minimal，仅在需要时扩展
 3. **EnTT 兼容性**：使用 `ctx_.world.visit()` 遍历组件，不直接依赖 EnTT meta 系统
-4. **不添加外部依赖**：仅使用标准库 + ImGui + EnTT 现有能力
+4. **不添加外部依赖**：仅使用标准库 + EnTT 现有能力
 
 ---
 
@@ -260,7 +259,7 @@ const char* getEntityName(entt::entity e);
 
 ### 功能验收
 - [ ] Inspector 面板能显示任意实体已挂载的所有组件
-- [ ] 每个组件的字段都能通过 ImGui 控件编辑
+- [ ] 每个组件的字段都能通过控件编辑
 - [ ] 编辑器响应实时：修改数值后立即反映到 Viewport 预览
 - [ ] "Add Component" 下拉菜单能添加新组件到选中实体
 - [ ] "Remove Component" 功能（每个组件编辑器顶部有删除按钮）

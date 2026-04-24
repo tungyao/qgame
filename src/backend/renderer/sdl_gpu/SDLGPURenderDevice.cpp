@@ -5,8 +5,6 @@
 #include <variant>
 
 #include <SDL3/SDL.h>
-#include <imgui.h>
-#include <imgui_impl_sdlgpu3.h>
 
 #include "../CommandBuffer.h"
 #include "../../../core/Assert.h"
@@ -490,28 +488,6 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     SDL_EndGPURenderPass(pass);
 }
 
-void SDLGPURenderDevice::submitImGuiDrawData(const ImDrawData* drawData) {
-    if (!gpuCmdBuf_ || !swapchainTex_ || drawData == nullptr) {
-        return;
-    }
-
-    ImDrawData* mutableDrawData = const_cast<ImDrawData*>(drawData);
-    if (mutableDrawData->TotalVtxCount <= 0) {
-        return;
-    }
-
-    ImGui_ImplSDLGPU3_PrepareDrawData(mutableDrawData, gpuCmdBuf_);
-
-    SDL_GPUColorTargetInfo colorTarget{};
-    colorTarget.texture = swapchainTex_;
-    colorTarget.load_op = SDL_GPU_LOADOP_LOAD;
-    colorTarget.store_op = SDL_GPU_STOREOP_STORE;
-
-    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
-    ImGui_ImplSDLGPU3_RenderDrawData(mutableDrawData, gpuCmdBuf_, pass);
-    SDL_EndGPURenderPass(pass);
-}
-
 void SDLGPURenderDevice::present() {
     if (!gpuCmdBuf_) {
         return;
@@ -519,24 +495,6 @@ void SDLGPURenderDevice::present() {
     SDL_SubmitGPUCommandBuffer(gpuCmdBuf_);
     gpuCmdBuf_ = nullptr;
     swapchainTex_ = nullptr;
-}
-
-void SDLGPURenderDevice::initImGui() {
-    int w = 0, h = 0;
-    SDL_GetWindowSize(window_, &w, &h);
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.DisplaySize = ImVec2(static_cast<float>(w), static_cast<float>(h));
-
-    ImGui_ImplSDLGPU3_InitInfo initInfo{};
-    initInfo.Device = device_;
-    initInfo.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(device_, window_);
-    ImGui_ImplSDLGPU3_Init(&initInfo);
-}
-
-void SDLGPURenderDevice::shutdownImGui() {
-    ImGui_ImplSDLGPU3_Shutdown();
 }
 
 TextureHandle SDLGPURenderDevice::renderToTexture(const CommandBuffer& cb, int width, int height) {

@@ -52,7 +52,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
 	cfg.windowTitle = "StarEngine — Render Test";
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
-	cfg.renderBackend = engine::RenderBackend::OpenGL;
+	//cfg.renderBackend = engine::RenderBackend::OpenGL;
 	engine::EngineContext ctx;
 	ctx.init(cfg);
 	engine::GameAPI api{ ctx };
@@ -69,7 +69,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
 	{
 		auto e = api.spawnEntity();
 		api.addComponent(e, engine::Transform{ 1.5f, 0.f });
-		api.addComponent(e, engine::Camera{ 0.5f,0, true });
+		api.addComponent(e, engine::Camera{ 1.5f,0.0f, true });
 	}
 
 	// ── Sprite 1：原始大小，居左上 ───────────────────────────────────────────

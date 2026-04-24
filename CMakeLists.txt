@@ -26,8 +26,8 @@ FetchContent_Declare(SDL3
     GIT_SHALLOW    TRUE
     OVERRIDE_FIND_PACKAGE   # CMake 3.24+: find_package(SDL3) → FetchContent
 )
-set(SDL_SHARED  OFF CACHE BOOL "" FORCE)
-set(SDL_STATIC  ON  CACHE BOOL "" FORCE)
+set(SDL_SHARED  ON  CACHE BOOL "" FORCE)
+set(SDL_STATIC  OFF CACHE BOOL "" FORCE)
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS   OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(SDL3)
@@ -45,7 +45,7 @@ set(SDL3MIXER_MOD         OFF CACHE BOOL "" FORCE)
 set(SDL3MIXER_MIDI        OFF CACHE BOOL "" FORCE)
 set(SDL3MIXER_WAVPACK     OFF CACHE BOOL "" FORCE)  # wavpack x64 ASM 在 MSVC 下有链接问题
 set(WAVPACK_ENABLE_ASM    OFF CACHE BOOL "" FORCE)  # 保险：即使被拉进来也禁掉 ASM
-set(SDL3MIXER_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(SDL3MIXER_BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(SDL3_mixer)
 
@@ -56,30 +56,6 @@ FetchContent_Declare(EnTT
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(EnTT)
-
-# Dear ImGui（header-only 方式，Month 6 再接入）
-FetchContent_Declare(imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.92.7
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(imgui)
-
-# 把 imgui 封装成 CMake target（imgui 本身不带 CMakeLists）
-add_library(imgui STATIC
-    ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_draw.cpp
-    ${imgui_SOURCE_DIR}/imgui_tables.cpp
-    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlgpu3.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp   # 占位，后期换 bgfx backend
-)
-target_include_directories(imgui PUBLIC
-    ${imgui_SOURCE_DIR}
-    ${imgui_SOURCE_DIR}/backends
-)
-target_link_libraries(imgui PUBLIC SDL3::SDL3-static)
 
 # stb_image — 纹理加载（AssetManager 使用）
 FetchContent_Declare(stb
@@ -108,19 +84,14 @@ add_subdirectory(src/backend)
 add_subdirectory(src/engine)
 
 # ── 可选目标 ──────────────────────────────────────────────────────────────────
-option(BUILD_EDITOR "Build editor" ON)
+option(BUILD_EDITOR "Build editor" OFF)
 option(BUILD_GAME   "Build game"   ON)
-option(BUILD_TESTS  "Build tests"  ON)
 
 if(BUILD_GAME)
     add_subdirectory(game)
 endif()
 
-if(BUILD_EDITOR)
-    add_subdirectory(editor)
-endif()
+#if(BUILD_EDITOR)
+#   add_subdirectory(editor)
+#endif()
 
-if(BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
-endif()

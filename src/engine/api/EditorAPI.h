@@ -19,12 +19,9 @@ public:
     TextureHandle renderSceneToTexture(int w, int h);
     void*         getRawTexture(TextureHandle handle) const;
     void setEditorCamera(float x, float y, float zoom);
-    void initImGui();
-    void shutdownImGui();
 
     entt::entity createTransientEntity();
     void destroyTransientEntities();
-    void submitImGuiDrawData();
 
     entt::registry& world();
     const std::vector<entt::entity>& transientEntities() const;

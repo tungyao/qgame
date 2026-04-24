@@ -4,7 +4,7 @@ add_executable(game
 
 target_link_libraries(game
     PRIVATE engine
-    PRIVATE SDL3::SDL3-static
+    PRIVATE SDL3::SDL3
     PRIVATE stb_image
 )
 

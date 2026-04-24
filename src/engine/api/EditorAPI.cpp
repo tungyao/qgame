@@ -7,7 +7,6 @@
 #include "../systems/RenderSystem.h"
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/IRenderDevice.h"
-#include <imgui.h>
 
 namespace engine {
 
@@ -22,14 +21,6 @@ TextureHandle EditorAPI::renderSceneToTexture(int w, int h) {
 
 void* EditorAPI::getRawTexture(TextureHandle handle) const {
     return ctx_.renderDevice().getRawTexture(handle);
-}
-
-void EditorAPI::initImGui() {
-    ctx_.renderDevice().initImGui();
-}
-
-void EditorAPI::shutdownImGui() {
-    ctx_.renderDevice().shutdownImGui();
 }
 
 void EditorAPI::setEditorCamera(float x, float y, float zoom) {
@@ -65,10 +56,6 @@ void EditorAPI::destroyTransientEntities() {
         }
     }
     transientEntities_.clear();
-}
-
-void EditorAPI::submitImGuiDrawData() {
-    ctx_.renderDevice().submitImGuiDrawData(ImGui::GetDrawData());
 }
 
 entt::registry& EditorAPI::world() {

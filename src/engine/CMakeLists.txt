@@ -1,4 +1,4 @@
-add_library(engine STATIC
+add_library(engine SHARED
     runtime/EngineContext.cpp
     runtime/FrameScheduler.cpp
     api/GameAPI.cpp
@@ -13,26 +13,25 @@ add_library(engine STATIC
     scene/SceneSerializer.cpp
 )
 
-target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_compile_definitions(engine PRIVATE QGAME_ENGINE_EXPORTS)
 
-if(BUILD_EDITOR)
-    target_include_directories(engine PRIVATE
-        "${imgui_SOURCE_DIR}"
-        "${imgui_SOURCE_DIR}/backends"
-    )
+# Windows: 自动导出所有符号，避免手动添加 dllexport
+if(WIN32)
+    set_target_properties(engine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
+
+target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(engine
     PUBLIC  core
     PUBLIC  EnTT::EnTT
     PRIVATE backend
     PRIVATE platform
-    PRIVATE SDL3::SDL3-static
+    PRIVATE SDL3::SDL3
     PRIVATE stb_image
     PRIVATE nlohmann_json::nlohmann_json
 )
 
 if(BUILD_EDITOR)
     target_compile_definitions(engine PUBLIC BUILD_EDITOR)
-    target_link_libraries(engine PRIVATE imgui)
 endif()

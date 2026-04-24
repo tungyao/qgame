@@ -30,11 +30,7 @@ public:
 
     void submitCommandBuffer(const CommandBuffer&) override;
     void submitPass(const PassSubmitInfo&, const std::vector<const RenderCmd*>&) override;
-    void submitImGuiDrawData(const ImDrawData* drawData) override;
     void present()                                 override;
-
-    void initImGui()     override;
-    void shutdownImGui() override;
 
     TextureHandle renderToTexture(const CommandBuffer&, int w, int h) override;
     TextureHandle renderToTextureOffscreen(const CommandBuffer&, int w, int h) override;
