@@ -252,6 +252,17 @@ const AnimationClip* AssetManager::getAnimationClip(AnimationHandle h) const {
     return &it->second.clip;
 }
 
+AnimationHandle AssetManager::registerAnimation(const std::string& name, const AnimationClip& clip) {
+    AnimationHandle h;
+    h.index = nextAnimIndex_++;
+    h.version = 1;
+    
+    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    animByPath_[name] = {h, 1, clip};
+    animPathById_[id] = name;
+    return h;
+}
+
 const std::string& AssetManager::texturePath(TextureHandle h) const {
     if (!h.valid()) return kEmpty_;
     uint32_t id = (uint32_t(h.index) << 12) | h.version;

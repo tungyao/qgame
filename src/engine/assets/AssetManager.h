@@ -35,6 +35,9 @@ public:
     // 获取动画剪辑数据
     const AnimationClip* getAnimationClip(AnimationHandle h) const;
 
+    // 直接注册动画剪辑（用于程序化创建，不依赖文件）
+    AnimationHandle registerAnimation(const std::string& name, const AnimationClip& clip);
+
 private:
     backend::IRenderDevice* render_ = nullptr;
     backend::IAudioDevice*  audio_  = nullptr;

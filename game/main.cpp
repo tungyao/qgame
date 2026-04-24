@@ -4,6 +4,7 @@
 #include <engine/api/GameAPI.h>
 #include <engine/components/RenderComponents.h>
 #include <engine/components/PhysicsComponents.h>
+#include <engine/components/AnimatorComponent.h>
 #include <SDL3/SDL.h>   // SDLK_* key codes
 #include <vector>
 
@@ -128,15 +129,38 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     // ── 可控精灵（Month 5：WASD 移动，Escape 退出）────────────────────────────
     entt::entity player;
+    AnimationHandle playerAnim;
     {
         player = api.spawnEntity();
         engine::Transform tf{}; tf.x = 640.f; tf.y = 300.f;
         api.addComponent(player, tf);
         engine::Sprite sp{};
-        sp.texture = spriteTex; sp.srcRect = {0.f, 0.f, 64.f, 64.f};
+        sp.texture = spriteTex; sp.srcRect = {0.f, 0.f, 32.f, 32.f};
         sp.layer = 3; sp.tint = {255, 255, 100, 255};
         sp.ySort = true;  // 启用 y-sorting 以支持正确的遮挡关系
         api.addComponent(player, sp);
+
+        // 创建测试动画：4帧，每帧显示 checkerboard 的不同象限
+        engine::AnimationClip clip;
+        clip.name = "player_walk";
+        clip.texture = spriteTex;
+        clip.loop = true;
+        // 帧1: 左上 (0,0,32,32)
+        clip.frames.push_back({{0.f, 0.f, 32.f, 32.f}, 0.25f});
+        // 帧2: 右上 (32,0,32,32)
+        clip.frames.push_back({{32.f, 0.f, 32.f, 32.f}, 0.25f});
+        // 帧3: 左下 (0,32,32,32)
+        clip.frames.push_back({{0.f, 32.f, 32.f, 32.f}, 0.25f});
+        // 帧4: 右下 (32,32,32,32)
+        clip.frames.push_back({{32.f, 32.f, 32.f, 32.f}, 0.25f});
+        clip.duration = 1.0f; // 4帧 * 0.25秒
+
+        playerAnim = api.createAnimation("player_test", clip);
+
+        // 添加 AnimatorComponent 并播放
+        engine::AnimatorComponent animator;
+        animator.play(playerAnim);
+        api.addComponent(player, animator);
     }
 
     // 手动主循环：tick() 完成后 inputState 已更新，直接修改 Transform

@@ -25,6 +25,24 @@ struct AnimatorComponent {
     float           speed   = 1.f;
     bool            playing = false;
     bool            applyTexture = true; // 播放时是否同时覆盖 Sprite.texture
+    bool            finished = false;    // 非循环动画播放完成标志
+
+    // 播放指定动画（会重置时间）
+    void play(AnimationHandle anim) {
+        if (currentAnim != anim) {
+            currentAnim = anim;
+            time = 0.f;
+            finished = false;
+        }
+        playing = true;
+    }
+
+    // 停止播放并重置
+    void stop() {
+        playing = false;
+        time = 0.f;
+        finished = false;
+    }
 };
 
 } // namespace engine

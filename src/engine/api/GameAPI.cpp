@@ -118,6 +118,10 @@ TextureHandle GameAPI::createTextureFromMemory(const void* rgbaPixels, int w, in
     return ctx_.renderDevice().createTexture(desc);
 }
 
+AnimationHandle GameAPI::createAnimation(const char* name, const engine::AnimationClip& clip) {
+    return ctx_.assetManager.registerAnimation(name, clip);
+}
+
 void GameAPI::quit() {
     SDL_Event e{};
     e.type = SDL_EVENT_QUIT;

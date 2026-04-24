@@ -62,6 +62,10 @@ public:
     // 从内存像素数据上传纹理（RGBA8，测试/程序化纹理用）
     TextureHandle createTextureFromMemory(const void* rgbaPixels, int w, int h);
 
+    // ── Animation ──────────────────────────────────────────────────────────
+    // 创建并返回一个动画句柄（程序化创建，不依赖文件）
+    AnimationHandle createAnimation(const char* name, const engine::AnimationClip& clip);
+
     // ── Engine control ────────────────────────────────────────────────────
     void quit();
 
