@@ -1,0 +1,29 @@
+{
+  "frames": [
+    {
+      "filename": "frame1",
+      "frame": {"x": 0, "y": 0, "w": 32, "h": 32},
+      "duration": 250
+    },
+    {
+      "filename": "frame2",
+      "frame": {"x": 32, "y": 0, "w": 32, "h": 32},
+      "duration": 250
+    },
+    {
+      "filename": "frame3",
+      "frame": {"x": 0, "y": 32, "w": 32, "h": 32},
+      "duration": 250
+    },
+    {
+      "filename": "frame4",
+      "frame": {"x": 32, "y": 32, "w": 32, "h": 32},
+      "duration": 250
+    }
+  ],
+  "meta": {
+    "image": "test_spritesheet.png",
+    "format": "RGBA8888",
+    "size": {"w": 64, "h": 64}
+  }
+}
