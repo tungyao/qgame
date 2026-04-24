@@ -32,7 +32,10 @@ void AnimatorSystem::update(float dt) {
 
         // 按 per-frame duration 累加定位当前帧
         float t = anim.time;
-        size_t idx = clip->frames.size() - 1;  // 默认最后一帧，防止越界
+        size_t idx = 0;
+        // 保护：如果 frames 为空，跳过
+        if (clip->frames.empty()) continue;
+        idx = clip->frames.size() - 1; // 默认最后一帧
         for (size_t i = 0; i < clip->frames.size(); ++i) {
             if (t < clip->frames[i].duration) { idx = i; break; }
             t -= clip->frames[i].duration;

@@ -153,28 +153,49 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
         return {};
     }
 
-    // 1) 收集所有 frame (Array 格式: j["frames"] 是数组；Hash 格式是对象)
-    struct RawFrame { core::Rect rect; float duration; };
+    // 1) 收集所有 frame (支持 Array 和 Hash 格式)
+    struct RawFrame { core::Rect rect; float duration; int frameNum; };
     std::vector<RawFrame> rawFrames;
 
-    auto pushFrame = [&](const nlohmann::json& f) {
-        auto& fr = f["frame"];
-        RawFrame rf;
-        rf.rect = { fr.value("x", 0.f), fr.value("y", 0.f),
-                    fr.value("w", 0.f), fr.value("h", 0.f) };
-        rf.duration = f.value("duration", 100) / 1000.f; // ms → s
-        rawFrames.push_back(rf);
-    };
     if (j.contains("frames")) {
         if (j["frames"].is_array()) {
-            for (auto& f : j["frames"]) pushFrame(f);
+            // Array 格式: [{"filename":"...", "frame":{"x":..,"y":..,"w":..,"h":..}, "duration":100}, ...]
+            for (size_t idx = 0; idx < j["frames"].size(); ++idx) {
+                auto& f = j["frames"][idx];
+                RawFrame rf;
+                auto& fr = f["frame"];
+                rf.rect = { fr.value("x", 0.f), fr.value("y", 0.f),
+                            fr.value("w", 0.f), fr.value("h", 0.f) };
+                rf.duration = f.value("duration", 100) / 1000.f; // ms → s
+                rf.frameNum = f.value("frameNum", static_cast<int>(idx));
+                rawFrames.push_back(rf);
+            }
         } else if (j["frames"].is_object()) {
-            for (auto& [k, f] : j["frames"].items()) pushFrame(f);
+            // Hash 格式: {"frame1.png": {"frame":{"x":..,"y":..,...}, "duration":100}, ...}
+            // 需要按 frameNum 排序
+            std::vector<std::pair<int, RawFrame>> sorted;
+            for (auto& [key, f] : j["frames"].items()) {
+                RawFrame rf;
+                auto& fr = f["frame"];
+                rf.rect = { fr.value("x", 0.f), fr.value("y", 0.f),
+                            fr.value("w", 0.f), fr.value("h", 0.f) };
+                rf.duration = f.value("duration", 100) / 1000.f;
+                rf.frameNum = f.value("frameNum", 0);
+                sorted.emplace_back(rf.frameNum, rf);
+            }
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (auto& [_, rf] : sorted) rawFrames.push_back(rf);
         }
     }
 
-    // 2) 选择 tag 范围
-    int from = 0, to = (int)rawFrames.size() - 1;
+    if (rawFrames.empty()) {
+        core::logError("[AssetManager] no frames found in: %s", filePath.c_str());
+        return {};
+    }
+
+    // 2) 选择 tag 范围 (Aseprite frameTags)
+    int from = 0, to = static_cast<int>(rawFrames.size()) - 1;
     bool loop = true;
     if (!tagName.empty() && j.contains("meta") && j["meta"].contains("frameTags")) {
         bool found = false;
@@ -183,7 +204,8 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
                 from = t.value("from", 0);
                 to   = t.value("to", from);
                 std::string dir = t.value("direction", "forward");
-                loop = (dir != "none"); // Aseprite 没有显式 loop 字段，约定 forward/pingpong = 循环
+                // Aseprite direction: "forward", "reverse", "pingpong"
+                loop = (dir != "none");
                 found = true;
                 break;
             }
@@ -195,7 +217,9 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
 
     // 3) 填充 clip.frames
     from = std::max(0, from);
-    to   = std::min(to, (int)rawFrames.size() - 1);
+    to   = std::min(to, static_cast<int>(rawFrames.size()) - 1);
+    clip.frames.clear();
+    clip.duration = 0.f;
     for (int i = from; i <= to; ++i) {
         AnimationFrame af;
         af.srcRect = rawFrames[i].rect;
@@ -210,6 +234,9 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
         std::filesystem::path dir = std::filesystem::path(filePath).parent_path();
         std::filesystem::path img = dir / j["meta"]["image"].get<std::string>();
         clip.texture = loadTexture(img.string());
+        if (!clip.texture.valid()) {
+            core::logWarn("[AssetManager] failed to load spritesheet: %s", img.string().c_str());
+        }
     }
 
     AnimationHandle h;
