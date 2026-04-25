@@ -13,7 +13,6 @@ namespace engine {
 
 namespace {
 
-// 世界空间视锥矩形（轴对齐）。enabled=false → 不裁剪。
 struct ViewRect {
     float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
     bool  enabled = false;
@@ -58,7 +57,6 @@ backend::CameraData toBackendCamera(const Transform& tf, const Camera& cam,
     return out;
 }
 
-// 提取 drawable 的 pass 字段，用于 layerMask 过滤。
 RenderPass cmdPass(const backend::RenderCmd& cmd) {
     if (auto* s = std::get_if<backend::DrawSpriteCmd>(&cmd)) return s->pass;
     if (auto* t = std::get_if<backend::DrawTileCmd>(&cmd))   return t->pass;
@@ -66,7 +64,6 @@ RenderPass cmdPass(const backend::RenderCmd& cmd) {
     return RenderPass::World;
 }
 
-// 取 drawable 的中心 + AABB 半边长，用于剔除（UI/Screen 不会走到这里）。
 bool cmdAABB(const backend::RenderCmd& cmd,
              float& cx, float& cy, float& halfW, float& halfH) {
     if (auto* s = std::get_if<backend::DrawSpriteCmd>(&cmd)) {
@@ -92,24 +89,114 @@ bool cmdAABB(const backend::RenderCmd& cmd,
         halfW = halfH = ts * 0.5f;
         return true;
     }
-    // 文本/未知：保守不剔除
     return false;
 }
 
-} // namespace
+}
+
+RenderSystem::RenderSystem(EngineContext& ctx) 
+    : ctx_(ctx) {
+}
+
+RenderSystem::~RenderSystem() = default;
 
 void RenderSystem::init() {
-    core::logInfo("RenderSystem initialized (camera-driven)");
+    spriteBuffer_.init(&ctx_.renderDevice(), 1024);
+
+    destroyConnection_ = ctx_.world.on_destroy<Sprite>().connect<&RenderSystem::freeGPUSlot>(this);
+    transformUpdateConnection_ = ctx_.world.on_update<Transform>().connect<&RenderSystem::onTransformUpdate>(this);
+
+    auto view = ctx_.world.view<Sprite>();
+    for (auto [e, spr] : view.each()) {
+        if (!spr.gpuHandle.valid()) {
+            allocateGPUSlot(e, spr);
+            spr.gpuDirty = true;
+        }
+    }
+
+    core::logInfo("RenderSystem initialized (S3: Persistent GPU Sprite Buffer)");
 }
 
 void RenderSystem::update(float /*dt*/) {
     if (!ctx_.renderToSwapchain) {
         return;
     }
+    syncEntitiesToGPU();
+    spriteBuffer_.advanceFrame();
+    spriteBuffer_.uploadDirty();
     buildCommandBuffer();
 }
 
-void RenderSystem::shutdown() {}
+void RenderSystem::shutdown() {
+    destroyConnection_.release();
+    transformUpdateConnection_.release();
+    spriteBuffer_.shutdown();
+}
+
+void RenderSystem::onTransformUpdate(entt::registry& reg, entt::entity e) {
+    if (reg.all_of<Sprite>(e)) {
+        auto& spr = reg.get<Sprite>(e);
+        spr.gpuDirty = true;
+    }
+}
+
+void RenderSystem::syncEntitiesToGPU() {
+    auto view = ctx_.world.view<Transform, Sprite>();
+    for (auto [e, tf, spr] : view.each()) {
+        if (!spr.gpuHandle.valid()) {
+            allocateGPUSlot(e, spr);
+            spr.gpuDirty = true;
+        }
+        if (spr.gpuDirty) {
+            updateGPUSlot(tf, spr);
+            spr.gpuDirty = false;
+        }
+    }
+}
+
+void RenderSystem::allocateGPUSlot(entt::entity, Sprite& spr) {
+    spr.gpuHandle = spriteBuffer_.allocate();
+}
+
+void RenderSystem::freeGPUSlot(entt::registry& reg, entt::entity e) {
+    if (reg.all_of<Sprite>(e)) {
+        auto& spr = reg.get<Sprite>(e);
+        if (spr.gpuHandle.valid()) {
+            spriteBuffer_.free(spr.gpuHandle);
+            spr.gpuHandle = GPUHandle::invalid();
+        }
+    }
+}
+
+void RenderSystem::updateGPUSlot(const Transform& tf, const Sprite& spr) {
+    GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
+    if (!slot) return;
+
+    float w = spr.srcRect.w;
+    float h = spr.srcRect.h;
+    buildTransform2D(slot->transform, tf.x, tf.y, tf.rotation,
+                     tf.scaleX, tf.scaleY, spr.pivotX, spr.pivotY, w, h);
+
+    slot->color[0] = spr.tint.r / 255.0f;
+    slot->color[1] = spr.tint.g / 255.0f;
+    slot->color[2] = spr.tint.b / 255.0f;
+    slot->color[3] = spr.tint.a / 255.0f;
+
+    int tw = 1, th = 1;
+    ctx_.renderDevice().getTextureDimensions(spr.texture, tw, th);
+
+    slot->uv[0] = spr.srcRect.x / static_cast<float>(tw);
+    slot->uv[1] = spr.srcRect.y / static_cast<float>(th);
+    slot->uv[2] = (spr.srcRect.x + spr.srcRect.w) / static_cast<float>(tw);
+    slot->uv[3] = (spr.srcRect.y + spr.srcRect.h) / static_cast<float>(th);
+
+    slot->textureIndex = spr.texture.index;
+    slot->layer = static_cast<uint32_t>(spr.layer);
+    slot->sortKey = spr.sortOrder;
+    slot->flags = (spr.ySort ? 1 : 0) | (static_cast<uint32_t>(spr.pass) << 1);
+
+    spriteBuffer_.markDirty(spr.gpuHandle);
+}
 
 namespace {
 
@@ -142,19 +229,16 @@ bool drawableLess(const Drawable& A, const Drawable& B) {
     return A.seq < B.seq;
 }
 
-} // namespace
+}
 
 void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb,
                                       int /*viewportW*/, int /*viewportH*/) {
-    // 不再做相机相关裁剪：相机是渲染单元，剔除由 buildCommandBuffer 按相机各自处理。
-    // 这里只把所有 ECS 实体录制为统一排好序的命令流。编辑器离屏路径也用这一份。
     cb.begin();
 
     static std::vector<Drawable> drawables;
     drawables.clear();
     int seq = 0;
 
-    // tilemap
     auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
         if (tmap.tileSize <= 0) continue;
@@ -186,7 +270,6 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         }
     }
 
-    // sprite
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
         Drawable d{};
@@ -215,7 +298,6 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         drawables.push_back(d);
     }
 
-    // text
     auto textView = ctx.world.view<Transform, TextComponent>();
     for (auto [ent, tf, text] : textView.each()) {
         if (!text.visible || text.text.empty()) continue;
@@ -261,7 +343,6 @@ void RenderSystem::buildCommandBuffer() {
     backend::CommandBuffer& cb = ctx_.renderCommandBuffer();
     buildSceneCommands(ctx_, cb, w, h);
 
-    // 收集 active 相机，按 depth 升序
     struct CamEntry {
         const Transform* tf;
         const Camera*    cam;
@@ -279,7 +360,6 @@ void RenderSystem::buildCommandBuffer() {
 
     backend::IRenderDevice& dev = ctx_.renderDevice();
 
-    // 没有任何相机：清屏并返回（避免出现未定义画面）
     if (cameras.empty()) {
         backend::IRenderDevice::PassSubmitInfo info;
         info.camera.viewportW = w;
@@ -290,7 +370,6 @@ void RenderSystem::buildCommandBuffer() {
         return;
     }
 
-    // 按相机分发命令
     static std::vector<const backend::RenderCmd*> filtered;
     for (size_t i = 0; i < cameras.size(); ++i) {
         const Transform& tf = *cameras[i].tf;
@@ -300,11 +379,9 @@ void RenderSystem::buildCommandBuffer() {
 
         filtered.clear();
         for (const backend::RenderCmd& cmd : cb.commands()) {
-            // layerMask 过滤
             const RenderPass p = cmdPass(cmd);
             if ((cam.layerMask & renderPassBit(p)) == 0) continue;
 
-            // 视锥剔除（仅 World pass + cullEnabled 相机）
             if (vr.enabled && p == RenderPass::World) {
                 float cx, cy, hw, hh;
                 if (cmdAABB(cmd, cx, cy, hw, hh)) {
@@ -324,4 +401,4 @@ void RenderSystem::buildCommandBuffer() {
     }
 }
 
-} // namespace engine
+}

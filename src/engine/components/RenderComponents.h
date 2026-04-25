@@ -5,6 +5,7 @@
 #include "../../backend/shared/ResourceHandle.h"
 #include "../../core/math/Rect.h"
 #include "../../core/math/Color.h"
+#include "../resources/GPUSprite.h"
 
 namespace engine {
 
@@ -117,6 +118,9 @@ struct Sprite {
     float         pivotX = 0.5f;
     float         pivotY = 0.5f;
     RenderPass    pass   = RenderPass::World;
+    
+    GPUHandle     gpuHandle;
+    bool          gpuDirty = true;
 };
 
 inline float getSortKey(const Transform& tf, const Sprite& spr) {

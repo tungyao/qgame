@@ -49,6 +49,7 @@ public:
     TextureHandle renderToTexture(const CommandBuffer&, int w, int h) override;
     TextureHandle renderToTextureOffscreen(const CommandBuffer&, int w, int h) override;
     void*         getRawTexture(TextureHandle handle) const override;
+    bool          getTextureDimensions(TextureHandle, int& outW, int& outH) const override;
     SDL_GPUTexture* getSDLTexture(TextureHandle handle) const;
 
     // 供 RenderSystem 查询设备，上传纹理用

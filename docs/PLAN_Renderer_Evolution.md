@@ -26,7 +26,7 @@
 
 **交付物**：能在 compute shader 里读写 storage buffer；提供 hello-compute 测试。
 
-### S3. Persistent GPU Buffer（Sprite/Transform）
+### S3. Persistent GPU Buffer（Sprite/Transform）✅
 - `RenderSystem` 不再每帧重建 `Drawable`。改为：
   - sprite 数据持久化在一个 GPU storage buffer（每 entity 一个 slot）；
   - ECS 通过 `entt::observer` 监听 `Transform/Sprite` 变更，仅 upload dirty slot；
@@ -34,6 +34,18 @@
 - 文字 (MSDF) 暂保持 CPU 录制，后续随 GPU-driven 一起改造。
 
 **交付物**：sprite 数据上 GPU 后稳定显示；CPU profile 显示 RenderSystem 工作量显著下降。
+
+**实现状态** (2025-04):
+- ✅ `GPUSprite` 结构体：transform/color/uv/textureIndex/layer/sortKey/flags
+- ✅ `SpriteBuffer` 管理器：triple buffering + free list + generation
+- ✅ `GPUHandle` 字段添加到 Sprite 组件
+- ✅ Dirty tracking：`on_update<Transform>` + `on_destroy<Sprite>` 信号
+- ✅ Batch update + coalesce 优化
+- ⚠️ 渲染路径：当前仍用 CPU 批处理，Storage Buffer 已准备就绪供 M1/M2 使用
+
+**新建文件**：
+- `src/engine/resources/GPUSprite.h`
+- `src/engine/resources/SpriteBuffer.h`
 
 ---
 

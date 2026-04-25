@@ -506,6 +506,14 @@ void* SDLGPURenderDevice::getRawTexture(TextureHandle handle) const {
     return getSDLTexture(handle);
 }
 
+bool SDLGPURenderDevice::getTextureDimensions(TextureHandle handle, int& outW, int& outH) const {
+    if (!textures_.valid(handle)) return false;
+    const TextureEntry& e = textures_.get(handle);
+    outW = e.width;
+    outH = e.height;
+    return true;
+}
+
 void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBuf, SDL_GPUGraphicsPipeline* pipeline, const CommandBuffer& cb, SDL_GPUTexture* target, uint32_t targetWidth, uint32_t targetHeight, bool clearTarget) {
     if (!cmdBuf || !target || !pipeline) {
         core::logError("renderCommandBufferToTarget: invalid params cmdBuf=%p target=%p pipeline=%p", cmdBuf, target, pipeline);

@@ -1,5 +1,7 @@
 #pragma once
 #include "ISystem.h"
+#include "../resources/SpriteBuffer.h"
+#include <entt/entt.hpp>
 
 namespace backend { class CommandBuffer; }
 
@@ -8,21 +10,30 @@ class EngineContext;
 
 class RenderSystem final : public ISystem {
 public:
-    explicit RenderSystem(EngineContext& ctx) : ctx_(ctx) {}
+    explicit RenderSystem(EngineContext& ctx);
+    ~RenderSystem();
 
     void init()           override;
     void update(float dt) override;
     void shutdown()       override;
 
-    // 录制完整场景命令到 cb（不含 SetCamera/Clear，调用方按相机分发）。
-    // 编辑器离屏路径直接消费这个 cb。
     static void buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb,
                                    int viewportW, int viewportH);
 
+    SpriteBuffer& spriteBuffer() { return spriteBuffer_; }
+
 private:
     void buildCommandBuffer();
+    void syncEntitiesToGPU();
+    void allocateGPUSlot(entt::entity e, Sprite& spr);
+    void freeGPUSlot(entt::registry& reg, entt::entity e);
+    void updateGPUSlot(const Transform& tf, const Sprite& spr);
+    void onTransformUpdate(entt::registry& reg, entt::entity e);
 
     EngineContext& ctx_;
+    SpriteBuffer spriteBuffer_;
+    entt::connection destroyConnection_;
+    entt::connection transformUpdateConnection_;
 };
 
 } // namespace engine

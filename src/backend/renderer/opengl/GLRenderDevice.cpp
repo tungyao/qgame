@@ -573,6 +573,14 @@ void* GLRenderDevice::getRawTexture(TextureHandle handle) const {
     return reinterpret_cast<void*>(static_cast<uintptr_t>(e.glTex));
 }
 
+bool GLRenderDevice::getTextureDimensions(TextureHandle handle, int& outW, int& outH) const {
+    if (!textures_.valid(handle)) return false;
+    const TextureEntry& e = textures_.get(handle);
+    outW = e.width;
+    outH = e.height;
+    return true;
+}
+
 // ── 内部：初始化辅助 ──────────────────────────────────────────────────────────
 
 void GLRenderDevice::createShaderProgram() {

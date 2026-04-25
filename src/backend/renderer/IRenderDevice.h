@@ -17,6 +17,14 @@ enum class BufferUsage : uint32_t {
     Uniform  = 1 << 4,
 };
 
+inline BufferUsage operator|(BufferUsage a, BufferUsage b) {
+    return static_cast<BufferUsage>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline uint32_t operator&(BufferUsage a, BufferUsage b) {
+    return static_cast<uint32_t>(a) & static_cast<uint32_t>(b);
+}
+
 struct TextureDesc {
     int width = 0;
     int height = 0;
@@ -93,6 +101,7 @@ public:
     virtual TextureHandle renderToTextureOffscreen(const CommandBuffer&, int w, int h) = 0;
 
     virtual void* getRawTexture(TextureHandle) const = 0;
+    virtual bool getTextureDimensions(TextureHandle, int& outW, int& outH) const = 0;
 };
 
 } // namespace backend
