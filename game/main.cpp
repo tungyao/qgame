@@ -6,14 +6,10 @@
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/AnimatorComponent.h>
 #include <engine/components/TextComponent.h>
-#include <SDL3/SDL.h>   // SDLK_* key codes
+#include <SDL3/SDL.h>
 #include <vector>
 
-// ── 程序化纹理生成（仅依赖 core::Color，不 include backend）────────────────────
-
-static std::vector<uint8_t> makeCheckerboard(
-	int w, int h, int cellSize, core::Color a, core::Color b)
-{
+static std::vector<uint8_t> makeCheckerboard(int w, int h, int cellSize, core::Color a, core::Color b) {
 	std::vector<uint8_t> px(w * h * 4);
 	for (int y = 0; y < h; ++y)
 		for (int x = 0; x < w; ++x) {
@@ -48,75 +44,91 @@ static std::vector<uint8_t> makeColorTileset(int tileSize, int cols, int rows) {
 	return px;
 }
 
-int main(int /*argc*/, char* /*argv*/[]) {
+static std::vector<uint8_t> makeTextTexture(const std::string& text, core::Color color) {
+	int charW = 8, charH = 16;
+	int texW = static_cast<int>(text.length()) * charW;
+	int texH = charH;
+	std::vector<uint8_t> pixels(texW * texH * 4, 0);
+	for (size_t i = 0; i < text.length(); ++i) {
+		int cx = static_cast<int>(i) * charW;
+		for (int py = 2; py < charH - 2; ++py) {
+			for (int px = cx + 1; px < cx + charW - 1; ++px) {
+				int idx = (py * texW + px) * 4;
+				pixels[idx] = color.r;
+				pixels[idx + 1] = color.g;
+				pixels[idx + 2] = color.b;
+				pixels[idx + 3] = color.a;
+			}
+		}
+	}
+	return pixels;
+}
+
+int main(int, char*[]) {
 	engine::EngineConfig cfg;
-	cfg.windowTitle = "StarEngine — Render Test";
+	cfg.windowTitle = "StarEngine - Two Camera Demo";
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
-	//cfg.renderBackend = engine::RenderBackend::OpenGL;
 	engine::EngineContext ctx;
 	ctx.init(cfg);
 	engine::GameAPI api{ ctx };
 
 	// ── 上传程序化纹理 ────────────────────────────────────────────────────────
-	auto checkerPx = makeCheckerboard(64, 64, 8,
-		{ 255,100,100,255 }, { 100,100,255,255 });
+	auto checkerPx = makeCheckerboard(64, 64, 8, { 255,100,100,255 }, { 100,100,255,255 });
 	TextureHandle spriteTex = api.createTextureFromMemory(checkerPx.data(), 64, 64);
 
 	auto tilesetPx = makeColorTileset(32, 4, 2);
 	TextureHandle tilesetTex = api.createTextureFromMemory(tilesetPx.data(), 128, 64);
 
-	// ── 摄像机 ────────────────────────────────────────────────────────────────
+	auto movingPx = makeTextTexture("Moving", { 100, 255, 100, 255 });
+	TextureHandle movingTex = api.createTextureFromMemory(movingPx.data(), 56, 16);
+
+	auto stoppedPx = makeTextTexture("Stopped", { 255, 100, 100, 255 });
+	TextureHandle stoppedTex = api.createTextureFromMemory(stoppedPx.data(), 56, 16);
+
+	// ── 字体 ───────────────────────────────────────────────────────────────────
+	engine::FontHandle font = api.loadFont("assets/fonts/DejaVuSans.ttf");
+
+	// ── 动画 ───────────────────────────────────────────────────────────────────
+	AnimationHandle playerAnim = api.assetManager().loadAnimation("assets/test_anim.json");
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// 相机 1：World 渲染 (depth=0，先绘制，清屏)
+	// ═══════════════════════════════════════════════════════════════════════════
 	{
 		auto e = api.spawnEntity();
-		api.addComponent(e, engine::Transform{ 1.5f, 0.f });
-		api.addComponent(e, engine::Camera{ 1.5f,0.0f, true });
+		api.addComponent(e, engine::Transform{ 0.f, 0.f });
+		engine::Camera cam{};
+		cam.zoom = 1.5f;
+		cam.primary = true;
+		cam.depth = 0;
+		cam.layerMask = engine::renderPassBit(engine::RenderPass::World);
+		cam.clear = true;
+		cam.clearColor = core::Color{ 20, 20, 40, 255 };
+		cam.cullEnabled = true;
+		api.addComponent(e, cam);
 	}
 
-	// ── Sprite 1：原始大小，居左上 ───────────────────────────────────────────
+	// ═══════════════════════════════════════════════════════════════════════════
+	// 相机 2：UI 叠加渲染 (depth=1，后绘制，不清屏)
+	// ═══════════════════════════════════════════════════════════════════════════
 	{
 		auto e = api.spawnEntity();
-		engine::Transform tf{}; tf.x = 200.f; tf.y = 200.f;
-		api.addComponent(e, tf);
-		engine::Sprite sp{};
-		sp.texture = spriteTex;
-		sp.srcRect = { 0.f, 0.f, 64.f, 64.f };
-		sp.layer = 1;
-		api.addComponent(e, sp);
+		api.addComponent(e, engine::Transform{ 0.f, 0.f });
+		engine::Camera cam{};
+		cam.zoom = 1.f;
+		cam.primary = true;
+		cam.depth = 1;
+		cam.layerMask = engine::renderPassBit(engine::RenderPass::UI) | engine::renderPassBit(engine::RenderPass::Screen);
+		cam.clear = false;
+		cam.cullEnabled = false;
+		api.addComponent(e, cam);
 	}
 
-	// ── Sprite 2：旋转 45°，放大 2×，半透明橙色 tint ─────────────────────────
+	// ── TileMap ────────────────────────────────────────────────────────────────
 	{
 		auto e = api.spawnEntity();
-		engine::Transform tf{}; tf.x = 400.f; tf.y = 200.f;
-		tf.rotation = 0.785f; tf.scaleX = 2.f; tf.scaleY = 2.f;
-		api.addComponent(e, tf);
-		engine::Sprite sp{};
-		sp.texture = spriteTex;
-		sp.srcRect = { 0.f,0.f,64.f,64.f };
-		sp.layer = 1;
-		sp.tint = { 255,200,100,200 };
-		api.addComponent(e, sp);
-	}
-
-	// ── Sprite 3：横向拉伸，绿色 tint ────────────────────────────────────────
-	{
-		auto e = api.spawnEntity();
-		engine::Transform tf{}; tf.x = 640.f; tf.y = 200.f;
-		tf.scaleX = 3.f; tf.scaleY = 1.5f;
-		api.addComponent(e, tf);
-		engine::Sprite sp{};
-		sp.texture = spriteTex; sp.srcRect = { 0.f,0.f,64.f,64.f };
-		sp.layer = 2; sp.tint = { 100,255,100,255 };
-		api.addComponent(e, sp);
-	}
-
-	// ── TileMap：20×5 格，覆盖屏幕底部 ──────────────────────────────────────
-	{
-		auto e = api.spawnEntity();
-		engine::Transform tf{}; tf.x = 0.f; tf.y = 400.f;
-		api.addComponent(e, tf);
-
+		api.addComponent(e, engine::Transform{ 0.f, 400.f });
 		engine::TileMap tmap{};
 		tmap.width = 20; tmap.height = 5; tmap.tileSize = 32;
 		tmap.tileset = tilesetTex;
@@ -128,50 +140,61 @@ int main(int /*argc*/, char* /*argv*/[]) {
 		api.addComponent(e, tmap);
 	}
 
-	// ── 可控精灵（Month 5：WASD 移动，Escape 退出）────────────────────────────
+	// ── Sprite 1：原始大小 ─────────────────────────────────────────────────────
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 200.f, 200.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 64.f, 64.f };
+		sp.layer = 1;
+		sp.pass = engine::RenderPass::World;
+		api.addComponent(e, sp);
+	}
+
+	// ── Sprite 2：旋转 45°，放大 2×，半透明橙色 tint ──────────────────────────
+	{
+		auto e = api.spawnEntity();
+		engine::Transform tf{}; tf.x = 400.f; tf.y = 200.f;
+		tf.rotation = 0.785f; tf.scaleX = 2.f; tf.scaleY = 2.f;
+		api.addComponent(e, tf);
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 64.f, 64.f };
+		sp.layer = 1;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 200, 100, 200 };
+		api.addComponent(e, sp);
+	}
+
+	// ── Sprite 3：横向拉伸，绿色 tint ────────────────────────────────────────
+	{
+		auto e = api.spawnEntity();
+		engine::Transform tf{}; tf.x = 640.f; tf.y = 200.f;
+		tf.scaleX = 3.f; tf.scaleY = 1.5f;
+		api.addComponent(e, tf);
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 64.f, 64.f };
+		sp.layer = 2;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 100, 255, 100, 255 };
+		api.addComponent(e, sp);
+	}
+
+	// ── Player (带动画) ───────────────────────────────────────────────────────
 	entt::entity player;
-	entt::entity statusText;
-	AnimationHandle playerAnim;
-
-	// 从 Aseprite JSON 加载动画
-	playerAnim = api.assetManager().loadAnimation("assets/test_anim.json");
-
-	// 生成状态文字纹理（Moving/Stopped）
-	auto genTextTexture = [&](const std::string& text, core::Color color) -> TextureHandle {
-		int charW = 8, charH = 16;
-		int texW = static_cast<int>(text.length()) * charW;
-		int texH = charH;
-		std::vector<uint8_t> pixels(texW * texH * 4, 0);
-		// 简单位图：用方块表示字符（实际项目应用freetype）
-		for (size_t i = 0; i < text.length(); ++i) {
-			int cx = static_cast<int>(i) * charW;
-			// 画一个简单的"方块字符"
-			for (int py = 2; py < charH - 2; ++py) {
-				for (int px = cx + 1; px < cx + charW - 1; ++px) {
-					int idx = (py * texW + px) * 4;
-					pixels[idx] = color.r;
-					pixels[idx + 1] = color.g;
-					pixels[idx + 2] = color.b;
-					pixels[idx + 3] = color.a;
-				}
-			}
-		}
-		return api.createTextureFromMemory(pixels.data(), texW, texH);
-		};
-
-	TextureHandle movingTex = genTextTexture("Moving", { 100, 255, 100, 255 });
-	TextureHandle stoppedTex = genTextTexture("Stopped", { 255, 100, 100, 255 });
-
 	{
 		player = api.spawnEntity();
-		engine::Transform tf{}; tf.x = 640.f; tf.y = 300.f;
-		api.addComponent(player, tf);
+		api.addComponent(player, engine::Transform{ 640.f, 300.f });
 		engine::Sprite sp{};
-		sp.texture = spriteTex; sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
-		sp.layer = 3; sp.tint = { 255, 255, 100, 255 };
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 3;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 255, 100, 255 };
 		sp.ySort = true;
 		api.addComponent(player, sp);
-		// 添加动画组件，初始不播放
 		engine::AnimatorComponent anim{};
 		anim.currentAnim = playerAnim;
 		anim.playing = false;
@@ -179,64 +202,96 @@ int main(int /*argc*/, char* /*argv*/[]) {
 		api.addComponent(player, anim);
 	}
 
-	// 状态文字实体
+	// ── 状态文字 (World 层) ───────────────────────────────────────────────────
+	entt::entity statusText;
 	{
 		statusText = api.spawnEntity();
-		engine::Transform tf{}; tf.x = 640.f; tf.y = 250.f;
-		api.addComponent(statusText, tf);
+		api.addComponent(statusText, engine::Transform{ 640.f, 250.f });
 		engine::Sprite sp{};
 		sp.texture = stoppedTex;
-		sp.srcRect = { 0.f, 0.f, 56.f, 16.f }; // 7字符 * 8px
+		sp.srcRect = { 0.f, 0.f, 56.f, 16.f };
 		sp.layer = 10;
+		sp.pass = engine::RenderPass::World;
 		sp.ySort = false;
 		api.addComponent(statusText, sp);
 	}
 
-	// ── MSDF 文字渲染实测 ─────────────────────────────────────────────────────
-	engine::FontHandle font = api.loadFont("assets/fonts/DejaVuSans.ttf");
+	// ── MSDF 文字渲染 (World 层) ─────────────────────────────────────────────
 	{
 		auto e = api.spawnEntity();
 		api.addComponent(e, engine::Transform{ 40.f, 80.f });
-		api.addComponent(e, engine::TextComponent{
-			.text = "Hello, StarEngine! @#$%^&*()", .font = font, .fontSize = 48.f,
-			.color = { 255,255,255,255 } });
+		engine::TextComponent txt{};
+		txt.text = "Hello, StarEngine! @#$%^&*()";
+		txt.font = font;
+		txt.fontSize = 48.f;
+		txt.color = { 255, 255, 255, 255 };
+		txt.pass = engine::RenderPass::World;
+		api.addComponent(e, txt);
 	}
 
-	// 手动主循环：tick() 完成后 inputState 已更新，直接修改 Transform
+	// ── UI 标题 ───────────────────────────────────────────────────────────────
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 20.f, 20.f });
+		engine::TextComponent txt{};
+		txt.text = "Two Camera Demo";
+		txt.font = font;
+		txt.fontSize = 32.f;
+		txt.color = { 255, 255, 100, 255 };
+		txt.pass = engine::RenderPass::UI;
+		txt.layer = 100;
+		api.addComponent(e, txt);
+	}
+
+	// ── UI 说明 ───────────────────────────────────────────────────────────────
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 20.f, 60.f });
+		engine::TextComponent txt{};
+		txt.text = "World: zoom=1.5x | UI: zoom=1.0x";
+		txt.font = font;
+		txt.fontSize = 20.f;
+		txt.color = { 200, 200, 200, 255 };
+		txt.pass = engine::RenderPass::UI;
+		txt.layer = 100;
+		api.addComponent(e, txt);
+	}
+
+	// ── Screen 提示 ──────────────────────────────────────────────────────────
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 20.f, 680.f });
+		engine::TextComponent txt{};
+		txt.text = "WASD to move | ESC to quit";
+		txt.font = font;
+		txt.fontSize = 18.f;
+		txt.color = { 150, 150, 150, 255 };
+		txt.pass = engine::RenderPass::Screen;
+		txt.layer = 100;
+		api.addComponent(e, txt);
+	}
+
+	// ── 主循环 ────────────────────────────────────────────────────────────────
 	constexpr float kSpeed = 200.f;
 	while (ctx.scheduler.tick()) {
 		float dt = ctx.scheduler.deltaTime();
-
 		auto& tf = api.getComponent<engine::Transform>(player);
 		auto& anim = api.getComponent<engine::AnimatorComponent>(player);
 
-		// 检测是否在移动
 		bool isMoving = false;
 		if (api.isKeyDown(SDLK_W) || api.isKeyDown(SDLK_UP)) { tf.y -= kSpeed * dt; isMoving = true; }
 		if (api.isKeyDown(SDLK_S) || api.isKeyDown(SDLK_DOWN)) { tf.y += kSpeed * dt; isMoving = true; }
 		if (api.isKeyDown(SDLK_A) || api.isKeyDown(SDLK_LEFT)) { tf.x -= kSpeed * dt; isMoving = true; }
 		if (api.isKeyDown(SDLK_D) || api.isKeyDown(SDLK_RIGHT)) { tf.x += kSpeed * dt; isMoving = true; }
 
-		// 只控制播放状态，动画帧由 AnimatorSystem 自动更新
 		if (isMoving) {
-			if (!anim.playing) {
-				anim.play(playerAnim);
-			}
-		}
-		else {
-			if (anim.playing) {
-				anim.stop(); // 立即停止，回到首帧
-			}
+			if (!anim.playing) anim.play(playerAnim);
+		} else {
+			if (anim.playing) anim.stop();
 		}
 
-		// 更新状态文字
 		auto& statusSpr = api.getComponent<engine::Sprite>(statusText);
-		if (isMoving) {
-			statusSpr.texture = movingTex;
-		}
-		else {
-			statusSpr.texture = stoppedTex;
-		}
+		statusSpr.texture = isMoving ? movingTex : stoppedTex;
 
 		if (api.isKeyJustPressed(SDLK_ESCAPE)) { api.quit(); break; }
 	}

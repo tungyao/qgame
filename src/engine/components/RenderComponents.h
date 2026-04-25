@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstdint>
 #include <vector>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../../core/math/Rect.h"
@@ -81,12 +82,29 @@ enum class CameraType : int {
     Screen = 2   // 屏幕摄像机
 };
 
+// 默认 layer mask：覆盖所有 RenderPass 位（World/UI/Screen + 未来扩展）
+inline constexpr uint32_t kCameraLayerMaskAll = 0xFFFFFFFFu;
+
+// 把 RenderPass 值转成 layer 位
+inline constexpr uint32_t renderPassBit(RenderPass p) {
+    return 1u << static_cast<uint32_t>(p);
+}
+
 struct Camera {
-    float       zoom       = 1.f;
-    float       rotation   = 0.f;   // 弧度
-    bool        primary    = true;
-    RenderPass  renderPass = RenderPass::World;
-    CameraType  type       = CameraType::World;
+    float       zoom        = 1.f;
+    float       rotation    = 0.f;   // 弧度
+    bool        primary     = true;  // = active；多相机各自独立开关
+
+    // —— Camera-driven 渲染参数 ————————————————————————————————
+    int         depth       = 0;                       // 绘制顺序：小先大后；同 depth 按 ECS 顺序
+    uint32_t    layerMask   = kCameraLayerMaskAll;     // 该相机绘制哪些 RenderPass 的 drawable
+    bool        clear       = true;                    // 是否清屏（叠加相机置 false）
+    core::Color clearColor  = core::Color::Black;
+    bool        cullEnabled = true;                    // 关掉则该相机跳过视锥剔除（UI/Screen 适用）
+
+    // —— 兼容字段（暂保留，未来移除）——————————————————————————
+    RenderPass  renderPass  = RenderPass::World;
+    CameraType  type        = CameraType::World;
 };
 
 struct Sprite {

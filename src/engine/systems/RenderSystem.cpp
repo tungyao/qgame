@@ -13,56 +13,93 @@ namespace engine {
 
 namespace {
 
-// 世界空间视锥矩形（轴对齐）。zoom <= 0 表示禁用剔除。
+// 世界空间视锥矩形（轴对齐）。enabled=false → 不裁剪。
 struct ViewRect {
     float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
     bool  enabled = false;
 
-    bool contains(float x, float y) const {
-        return enabled ? (x >= minX && x <= maxX && y >= minY && y <= maxY) : true;
-    }
     bool intersectsAABB(float x0, float y0, float x1, float y1) const {
         if (!enabled) return true;
         return !(x1 < minX || x0 > maxX || y1 < minY || y0 > maxY);
     }
 };
 
-ViewRect computeWorldViewRect(EngineContext& ctx, int viewportW, int viewportH) {
+ViewRect computeCameraViewRect(const Transform& tf, const Camera& cam,
+                               int viewportW, int viewportH) {
     ViewRect vr{};
-    auto camView = ctx.world.view<Transform, Camera>();
-    for (auto [ent, tf, camera] : camView.each()) {
-        if (camera.type != CameraType::World || !camera.primary) continue;
-        if (camera.zoom <= 0.f) return vr;
+    if (!cam.cullEnabled || cam.zoom <= 0.f) return vr;
 
-        // 旋转相机时取外接 AABB（乘 sqrt(2) 足够覆盖任意角度）
-        const float halfW = (viewportW * 0.5f) / camera.zoom;
-        const float halfH = (viewportH * 0.5f) / camera.zoom;
-        float rx = halfW, ry = halfH;
-        if (camera.rotation != 0.f) {
-            const float c = std::abs(std::cos(camera.rotation));
-            const float s = std::abs(std::sin(camera.rotation));
-            rx = halfW * c + halfH * s;
-            ry = halfW * s + halfH * c;
-        }
-        vr.minX = tf.x - rx;
-        vr.maxX = tf.x + rx;
-        vr.minY = tf.y - ry;
-        vr.maxY = tf.y + ry;
-        vr.enabled = true;
-        return vr;
+    const float halfW = (viewportW * 0.5f) / cam.zoom;
+    const float halfH = (viewportH * 0.5f) / cam.zoom;
+    float rx = halfW, ry = halfH;
+    if (cam.rotation != 0.f) {
+        const float c = std::abs(std::cos(cam.rotation));
+        const float s = std::abs(std::sin(cam.rotation));
+        rx = halfW * c + halfH * s;
+        ry = halfW * s + halfH * c;
     }
+    vr.minX = tf.x - rx;
+    vr.maxX = tf.x + rx;
+    vr.minY = tf.y - ry;
+    vr.maxY = tf.y + ry;
+    vr.enabled = true;
     return vr;
+}
+
+backend::CameraData toBackendCamera(const Transform& tf, const Camera& cam,
+                                    int viewportW, int viewportH) {
+    backend::CameraData out{};
+    out.x         = tf.x;
+    out.y         = tf.y;
+    out.zoom      = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+    out.rotation  = cam.rotation;
+    out.viewportW = viewportW;
+    out.viewportH = viewportH;
+    return out;
+}
+
+// 提取 drawable 的 pass 字段，用于 layerMask 过滤。
+RenderPass cmdPass(const backend::RenderCmd& cmd) {
+    if (auto* s = std::get_if<backend::DrawSpriteCmd>(&cmd)) return s->pass;
+    if (auto* t = std::get_if<backend::DrawTileCmd>(&cmd))   return t->pass;
+    if (auto* x = std::get_if<backend::DrawTextCmd>(&cmd))   return x->pass;
+    return RenderPass::World;
+}
+
+// 取 drawable 的中心 + AABB 半边长，用于剔除（UI/Screen 不会走到这里）。
+bool cmdAABB(const backend::RenderCmd& cmd,
+             float& cx, float& cy, float& halfW, float& halfH) {
+    if (auto* s = std::get_if<backend::DrawSpriteCmd>(&cmd)) {
+        const float w = s->srcRect.w * std::abs(s->scaleX);
+        const float h = s->srcRect.h * std::abs(s->scaleY);
+        cx = s->x + (0.5f - s->pivotX) * w;
+        cy = s->y + (0.5f - s->pivotY) * h;
+        halfW = w * 0.5f;
+        halfH = h * 0.5f;
+        if (s->rotation != 0.f) {
+            const float c = std::abs(std::cos(s->rotation));
+            const float ss = std::abs(std::sin(s->rotation));
+            const float hw = halfW, hh = halfH;
+            halfW = hw * c + hh * ss;
+            halfH = hw * ss + hh * c;
+        }
+        return true;
+    }
+    if (auto* t = std::get_if<backend::DrawTileCmd>(&cmd)) {
+        const float ts = static_cast<float>(t->tileSize);
+        cx = t->gridX * ts + ts * 0.5f;
+        cy = t->gridY * ts + ts * 0.5f;
+        halfW = halfH = ts * 0.5f;
+        return true;
+    }
+    // 文本/未知：保守不剔除
+    return false;
 }
 
 } // namespace
 
 void RenderSystem::init() {
-    // 默认两个 pass：World 先、UI 后；World 清屏，UI 叠加
-    pipeline_.addPass(RenderPass::World);
-    pipeline_.addPass(RenderPass::UI);
-    pipeline_.setPassClear(RenderPass::World, true, core::Color::Black);
-    pipeline_.setPassClear(RenderPass::UI,    false);
-    core::logInfo("RenderSystem initialized");
+    core::logInfo("RenderSystem initialized (camera-driven)");
 }
 
 void RenderSystem::update(float /*dt*/) {
@@ -75,17 +112,16 @@ void RenderSystem::update(float /*dt*/) {
 void RenderSystem::shutdown() {}
 
 namespace {
-// 统一的 2D 可绘制条目：sprite 和 tile 走同一条排序流水线，保证
-// 不同命令类型在同 pass/layer 下也能按 ySort / sortKey 正确交错。
+
 enum class DrawKind { Sprite, Tile, Text };
 
 struct Drawable {
-    engine::RenderPass pass;
+    RenderPass pass;
     int   layer;
     bool  ySort;
     float y;
     int   sortKey;
-    int   seq;        // 稳定 tie-breaker
+    int   seq;
 
     DrawKind kind;
     backend::DrawSpriteCmd sprite;
@@ -96,7 +132,6 @@ struct Drawable {
 bool drawableLess(const Drawable& A, const Drawable& B) {
     if (A.pass  != B.pass)  return static_cast<int>(A.pass) < static_cast<int>(B.pass);
     if (A.layer != B.layer) return A.layer < B.layer;
-    // 非 ySort 在前（底层），ySort 在后（按 y 交错）
     if (A.ySort != B.ySort) return !A.ySort;
     if (A.ySort) {
         int ay = static_cast<int>(A.y);
@@ -106,49 +141,36 @@ bool drawableLess(const Drawable& A, const Drawable& B) {
     if (A.sortKey != B.sortKey) return A.sortKey < B.sortKey;
     return A.seq < B.seq;
 }
+
 } // namespace
 
-void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb, int viewportW, int viewportH) {
-    // 场景命令流中不再包含 Clear/SetCamera：
-    //   - swapchain 路径由 RenderPipeline 通过 PassState 统一管理
-    //   - editor 离屏路径需自行在 submit 前 cb.clear()/cb.setCamera()
+void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb,
+                                      int /*viewportW*/, int /*viewportH*/) {
+    // 不再做相机相关裁剪：相机是渲染单元，剔除由 buildCommandBuffer 按相机各自处理。
+    // 这里只把所有 ECS 实体录制为统一排好序的命令流。编辑器离屏路径也用这一份。
     cb.begin();
-
-    const ViewRect viewRect = computeWorldViewRect(ctx, viewportW, viewportH);
 
     static std::vector<Drawable> drawables;
     drawables.clear();
     int seq = 0;
 
-    // tilemap：先把 view rect 反变换到 tile 网格坐标，按可见范围裁剪
+    // tilemap
     auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
         if (tmap.tileSize <= 0) continue;
-
-        int xBegin = 0, xEnd = tmap.width;
-        int yBegin = 0, yEnd = tmap.height;
-        if (viewRect.enabled) {
-            const float ts = static_cast<float>(tmap.tileSize);
-            xBegin = std::max(0,           static_cast<int>(std::floor((viewRect.minX - tf.x) / ts)));
-            xEnd   = std::min(tmap.width,  static_cast<int>(std::ceil ((viewRect.maxX - tf.x) / ts)) + 1);
-            yBegin = std::max(0,           static_cast<int>(std::floor((viewRect.minY - tf.y) / ts)));
-            yEnd   = std::min(tmap.height, static_cast<int>(std::ceil ((viewRect.maxY - tf.y) / ts)) + 1);
-            if (xBegin >= xEnd || yBegin >= yEnd) continue;
-        }
-
         for (int layer = 0; layer < TileMap::MAX_LAYERS; ++layer) {
-            for (int y = yBegin; y < yEnd; ++y) {
-                for (int x = xBegin; x < xEnd; ++x) {
+            for (int y = 0; y < tmap.height; ++y) {
+                for (int x = 0; x < tmap.width; ++x) {
                     int tileId = tmap.tileAt(layer, x, y);
                     if (tileId < 0) continue;
                     Drawable d{};
-                    d.pass   = RenderPass::World;
-                    d.layer  = layer;
-                    d.ySort  = true;  // 启用 y-sorting 以支持正确的遮挡关系
-                    d.y      = tf.y + static_cast<float>(y * tmap.tileSize);
+                    d.pass    = RenderPass::World;
+                    d.layer   = layer;
+                    d.ySort   = true;
+                    d.y       = tf.y + static_cast<float>(y * tmap.tileSize);
                     d.sortKey = 0;
-                    d.seq    = seq++;
-                    d.kind   = DrawKind::Tile;
+                    d.seq     = seq++;
+                    d.kind    = DrawKind::Tile;
                     d.tile.tileset  = tmap.tileset;
                     d.tile.tileId   = tileId;
                     d.tile.gridX    = static_cast<int>(tf.x) + x;
@@ -156,7 +178,7 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
                     d.tile.tileSize = tmap.tileSize;
                     d.tile.layer    = layer;
                     d.tile.sortKey  = 0;
-                    d.tile.ySort    = true;  // 启用 y-sorting
+                    d.tile.ySort    = true;
                     d.tile.pass     = RenderPass::World;
                     drawables.push_back(d);
                 }
@@ -164,29 +186,9 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         }
     }
 
-    // sprite：仅对 World pass 做 AABB 剔除，UI/Screen pass 不裁
+    // sprite
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
-        if (viewRect.enabled && sprite.pass == RenderPass::World) {
-            const float w = sprite.srcRect.w * std::abs(tf.scaleX);
-            const float h = sprite.srcRect.h * std::abs(tf.scaleY);
-            // pivot 偏移：中心相对 (tf.x,tf.y) 的位移
-            const float cx = tf.x + (0.5f - sprite.pivotX) * w;
-            const float cy = tf.y + (0.5f - sprite.pivotY) * h;
-            // 旋转外接：sqrt(2)/2 ≈ 0.7071 用于半边长
-            float halfW = w * 0.5f;
-            float halfH = h * 0.5f;
-            if (tf.rotation != 0.f) {
-                const float c = std::abs(std::cos(tf.rotation));
-                const float s = std::abs(std::sin(tf.rotation));
-                const float hw = halfW, hh = halfH;
-                halfW = hw * c + hh * s;
-                halfH = hw * s + hh * c;
-            }
-            if (!viewRect.intersectsAABB(cx - halfW, cy - halfH, cx + halfW, cy + halfH)) {
-                continue;
-            }
-        }
         Drawable d{};
         d.pass    = sprite.pass;
         d.layer   = sprite.layer;
@@ -217,7 +219,6 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
     auto textView = ctx.world.view<Transform, TextComponent>();
     for (auto [ent, tf, text] : textView.each()) {
         if (!text.visible || text.text.empty()) continue;
-
         Drawable d{};
         d.pass    = text.pass;
         d.layer   = text.layer;
@@ -242,7 +243,6 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
 
     std::sort(drawables.begin(), drawables.end(), drawableLess);
 
-    // 按排序顺序写入 CommandBuffer。后端必须按命令流顺序绘制，不再二次排序。
     for (const Drawable& d : drawables) {
         switch (d.kind) {
             case DrawKind::Tile:   cb.drawTile(d.tile);     break;
@@ -254,29 +254,6 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
     cb.end();
 }
 
-void RenderSystem::syncCamerasToPassStates(int viewportW, int viewportH) {
-    backend::CameraData worldCam{};
-    worldCam.viewportW = viewportW;
-    worldCam.viewportH = viewportH;
-
-    auto camView = ctx_.world.view<Transform, Camera>();
-    for (auto [ent, tf, camera] : camView.each()) {
-        if (camera.type == CameraType::World && camera.primary) {
-            worldCam.x        = tf.x;
-            worldCam.y        = tf.y;
-            worldCam.zoom     = camera.zoom;
-            worldCam.rotation = camera.rotation;
-        }
-    }
-
-    backend::CameraData screenCam{};
-    screenCam.viewportW = viewportW;
-    screenCam.viewportH = viewportH;
-
-    pipeline_.setPassCamera(RenderPass::World, worldCam);
-    pipeline_.setPassCamera(RenderPass::UI,    screenCam);
-}
-
 void RenderSystem::buildCommandBuffer() {
     const int w = ctx_.window->width();
     const int h = ctx_.window->height();
@@ -284,8 +261,67 @@ void RenderSystem::buildCommandBuffer() {
     backend::CommandBuffer& cb = ctx_.renderCommandBuffer();
     buildSceneCommands(ctx_, cb, w, h);
 
-    syncCamerasToPassStates(w, h);
-    pipeline_.execute(cb, ctx_.renderDevice());
+    // 收集 active 相机，按 depth 升序
+    struct CamEntry {
+        const Transform* tf;
+        const Camera*    cam;
+    };
+    std::vector<CamEntry> cameras;
+    auto camView = ctx_.world.view<Transform, Camera>();
+    for (auto [ent, tf, cam] : camView.each()) {
+        if (!cam.primary) continue;
+        cameras.push_back({ &tf, &cam });
+    }
+    std::stable_sort(cameras.begin(), cameras.end(),
+                     [](const CamEntry& a, const CamEntry& b) {
+                         return a.cam->depth < b.cam->depth;
+                     });
+
+    backend::IRenderDevice& dev = ctx_.renderDevice();
+
+    // 没有任何相机：清屏并返回（避免出现未定义画面）
+    if (cameras.empty()) {
+        backend::IRenderDevice::PassSubmitInfo info;
+        info.camera.viewportW = w;
+        info.camera.viewportH = h;
+        info.clearEnabled = true;
+        info.clearColor   = core::Color::Black;
+        dev.submitPass(info, {});
+        return;
+    }
+
+    // 按相机分发命令
+    static std::vector<const backend::RenderCmd*> filtered;
+    for (size_t i = 0; i < cameras.size(); ++i) {
+        const Transform& tf = *cameras[i].tf;
+        const Camera&    cam = *cameras[i].cam;
+
+        const ViewRect vr = computeCameraViewRect(tf, cam, w, h);
+
+        filtered.clear();
+        for (const backend::RenderCmd& cmd : cb.commands()) {
+            // layerMask 过滤
+            const RenderPass p = cmdPass(cmd);
+            if ((cam.layerMask & renderPassBit(p)) == 0) continue;
+
+            // 视锥剔除（仅 World pass + cullEnabled 相机）
+            if (vr.enabled && p == RenderPass::World) {
+                float cx, cy, hw, hh;
+                if (cmdAABB(cmd, cx, cy, hw, hh)) {
+                    if (!vr.intersectsAABB(cx - hw, cy - hh, cx + hw, cy + hh)) {
+                        continue;
+                    }
+                }
+            }
+            filtered.push_back(&cmd);
+        }
+
+        backend::IRenderDevice::PassSubmitInfo info;
+        info.camera       = toBackendCamera(tf, cam, w, h);
+        info.clearEnabled = cam.clear;
+        info.clearColor   = cam.clearColor;
+        dev.submitPass(info, filtered);
+    }
 }
 
 } // namespace engine

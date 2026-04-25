@@ -1,6 +1,5 @@
 #pragma once
 #include "ISystem.h"
-#include "../../backend/renderer/RenderPipeline.h"
 
 namespace backend { class CommandBuffer; }
 
@@ -15,15 +14,15 @@ public:
     void update(float dt) override;
     void shutdown()       override;
 
-    // 将当前 ECS 场景写入 cb，供 EditorAPI 复用（editor 路径直接 submit，不走 pipeline）
-    static void buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb, int viewportW, int viewportH);
+    // 录制完整场景命令到 cb（不含 SetCamera/Clear，调用方按相机分发）。
+    // 编辑器离屏路径直接消费这个 cb。
+    static void buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb,
+                                   int viewportW, int viewportH);
 
 private:
     void buildCommandBuffer();
-    void syncCamerasToPassStates(int viewportW, int viewportH);
 
-    EngineContext&        ctx_;
-    backend::RenderPipeline pipeline_;
+    EngineContext& ctx_;
 };
 
 } // namespace engine
