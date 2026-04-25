@@ -526,11 +526,12 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     buildViewMatrix(camera.x, camera.y, zoom, camera.rotation, view);
 
     float mvp[16];
+    // 列主序：mvp = proj * view（先 view 把世界变到相机空间，再 proj 投影到 NDC）
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
             mvp[i * 4 + j] = 0.f;
             for (int k = 0; k < 4; ++k) {
-                mvp[i * 4 + j] += proj[i * 4 + k] * view[k * 4 + j];
+                mvp[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
             }
         }
     }
@@ -934,19 +935,19 @@ void SDLGPURenderDevice::buildOrthoProjectionMatrix(float w, float h, float out[
 }
 
 void SDLGPURenderDevice::buildViewMatrix(float camX, float camY, float zoom, float rotation, float out[16]) {
-    const float halfW = 0.5f / zoom;
-    const float halfH = 0.5f / zoom;
-    const float cosR  = cosf(rotation);
-    const float sinR  = sinf(rotation);
+    // 标准 2D view：先平移到相机原点，再绕原点旋转，再按 zoom 缩放。
+    // 列主序，世界点 (x,y) → eye = R * zoom * (world - cam)
+    const float c = cosf(rotation);
+    const float s = sinf(rotation);
 
     memset(out, 0, 16 * sizeof(float));
-    out[0]  =  cosR * halfW;
-    out[1]  =  sinR * halfW;
-    out[4]  = -sinR * halfH;
-    out[5]  =  cosR * halfH;
+    out[0]  =  c * zoom;
+    out[1]  =  s * zoom;
+    out[4]  = -s * zoom;
+    out[5]  =  c * zoom;
     out[10] = 1.f;
-    out[12] = -camX * cosR * halfW + camY * sinR * halfW + halfW;
-    out[13] = -camX * sinR * halfH - camY * cosR * halfH + halfH;
+    out[12] = -( c * camX - s * camY) * zoom;
+    out[13] = -( s * camX + c * camY) * zoom;
     out[15] = 1.f;
 }
 
@@ -963,7 +964,7 @@ void SDLGPURenderDevice::buildOrthoMatrixCamera(float w, float h,
         for (int j = 0; j < 4; ++j) {
             out[i * 4 + j] = 0.f;
             for (int k = 0; k < 4; ++k) {
-                out[i * 4 + j] += proj[i * 4 + k] * view[k * 4 + j];
+                out[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
             }
         }
     }
