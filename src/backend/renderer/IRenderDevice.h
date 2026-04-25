@@ -9,6 +9,14 @@ namespace backend {
 
 enum class TextureFilter { Nearest, Linear };
 
+enum class BufferUsage : uint32_t {
+    Vertex   = 1 << 0,
+    Index    = 1 << 1,
+    Storage  = 1 << 2,
+    Indirect = 1 << 3,
+    Uniform  = 1 << 4,
+};
+
 struct TextureDesc {
     int width = 0;
     int height = 0;
@@ -25,6 +33,27 @@ struct ShaderDesc {
     size_t fsSize = 0;
 };
 
+struct BufferDesc {
+    size_t size = 0;
+    BufferUsage usage = BufferUsage::Vertex;
+    const void* initialData = nullptr;
+};
+
+struct ComputePipelineDesc {
+    const void* code = nullptr;
+    size_t codeSize = 0;
+    const char* entryPoint = "main";
+    uint32_t threadCountX = 64;
+    uint32_t threadCountY = 1;
+    uint32_t threadCountZ = 1;
+    uint32_t numSamplers = 0;
+    uint32_t numReadonlyStorageTextures = 0;
+    uint32_t numReadonlyStorageBuffers = 0;
+    uint32_t numReadwriteStorageTextures = 0;
+    uint32_t numReadwriteStorageBuffers = 0;
+    uint32_t numUniformBuffers = 0;
+};
+
 class IRenderDevice : public IBackendSystem {
 public:
     virtual TextureHandle createTexture(const TextureDesc&) = 0;
@@ -35,6 +64,16 @@ public:
     virtual engine::FontHandle createFont(const engine::FontData& fontData) = 0;
     virtual void               destroyFont(engine::FontHandle) = 0;
     virtual const engine::FontData* getFont(engine::FontHandle) const = 0;
+    
+    virtual BufferHandle createBuffer(const BufferDesc&) = 0;
+    virtual void destroyBuffer(BufferHandle) = 0;
+    virtual void* mapBuffer(BufferHandle) = 0;
+    virtual void unmapBuffer(BufferHandle) = 0;
+    virtual void uploadToBuffer(BufferHandle, const void* data, size_t size, size_t offset = 0) = 0;
+    virtual void downloadFromBuffer(BufferHandle, void* data, size_t size, size_t offset = 0) = 0;
+    
+    virtual ComputePipelineHandle createComputePipeline(const ComputePipelineDesc&) = 0;
+    virtual void destroyComputePipeline(ComputePipelineHandle) = 0;
 
     virtual void submitCommandBuffer(const CommandBuffer&) = 0;
 

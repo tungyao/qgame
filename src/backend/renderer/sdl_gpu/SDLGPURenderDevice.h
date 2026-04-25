@@ -31,6 +31,16 @@ public:
     engine::FontHandle createFont(const engine::FontData& fontData) override;
     void               destroyFont(engine::FontHandle)               override;
     const engine::FontData* getFont(engine::FontHandle) const       override;
+    
+    BufferHandle createBuffer(const BufferDesc&) override;
+    void         destroyBuffer(BufferHandle)     override;
+    void*        mapBuffer(BufferHandle)         override;
+    void         unmapBuffer(BufferHandle)       override;
+    void         uploadToBuffer(BufferHandle, const void* data, size_t size, size_t offset = 0) override;
+    void         downloadFromBuffer(BufferHandle, void* data, size_t size, size_t offset = 0) override;
+    
+    ComputePipelineHandle createComputePipeline(const ComputePipelineDesc&) override;
+    void                  destroyComputePipeline(ComputePipelineHandle)     override;
 
     void submitCommandBuffer(const CommandBuffer&) override;
     void submitPass(const PassSubmitInfo&, const std::vector<const RenderCmd*>&) override;
@@ -51,6 +61,17 @@ private:
         SDL_GPUSampler*  sampler  = nullptr;
         int              width    = 0;
         int              height   = 0;
+    };
+
+    struct BufferEntry {
+        SDL_GPUBuffer*         gpuBuffer = nullptr;
+        SDL_GPUTransferBuffer* transfer   = nullptr;
+        size_t                 size       = 0;
+        BufferUsage            usage      = BufferUsage::Vertex;
+    };
+
+    struct ComputePipelineEntry {
+        SDL_GPUComputePipeline* pipeline = nullptr;
     };
 
     struct SpriteVertex {
@@ -109,6 +130,8 @@ private:
 
     core::HandleMap<TextureHandle, TextureEntry> textures_;
     core::HandleMap<engine::FontHandle, engine::FontData> fonts_;
+    core::HandleMap<BufferHandle, BufferEntry> buffers_;
+    core::HandleMap<ComputePipelineHandle, ComputePipelineEntry> computePipelines_;
     TextureHandle             editorRenderTarget_{};
     int                       editorRenderTargetWidth_ = 0;
     int                       editorRenderTargetHeight_ = 0;

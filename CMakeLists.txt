@@ -86,9 +86,14 @@ add_subdirectory(src/engine)
 # ── 可选目标 ──────────────────────────────────────────────────────────────────
 option(BUILD_EDITOR "Build editor" OFF)
 option(BUILD_GAME   "Build game"   ON)
+option(BUILD_TESTS  "Build tests"  OFF)
 
 if(BUILD_GAME)
     add_subdirectory(game)
+endif()
+
+if(BUILD_TESTS)
+    add_subdirectory(tests/hello_compute)
 endif()
 
 #if(BUILD_EDITOR)

@@ -7,3 +7,4 @@ using ShaderHandle  = core::Handle<struct ShaderTag>;
 using BufferHandle  = core::Handle<struct BufferTag>;
 using SoundHandle   = core::Handle<struct SoundTag>;
 using AnimationHandle = core::Handle<struct AnimationTag>;
+using ComputePipelineHandle = core::Handle<struct ComputePipelineTag>;

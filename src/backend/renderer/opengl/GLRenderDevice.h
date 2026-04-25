@@ -28,6 +28,16 @@ public:
     engine::FontHandle createFont(const engine::FontData& fontData) override;
     void               destroyFont(engine::FontHandle)               override;
     const engine::FontData* getFont(engine::FontHandle) const       override;
+    
+    BufferHandle createBuffer(const BufferDesc&) override;
+    void         destroyBuffer(BufferHandle)     override;
+    void*        mapBuffer(BufferHandle)         override;
+    void         unmapBuffer(BufferHandle)       override;
+    void         uploadToBuffer(BufferHandle, const void* data, size_t size, size_t offset = 0) override;
+    void         downloadFromBuffer(BufferHandle, void* data, size_t size, size_t offset = 0) override;
+    
+    ComputePipelineHandle createComputePipeline(const ComputePipelineDesc&) override;
+    void                  destroyComputePipeline(ComputePipelineHandle)     override;
 
     // IRenderDevice — 提交 & 帧控制
     void submitCommandBuffer(const CommandBuffer&) override;
@@ -51,6 +61,16 @@ private:
         TextureHandle colorTex{};
         int width  = 0;
         int height = 0;
+    };
+
+    struct BufferEntry {
+        unsigned int glBuffer = 0;
+        size_t       size     = 0;
+        BufferUsage  usage    = BufferUsage::Vertex;
+    };
+
+    struct ComputePipelineEntry {
+        unsigned int program = 0;
     };
 
     struct SpriteVertex {
@@ -118,6 +138,8 @@ private:
 
     core::HandleMap<TextureHandle, TextureEntry> textures_;
     core::HandleMap<engine::FontHandle, engine::FontData> fonts_;
+    core::HandleMap<BufferHandle, BufferEntry> buffers_;
+    core::HandleMap<ComputePipelineHandle, ComputePipelineEntry> computePipelines_;
 
     // renderToTexture (swapchain-paired, 复用 FBO)
     FboEntry      screenFbo_{};

@@ -110,7 +110,7 @@ function(compile_shader_spirv glsl_file stage out_header symbol fallback_header)
 endfunction()
 
 # compile_shader_dxil(hlsl_file stage out_header symbol fallback_header)
-#   stage: "vs" | "ps"
+#   stage: "vs" | "ps" | "cs"
 # Only generates output when DXC_EXE is found; caller checks DXC_EXE before calling.
 function(compile_shader_dxil hlsl_file stage out_header symbol fallback_header)
     set(dxil_out_dir "${CMAKE_BINARY_DIR}/shaders")
@@ -119,6 +119,8 @@ function(compile_shader_dxil hlsl_file stage out_header symbol fallback_header)
 
     if("${stage}" STREQUAL "vs")
         set(profile "vs_6_0")
+    elseif("${stage}" STREQUAL "cs")
+        set(profile "cs_6_0")
     else()
         set(profile "ps_6_0")
     endif()

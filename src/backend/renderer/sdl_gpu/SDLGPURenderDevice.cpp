@@ -140,6 +140,24 @@ void SDLGPURenderDevice::shutdown() {
     if (indexBuf_) { SDL_ReleaseGPUBuffer(device_, indexBuf_); indexBuf_ = nullptr; }
     if (transferBuf_) { SDL_ReleaseGPUTransferBuffer(device_, transferBuf_); transferBuf_ = nullptr; }
 
+    while (computePipelines_.valid(ComputePipelineHandle{1, 1})) {
+        ComputePipelineHandle h{1, 1};
+        if (computePipelines_.tryGet(h)) {
+            destroyComputePipeline(h);
+        } else {
+            break;
+        }
+    }
+
+    while (buffers_.valid(BufferHandle{1, 1})) {
+        BufferHandle h{1, 1};
+        if (buffers_.tryGet(h)) {
+            destroyBuffer(h);
+        } else {
+            break;
+        }
+    }
+
     SDL_ReleaseWindowFromGPUDevice(device_, window_);
     SDL_DestroyGPUDevice(device_);
     device_ = nullptr;
@@ -273,6 +291,194 @@ const engine::FontData* SDLGPURenderDevice::getFont(engine::FontHandle h) const 
     return fonts_.valid(h) ? &fonts_.get(h) : nullptr;
 }
 
+BufferHandle SDLGPURenderDevice::createBuffer(const BufferDesc& desc) {
+    if (!device_ || desc.size == 0) {
+        core::logError("createBuffer: invalid params device=%p size=%zu", device_, desc.size);
+        return {};
+    }
+
+    SDL_GPUBufferUsageFlags gpuUsage = 0;
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Vertex)) {
+        gpuUsage |= SDL_GPU_BUFFERUSAGE_VERTEX;
+    }
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Index)) {
+        gpuUsage |= SDL_GPU_BUFFERUSAGE_INDEX;
+    }
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
+        gpuUsage |= SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ;
+    }
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Indirect)) {
+        gpuUsage |= SDL_GPU_BUFFERUSAGE_INDIRECT;
+    }
+
+    SDL_GPUBufferCreateInfo bufInfo{};
+    bufInfo.usage = gpuUsage;
+    bufInfo.size = static_cast<uint32_t>(desc.size);
+
+    core::logInfo("createBuffer: creating GPU buffer size=%zu usage=0x%x", desc.size, gpuUsage);
+    
+    SDL_GPUBuffer* gpuBuf = SDL_CreateGPUBuffer(device_, &bufInfo);
+    if (!gpuBuf) {
+        core::logError("createBuffer: SDL_CreateGPUBuffer failed: %s", SDL_GetError());
+        return {};
+    }
+
+    SDL_GPUTransferBufferCreateInfo transferInfo{};
+    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transferInfo.size = static_cast<uint32_t>(desc.size);
+
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
+    if (!transfer) {
+        SDL_ReleaseGPUBuffer(device_, gpuBuf);
+        core::logError("createBuffer: SDL_CreateGPUTransferBuffer failed: %s", SDL_GetError());
+        return {};
+    }
+
+    core::logInfo("createBuffer: inserting into HandleMap");
+    BufferHandle handle = buffers_.insert(BufferEntry{ gpuBuf, transfer, desc.size, desc.usage });
+
+    if (desc.initialData) {
+        uploadToBuffer(handle, desc.initialData, desc.size, 0);
+    }
+
+    return handle;
+}
+
+void SDLGPURenderDevice::destroyBuffer(BufferHandle h) {
+    if (!buffers_.valid(h)) return;
+
+    BufferEntry& entry = buffers_.get(h);
+    SDL_WaitForGPUIdle(device_);
+    if (entry.gpuBuffer) SDL_ReleaseGPUBuffer(device_, entry.gpuBuffer);
+    if (entry.transfer) SDL_ReleaseGPUTransferBuffer(device_, entry.transfer);
+    buffers_.remove(h);
+}
+
+void* SDLGPURenderDevice::mapBuffer(BufferHandle h) {
+    if (!buffers_.valid(h)) return nullptr;
+    BufferEntry& entry = buffers_.get(h);
+    return SDL_MapGPUTransferBuffer(device_, entry.transfer, false);
+}
+
+void SDLGPURenderDevice::unmapBuffer(BufferHandle h) {
+    if (!buffers_.valid(h)) return;
+    BufferEntry& entry = buffers_.get(h);
+    SDL_UnmapGPUTransferBuffer(device_, entry.transfer);
+}
+
+void SDLGPURenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t size, size_t offset) {
+    if (!buffers_.valid(h) || !data || size == 0) return;
+    BufferEntry& entry = buffers_.get(h);
+    if (offset + size > entry.size) {
+        core::logError("uploadToBuffer: out of bounds (offset=%zu, size=%zu, bufferSize=%zu)", offset, size, entry.size);
+        return;
+    }
+
+    void* mapped = SDL_MapGPUTransferBuffer(device_, entry.transfer, false);
+    if (!mapped) {
+        core::logError("uploadToBuffer: map failed: %s", SDL_GetError());
+        return;
+    }
+    memcpy(static_cast<uint8_t*>(mapped) + offset, data, size);
+    SDL_UnmapGPUTransferBuffer(device_, entry.transfer);
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmd);
+
+    SDL_GPUTransferBufferLocation src{};
+    src.transfer_buffer = entry.transfer;
+    src.offset = static_cast<uint32_t>(offset);
+
+    SDL_GPUBufferRegion dst{};
+    dst.buffer = entry.gpuBuffer;
+    dst.offset = static_cast<uint32_t>(offset);
+    dst.size = static_cast<uint32_t>(size);
+
+    SDL_UploadToGPUBuffer(copyPass, &src, &dst, false);
+    SDL_EndGPUCopyPass(copyPass);
+    SDL_SubmitGPUCommandBuffer(cmd);
+}
+
+void SDLGPURenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t size, size_t offset) {
+    if (!buffers_.valid(h) || !data || size == 0) return;
+    BufferEntry& entry = buffers_.get(h);
+    if (offset + size > entry.size) {
+        core::logError("downloadFromBuffer: out of bounds");
+        return;
+    }
+
+    SDL_GPUTransferBufferCreateInfo downloadInfo{};
+    downloadInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    downloadInfo.size = static_cast<uint32_t>(size);
+    SDL_GPUTransferBuffer* downloadBuf = SDL_CreateGPUTransferBuffer(device_, &downloadInfo);
+    if (!downloadBuf) {
+        core::logError("downloadFromBuffer: create transfer buffer failed: %s", SDL_GetError());
+        return;
+    }
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmd);
+
+    SDL_GPUBufferRegion src{};
+    src.buffer = entry.gpuBuffer;
+    src.offset = static_cast<uint32_t>(offset);
+    src.size = static_cast<uint32_t>(size);
+
+    SDL_GPUTransferBufferLocation dst{};
+    dst.transfer_buffer = downloadBuf;
+    dst.offset = 0;
+
+    SDL_DownloadFromGPUBuffer(copyPass, &src, &dst);
+    SDL_EndGPUCopyPass(copyPass);
+    SDL_SubmitGPUCommandBuffer(cmd);
+
+    void* mapped = SDL_MapGPUTransferBuffer(device_, downloadBuf, true);
+    if (mapped) {
+        memcpy(data, mapped, size);
+        SDL_UnmapGPUTransferBuffer(device_, downloadBuf);
+    }
+
+    SDL_ReleaseGPUTransferBuffer(device_, downloadBuf);
+}
+
+ComputePipelineHandle SDLGPURenderDevice::createComputePipeline(const ComputePipelineDesc& desc) {
+    if (!device_ || !desc.code || desc.codeSize == 0) {
+        return {};
+    }
+
+    SDL_GPUComputePipelineCreateInfo info{};
+    info.code_size = desc.codeSize;
+    info.code = static_cast<const Uint8*>(desc.code);
+    info.entrypoint = desc.entryPoint ? desc.entryPoint : "main";
+    info.format = shaderFormat_;
+    info.num_samplers = desc.numSamplers;
+    info.num_readonly_storage_textures = desc.numReadonlyStorageTextures;
+    info.num_readonly_storage_buffers = desc.numReadonlyStorageBuffers;
+    info.num_readwrite_storage_textures = desc.numReadwriteStorageTextures;
+    info.num_readwrite_storage_buffers = desc.numReadwriteStorageBuffers;
+    info.num_uniform_buffers = desc.numUniformBuffers;
+    info.threadcount_x = desc.threadCountX > 0 ? desc.threadCountX : 64;
+    info.threadcount_y = desc.threadCountY > 0 ? desc.threadCountY : 1;
+    info.threadcount_z = desc.threadCountZ > 0 ? desc.threadCountZ : 1;
+    info.props = 0;
+
+    SDL_GPUComputePipeline* pipeline = SDL_CreateGPUComputePipeline(device_, &info);
+    if (!pipeline) {
+        core::logError("createComputePipeline: SDL_CreateGPUComputePipeline failed: %s", SDL_GetError());
+        return {};
+    }
+
+    return computePipelines_.insert(ComputePipelineEntry{ pipeline });
+}
+
+void SDLGPURenderDevice::destroyComputePipeline(ComputePipelineHandle h) {
+    if (!computePipelines_.valid(h)) return;
+    ComputePipelineEntry& entry = computePipelines_.get(h);
+    SDL_WaitForGPUIdle(device_);
+    if (entry.pipeline) SDL_ReleaseGPUComputePipeline(device_, entry.pipeline);
+    computePipelines_.remove(h);
+}
+
 void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     if (!gpuCmdBuf_ || !swapchainTex_) {
         return;
@@ -341,6 +547,91 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     CameraData camera = cameraIn;
     if (camera.viewportW == 0) camera.viewportW = static_cast<int>(targetWidth);
     if (camera.viewportH == 0) camera.viewportH = static_cast<int>(targetHeight);
+
+    for (const RenderCmd* cmd : cmds) {
+        if (auto* d = std::get_if<DispatchCmd>(cmd)) {
+            if (!computePipelines_.valid(d->pipeline)) continue;
+            ComputePipelineEntry& pe = computePipelines_.get(d->pipeline);
+
+            // Prepare readwrite storage buffer bindings for SDL_BeginGPUComputePass
+            SDL_GPUStorageBufferReadWriteBinding rwBufferBindings[8];
+            uint32_t rwBufferCount = 0;
+            for (uint32_t i = 0; i < d->bindings.readwriteStorageBufferCount && i < 8; ++i) {
+                if (buffers_.valid(d->bindings.readwriteStorageBuffers[i])) {
+                    rwBufferBindings[rwBufferCount].buffer = buffers_.get(d->bindings.readwriteStorageBuffers[i]).gpuBuffer;
+                    rwBufferBindings[rwBufferCount].cycle = false;
+                    ++rwBufferCount;
+                }
+            }
+
+            // Prepare readwrite storage texture bindings
+            SDL_GPUStorageTextureReadWriteBinding rwTextureBindings[8];
+            uint32_t rwTextureCount = 0;
+            for (uint32_t i = 0; i < d->bindings.readwriteStorageTextureCount && i < 8; ++i) {
+                if (textures_.valid(d->bindings.readwriteStorageTextures[i])) {
+                    TextureEntry& te = textures_.get(d->bindings.readwriteStorageTextures[i]);
+                    rwTextureBindings[rwTextureCount].texture = te.gpuTex;
+                    rwTextureBindings[rwTextureCount].mip_level = 0;
+                    rwTextureBindings[rwTextureCount].layer = 0;
+                    rwTextureBindings[rwTextureCount].cycle = false;
+                    ++rwTextureCount;
+                }
+            }
+
+            SDL_GPUComputePass* computePass = SDL_BeginGPUComputePass(
+                cmdBuf, rwTextureBindings, rwTextureCount, rwBufferBindings, rwBufferCount);
+            
+            SDL_BindGPUComputePipeline(computePass, pe.pipeline);
+
+            // Bind readonly storage buffers
+            if (d->bindings.readonlyStorageBufferCount > 0) {
+                SDL_GPUBuffer* readonlyBuffers[8];
+                for (uint32_t i = 0; i < d->bindings.readonlyStorageBufferCount && i < 8; ++i) {
+                    if (buffers_.valid(d->bindings.readonlyStorageBuffers[i])) {
+                        readonlyBuffers[i] = buffers_.get(d->bindings.readonlyStorageBuffers[i]).gpuBuffer;
+                    } else {
+                        readonlyBuffers[i] = nullptr;
+                    }
+                }
+                SDL_BindGPUComputeStorageBuffers(computePass, 0, readonlyBuffers, d->bindings.readonlyStorageBufferCount);
+            }
+
+            // Bind sampled textures (with samplers)
+            if (d->bindings.sampledTextureCount > 0) {
+                SDL_GPUTextureSamplerBinding samplerBindings[8];
+                for (uint32_t i = 0; i < d->bindings.sampledTextureCount && i < 8; ++i) {
+                    if (textures_.valid(d->bindings.sampledTextures[i])) {
+                        TextureEntry& te = textures_.get(d->bindings.sampledTextures[i]);
+                        samplerBindings[i].texture = te.gpuTex;
+                        samplerBindings[i].sampler = te.sampler;
+                    } else {
+                        samplerBindings[i].texture = nullptr;
+                        samplerBindings[i].sampler = nullptr;
+                    }
+                }
+                SDL_BindGPUComputeSamplers(computePass, 0, samplerBindings, d->bindings.sampledTextureCount);
+            }
+
+            // Bind readonly storage textures
+            if (d->bindings.readonlyStorageTextureCount > 0) {
+                SDL_GPUTexture* readonlyTextures[8];
+                for (uint32_t i = 0; i < d->bindings.readonlyStorageTextureCount && i < 8; ++i) {
+                    if (textures_.valid(d->bindings.readonlyStorageTextures[i])) {
+                        readonlyTextures[i] = textures_.get(d->bindings.readonlyStorageTextures[i]).gpuTex;
+                    } else {
+                        readonlyTextures[i] = nullptr;
+                    }
+                }
+                SDL_BindGPUComputeStorageTextures(computePass, 0, readonlyTextures, d->bindings.readonlyStorageTextureCount);
+            }
+
+            SDL_DispatchGPUCompute(computePass, d->groupCountX, d->groupCountY, d->groupCountZ);
+            SDL_EndGPUComputePass(computePass);
+        }
+        else if (auto* b = std::get_if<BarrierCmd>(cmd)) {
+            (void)b;
+        }
+    }
 
     batchVerts_.clear();
     batchIdx_.clear();

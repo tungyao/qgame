@@ -56,6 +56,19 @@ static PFNGLFENCESYNCPROC                   s_glFenceSync               = nullpt
 static PFNGLCLIENTWAITSYNCPROC              s_glClientWaitSync          = nullptr;
 static PFNGLDELETESYNCPROC                  s_glDeleteSync              = nullptr;
 
+// GL 4.3+ Compute shader
+static PFNGLDISPATCHCOMPUTEPROC             s_glDispatchCompute         = nullptr;
+static PFNGLMEMORYBARRIERPROC               s_glMemoryBarrier           = nullptr;
+static PFNGLBINDBUFFERBASEPROC              s_glBindBufferBase          = nullptr;
+static PFNGLBINDBUFFERRANGEPROC             s_glBindBufferRange         = nullptr;
+static PFNGLMAPBUFFERRANGEPROC              s_glMapBufferRange          = nullptr;
+static PFNGLUNMAPBUFFERPROC                 s_glUnmapBuffer             = nullptr;
+static PFNGLBUFFERSUBDATAPROC               s_glBufferSubData           = nullptr;
+static void (*s_glGetIntegerv)(GLenum, GLint*) = nullptr;
+
+// GL compute capability flag
+static bool s_hasCompute = false;
+
 // ── Macro redirection ─────────────────────────────────────────────────────────
 // Redefine each GL name to its function pointer — valid only inside this TU.
 #define glActiveTexture           s_glActiveTexture
@@ -94,6 +107,14 @@ static PFNGLDELETESYNCPROC                  s_glDeleteSync              = nullpt
 #define glFenceSync               s_glFenceSync
 #define glClientWaitSync          s_glClientWaitSync
 #define glDeleteSync              s_glDeleteSync
+#define glDispatchCompute         s_glDispatchCompute
+#define glMemoryBarrier           s_glMemoryBarrier
+#define glBindBufferBase          s_glBindBufferBase
+#define glBindBufferRange         s_glBindBufferRange
+#define glMapBufferRange          s_glMapBufferRange
+#define glUnmapBuffer             s_glUnmapBuffer
+#define glBufferSubData           s_glBufferSubData
+#define glGetIntegerv             s_glGetIntegerv
 
 
 #include "../CommandBuffer.h"
@@ -110,6 +131,10 @@ static bool loadGLFunctions() {
         s_gl##name = reinterpret_cast<decltype(s_gl##name)>( \
             SDL_GL_GetProcAddress("gl" #name)); \
         if (!s_gl##name) { core::logError("GL: missing gl" #name); ok = false; }
+
+    #define QGAME_GL_LOAD_OPTIONAL(name) \
+        s_gl##name = reinterpret_cast<decltype(s_gl##name)>( \
+            SDL_GL_GetProcAddress("gl" #name));
 
     bool ok = true;
     QGAME_GL_LOAD(ActiveTexture)
@@ -134,6 +159,29 @@ static bool loadGLFunctions() {
     QGAME_GL_LOAD(FenceSync)               QGAME_GL_LOAD(ClientWaitSync)
     QGAME_GL_LOAD(DeleteSync)
     #undef QGAME_GL_LOAD
+
+    // GL 4.3+ compute shader functions (optional)
+    QGAME_GL_LOAD_OPTIONAL(DispatchCompute)
+    QGAME_GL_LOAD_OPTIONAL(MemoryBarrier)
+    QGAME_GL_LOAD_OPTIONAL(BindBufferBase)
+    QGAME_GL_LOAD_OPTIONAL(BindBufferRange)
+    QGAME_GL_LOAD_OPTIONAL(MapBufferRange)
+    QGAME_GL_LOAD_OPTIONAL(UnmapBuffer)
+    QGAME_GL_LOAD_OPTIONAL(BufferSubData)
+    QGAME_GL_LOAD_OPTIONAL(GetIntegerv)
+    #undef QGAME_GL_LOAD_OPTIONAL
+
+    // Check for GL 4.3+ compute support
+    s_hasCompute = s_glDispatchCompute && s_glMemoryBarrier && s_glBindBufferBase;
+    if (s_hasCompute) {
+        int major = 0, minor = 0;
+        s_glGetIntegerv(0x821B /*GL_MAJOR_VERSION*/, &major);
+        s_glGetIntegerv(0x821C /*GL_MINOR_VERSION*/, &minor);
+        core::logInfo("GL compute shader support: GL %d.%d", major, minor);
+    } else {
+        core::logInfo("GL compute shader not available (requires GL 4.3+)");
+    }
+
     return ok;
 }
 
@@ -302,6 +350,175 @@ void GLRenderDevice::destroyFont(engine::FontHandle h) {
 
 const engine::FontData* GLRenderDevice::getFont(engine::FontHandle h) const {
     return fonts_.valid(h) ? &fonts_.get(h) : nullptr;
+}
+
+// ── Buffer 管理 ────────────────────────────────────────────────────────────────
+
+BufferHandle GLRenderDevice::createBuffer(const BufferDesc& desc) {
+    if (desc.size == 0) return {};
+
+    GLenum target = GL_ARRAY_BUFFER;
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Index)) {
+        target = GL_ELEMENT_ARRAY_BUFFER;
+    } else if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
+        target = 0x90F2; // GL_SHADER_STORAGE_BUFFER
+    } else if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Indirect)) {
+        target = 0x8F3F; // GL_DRAW_INDIRECT_BUFFER
+    } else if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Uniform)) {
+        target = 0x8A11; // GL_UNIFORM_BUFFER
+    }
+
+    unsigned int glBuf = 0;
+    glGenBuffers(1, &glBuf);
+    glBindBuffer(target, glBuf);
+
+    GLenum glUsage = GL_DYNAMIC_DRAW;
+    if (desc.initialData) {
+        glBufferData(target, static_cast<GLsizeiptr>(desc.size), desc.initialData, glUsage);
+    } else {
+        glBufferData(target, static_cast<GLsizeiptr>(desc.size), nullptr, glUsage);
+    }
+
+    glBindBuffer(target, 0);
+
+    return buffers_.insert(BufferEntry{ glBuf, desc.size, desc.usage });
+}
+
+void GLRenderDevice::destroyBuffer(BufferHandle h) {
+    if (!buffers_.valid(h)) return;
+    BufferEntry& entry = buffers_.get(h);
+    if (entry.glBuffer) {
+        glDeleteBuffers(1, &entry.glBuffer);
+    }
+    buffers_.remove(h);
+}
+
+void* GLRenderDevice::mapBuffer(BufferHandle h) {
+    if (!buffers_.valid(h) || !s_glMapBufferRange) return nullptr;
+    BufferEntry& entry = buffers_.get(h);
+
+    GLenum target = GL_ARRAY_BUFFER;
+    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
+        target = 0x90F2; // GL_SHADER_STORAGE_BUFFER
+    }
+
+    glBindBuffer(target, entry.glBuffer);
+    void* ptr = glMapBufferRange(target, 0, static_cast<GLsizeiptr>(entry.size),
+                                  GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+    return ptr;
+}
+
+void GLRenderDevice::unmapBuffer(BufferHandle h) {
+    if (!buffers_.valid(h) || !s_glUnmapBuffer) return;
+    BufferEntry& entry = buffers_.get(h);
+
+    GLenum target = GL_ARRAY_BUFFER;
+    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
+        target = 0x90F2;
+    }
+
+    glBindBuffer(target, entry.glBuffer);
+    glUnmapBuffer(target);
+    glBindBuffer(target, 0);
+}
+
+void GLRenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t size, size_t offset) {
+    if (!buffers_.valid(h) || !data || size == 0) return;
+    BufferEntry& entry = buffers_.get(h);
+    if (offset + size > entry.size) return;
+
+    GLenum target = GL_ARRAY_BUFFER;
+    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
+        target = 0x90F2;
+    }
+
+    glBindBuffer(target, entry.glBuffer);
+    if (s_glMapBufferRange) {
+        void* ptr = glMapBufferRange(target, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(size),
+                                      GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+        if (ptr) {
+            memcpy(ptr, data, size);
+            glUnmapBuffer(target);
+        }
+    } else {
+        // Fallback: orphan and re-upload
+        glBufferData(target, static_cast<GLsizeiptr>(entry.size), nullptr, GL_DYNAMIC_DRAW);
+        glBufferSubData(target, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(size), data);
+    }
+    glBindBuffer(target, 0);
+}
+
+void GLRenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t size, size_t offset) {
+    if (!buffers_.valid(h) || !data || size == 0) return;
+    BufferEntry& entry = buffers_.get(h);
+    if (offset + size > entry.size) return;
+
+    GLenum target = GL_ARRAY_BUFFER;
+    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
+        target = 0x90F2;
+    }
+
+    glBindBuffer(target, entry.glBuffer);
+    if (s_glMapBufferRange) {
+        void* ptr = glMapBufferRange(target, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(size),
+                                      GL_MAP_READ_BIT);
+        if (ptr) {
+            memcpy(data, ptr, size);
+            glUnmapBuffer(target);
+        }
+    }
+    glBindBuffer(target, 0);
+}
+
+// ── Compute Pipeline 管理 ──────────────────────────────────────────────────────
+
+ComputePipelineHandle GLRenderDevice::createComputePipeline(const ComputePipelineDesc& desc) {
+    if (!s_hasCompute || !desc.code || desc.codeSize == 0) {
+        core::logError("createComputePipeline: compute not supported or invalid desc");
+        return {};
+    }
+
+    const char* src = static_cast<const char*>(desc.code);
+    unsigned int cs = glCreateShader(0x91B9); // GL_COMPUTE_SHADER
+    glShaderSource(cs, 1, &src, nullptr);
+    glCompileShader(cs);
+
+    int compiled = 0;
+    glGetShaderiv(cs, 0x8B81 /*GL_COMPILE_STATUS*/, &compiled);
+    if (!compiled) {
+        char log[512];
+        glGetShaderInfoLog(cs, sizeof(log), nullptr, log);
+        core::logError("Compute shader compile error: %s", log);
+        glDeleteShader(cs);
+        return {};
+    }
+
+    unsigned int program = glCreateProgram();
+    glAttachShader(program, cs);
+    glLinkProgram(program);
+
+    int linked = 0;
+    glGetProgramiv(program, 0x8B82 /*GL_LINK_STATUS*/, &linked);
+    if (!linked) {
+        char log[512];
+        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+        core::logError("Compute program link error: %s", log);
+        glDeleteShader(cs);
+        glDeleteProgram(program);
+        return {};
+    }
+
+    glDeleteShader(cs);
+    return computePipelines_.insert(ComputePipelineEntry{ program });
+}
+
+void GLRenderDevice::destroyComputePipeline(ComputePipelineHandle h) {
+    if (!computePipelines_.valid(h)) return;
+    ComputePipelineEntry& entry = computePipelines_.get(h);
+    if (entry.program) {
+        glDeleteProgram(entry.program);
+    }
+    computePipelines_.remove(h);
 }
 
 // ── 帧控制 ────────────────────────────────────────────────────────────────────
@@ -523,6 +740,62 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     CameraData camera = cameraIn;
     if (camera.viewportW == 0) camera.viewportW = width;
     if (camera.viewportH == 0) camera.viewportH = height;
+
+    // Process compute commands first
+    for (const RenderCmd* cmd : cmds) {
+        if (auto* d = std::get_if<DispatchCmd>(cmd)) {
+            if (!s_hasCompute || !computePipelines_.valid(d->pipeline)) continue;
+            ComputePipelineEntry& pe = computePipelines_.get(d->pipeline);
+
+            glUseProgram(pe.program);
+
+            uint32_t bindingIndex = 0;
+
+            // Bind readonly storage buffers
+            for (uint32_t i = 0; i < d->bindings.readonlyStorageBufferCount && i < 8; ++i) {
+                if (buffers_.valid(d->bindings.readonlyStorageBuffers[i])) {
+                    glBindBufferBase(0x90F2, bindingIndex,
+                                     buffers_.get(d->bindings.readonlyStorageBuffers[i]).glBuffer);
+                    ++bindingIndex;
+                }
+            }
+
+            // Bind readwrite storage buffers
+            for (uint32_t i = 0; i < d->bindings.readwriteStorageBufferCount && i < 8; ++i) {
+                if (buffers_.valid(d->bindings.readwriteStorageBuffers[i])) {
+                    glBindBufferBase(0x90F2, bindingIndex,
+                                     buffers_.get(d->bindings.readwriteStorageBuffers[i]).glBuffer);
+                    ++bindingIndex;
+                }
+            }
+
+            // Bind sampled textures
+            for (uint32_t i = 0; i < d->bindings.sampledTextureCount && i < 8; ++i) {
+                if (textures_.valid(d->bindings.sampledTextures[i])) {
+                    glActiveTexture(GL_TEXTURE0 + i);
+                    glBindTexture(GL_TEXTURE_2D, textures_.get(d->bindings.sampledTextures[i]).glTex);
+                }
+            }
+
+            glDispatchCompute(d->groupCountX, d->groupCountY, d->groupCountZ);
+        }
+        else if (auto* b = std::get_if<BarrierCmd>(cmd)) {
+            if (!s_hasCompute) continue;
+            GLbitfield barriers = 0;
+            switch (b->type) {
+                case BarrierCmd::Type::Memory:
+                    barriers = GL_ALL_BARRIER_BITS;
+                    break;
+                case BarrierCmd::Type::StorageBuffer:
+                    barriers = 0x2000; // GL_SHADER_STORAGE_BARRIER_BIT
+                    break;
+                case BarrierCmd::Type::Texture:
+                    barriers = 0x0800; // GL_TEXTURE_UPDATE_BARRIER_BIT
+                    break;
+            }
+            glMemoryBarrier(barriers);
+        }
+    }
 
     batchVerts_.clear();
     batchIdx_.clear();

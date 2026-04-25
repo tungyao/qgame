@@ -84,7 +84,35 @@ struct ClearCmd {
     core::Color color = core::Color::Black;
 };
 
-using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, DrawTextCmd, SetCameraCmd, ClearCmd>;
+struct ComputeBindings {
+    BufferHandle readonlyStorageBuffers[8];
+    BufferHandle readwriteStorageBuffers[8];
+    TextureHandle readonlyStorageTextures[8];
+    TextureHandle readwriteStorageTextures[8];
+    TextureHandle sampledTextures[8];
+    uint32_t readonlyStorageBufferCount = 0;
+    uint32_t readwriteStorageBufferCount = 0;
+    uint32_t readonlyStorageTextureCount = 0;
+    uint32_t readwriteStorageTextureCount = 0;
+    uint32_t sampledTextureCount = 0;
+};
+
+struct DispatchCmd {
+    ComputePipelineHandle pipeline;
+    uint32_t groupCountX = 1;
+    uint32_t groupCountY = 1;
+    uint32_t groupCountZ = 1;
+    ComputeBindings bindings;
+};
+
+struct BarrierCmd {
+    enum class Type { Memory, StorageBuffer, Texture };
+    Type type = Type::Memory;
+    BufferHandle buffer;
+    TextureHandle texture;
+};
+
+using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, DrawTextCmd, SetCameraCmd, ClearCmd, DispatchCmd, BarrierCmd>;
 
 class CommandBuffer {
 public:
@@ -96,6 +124,8 @@ public:
     void drawSprite(const DrawSpriteCmd& cmd);
     void drawTile(const DrawTileCmd& cmd);
     void drawText(const DrawTextCmd& cmd);
+    void dispatch(const DispatchCmd& cmd);
+    void barrier(BarrierCmd::Type type, BufferHandle buf = {}, TextureHandle tex = {});
 
     const std::vector<RenderCmd>& commands() const { return cmds_; }
     bool isRecording() const { return recording_; }
