@@ -6,8 +6,11 @@
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/AnimatorComponent.h>
 #include <engine/components/TextComponent.h>
+#include <engine/systems/RenderSystem.h>
 #include <SDL3/SDL.h>
 #include <vector>
+#include <cstdio>
+#include <cstring>
 
 static std::vector<uint8_t> makeCheckerboard(int w, int h, int cellSize, core::Color a, core::Color b) {
 	std::vector<uint8_t> px(w * h * 4);
@@ -64,11 +67,21 @@ static std::vector<uint8_t> makeTextTexture(const std::string& text, core::Color
 	return pixels;
 }
 
-int main(int, char*[]) {
+int main(int argc, char* argv[]) {
+	bool useOpenGL = false;
+	for (int i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "--opengl") == 0 || strcmp(argv[i], "-gl") == 0) {
+			useOpenGL = true;
+		}
+	}
+	
 	engine::EngineConfig cfg;
 	cfg.windowTitle = "StarEngine - Two Camera Demo";
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
+	if (useOpenGL) {
+		cfg.renderBackend = engine::RenderBackend::OpenGL;
+	}
 	engine::EngineContext ctx;
 	ctx.init(cfg);
 	engine::GameAPI api{ ctx };
@@ -97,14 +110,14 @@ int main(int, char*[]) {
 	// ═══════════════════════════════════════════════════════════════════════════
 	{
 		auto e = api.spawnEntity();
-		api.addComponent(e, engine::Transform{ 0.f, 0.f });
+		api.addComponent(e, engine::Transform{ 400.0f, 200.0f });
 		engine::Camera cam{};
 		cam.zoom = 1.5f;
 		cam.primary = true;
 		cam.depth = 0;
 		cam.layerMask = engine::renderPassBit(engine::RenderPass::World);
 		cam.clear = true;
-		cam.clearColor = core::Color{ 20, 20, 40, 255 };
+		//cam.clearColor = core::Color{ 20, 20, 40, 255 };
 		cam.cullEnabled = true;
 		api.addComponent(e, cam);
 	}
@@ -262,7 +275,7 @@ int main(int, char*[]) {
 		auto e = api.spawnEntity();
 		api.addComponent(e, engine::Transform{ 20.f, 680.f });
 		engine::TextComponent txt{};
-		txt.text = "WASD to move | ESC to quit";
+		txt.text = "WASD to move | G: toggle GPU-driven | ESC to quit";
 		txt.font = font;
 		txt.fontSize = 18.f;
 		txt.color = { 150, 150, 150, 255 };
@@ -271,8 +284,82 @@ int main(int, char*[]) {
 		api.addComponent(e, txt);
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// M1/M2 测试：生成大量精灵测试 GPU culling/sorting
+	// ═══════════════════════════════════════════════════════════════════════════
+	constexpr bool CREATE_MANY_SPRITES = true;
+	constexpr int SPRITE_GRID_SIZE = 20;  // 20x20 = 400 sprites
+	
+	if (CREATE_MANY_SPRITES) {
+		printf("[M1/M2 Test] Creating %d sprites in a grid...\n", SPRITE_GRID_SIZE * SPRITE_GRID_SIZE);
+		
+		auto smallPx = makeCheckerboard(16, 16, 4, { 200, 200, 100, 255 }, { 100, 100, 200, 255 });
+		TextureHandle smallTex = api.createTextureFromMemory(smallPx.data(), 16, 16);
+		
+		float startX = -400.f;
+		float startY = -200.f;
+		float spacing = 40.f;
+		
+		for (int gy = 0; gy < SPRITE_GRID_SIZE; ++gy) {
+			for (int gx = 0; gx < SPRITE_GRID_SIZE; ++gx) {
+				auto e = api.spawnEntity();
+				float x = startX + gx * spacing;
+				float y = startY + gy * spacing;
+				api.addComponent(e, engine::Transform{ x, y });
+				
+				engine::Sprite sp{};
+				sp.texture = smallTex;
+				sp.srcRect = { 0.f, 0.f, 16.f, 16.f };
+				sp.layer = (gx + gy) % 5;
+				sp.pass = engine::RenderPass::World;
+				sp.ySort = true;
+				sp.tint = core::Color{
+					static_cast<uint8_t>(100 + gx * 7),
+					static_cast<uint8_t>(100 + gy * 7),
+					static_cast<uint8_t>(150 + (gx + gy) * 3),
+					255
+				};
+				api.addComponent(e, sp);
+			}
+		}
+		printf("[M1/M2 Test] Created %d sprites. Press G to toggle GPU-driven rendering.\n", 
+		       SPRITE_GRID_SIZE * SPRITE_GRID_SIZE);
+	}
+
+	// ── GPU-driven 状态显示 ───────────────────────────────────────────────────
+	entt::entity gpuStatusText;
+	{
+		gpuStatusText = api.spawnEntity();
+		api.addComponent(gpuStatusText, engine::Transform{ 20.f, 100.f });
+		engine::TextComponent txt{};
+		txt.text = "[CPU Mode] Press G to enable GPU-driven";
+		txt.font = font;
+		txt.fontSize = 18.f;
+		txt.color = { 255, 200, 100, 255 };
+		txt.pass = engine::RenderPass::UI;
+		txt.layer = 100;
+		api.addComponent(gpuStatusText, txt);
+	}
+
+	// ── Sprite 数量显示 ───────────────────────────────────────────────────────
+	entt::entity spriteCountText;
+	{
+		spriteCountText = api.spawnEntity();
+		api.addComponent(spriteCountText, engine::Transform{ 20.f, 125.f });
+		engine::TextComponent txt{};
+		txt.text = "Sprites: 0";
+		txt.font = font;
+		txt.fontSize = 16.f;
+		txt.color = { 180, 180, 180, 255 };
+		txt.pass = engine::RenderPass::UI;
+		txt.layer = 100;
+		api.addComponent(spriteCountText, txt);
+	}
+
 	// ── 主循环 ────────────────────────────────────────────────────────────────
 	constexpr float kSpeed = 200.f;
+	bool gpuDrivenEnabled = false;
+	
 	while (ctx.scheduler.tick()) {
 		float dt = ctx.scheduler.deltaTime();
 		auto& tf = api.getComponent<engine::Transform>(player);
@@ -292,6 +379,38 @@ int main(int, char*[]) {
 
 		auto& statusSpr = api.getComponent<engine::Sprite>(statusText);
 		statusSpr.texture = isMoving ? movingTex : stoppedTex;
+
+		// ── G 键切换 GPU-driven 渲染 ───────────────────────────────────────────
+		if (api.isKeyJustPressed(SDLK_G)) {
+			gpuDrivenEnabled = !gpuDrivenEnabled;
+			if (ctx.systems.has<engine::RenderSystem>()) {
+				auto& renderSystem = ctx.systems.get<engine::RenderSystem>();
+				renderSystem.setGPUDrivenEnabled(gpuDrivenEnabled);
+				printf("[M1/M2] GPU-driven rendering: %s\n", gpuDrivenEnabled ? "ENABLED" : "DISABLED");
+			}
+			
+			auto& gpuTxt = api.getComponent<engine::TextComponent>(gpuStatusText);
+			if (gpuDrivenEnabled) {
+				gpuTxt.text = "[GPU Mode] Press G to disable";
+				gpuTxt.color = { 100, 255, 100, 255 };
+			} else {
+				gpuTxt.text = "[CPU Mode] Press G to enable GPU-driven";
+				gpuTxt.color = { 255, 200, 100, 255 };
+			}
+		}
+
+		// ── 更新精灵数量显示 ───────────────────────────────────────────────────
+		{
+			if (ctx.systems.has<engine::RenderSystem>()) {
+				auto& renderSystem = ctx.systems.get<engine::RenderSystem>();
+				uint32_t spriteCount = renderSystem.spriteBuffer().activeCount();
+				auto& countTxt = api.getComponent<engine::TextComponent>(spriteCountText);
+				char buf[64];
+				snprintf(buf, sizeof(buf), "Sprites: %u | Mode: %s", 
+				         spriteCount, gpuDrivenEnabled ? "GPU" : "CPU");
+				countTxt.text = buf;
+			}
+		}
 
 		if (api.isKeyJustPressed(SDLK_ESCAPE)) { api.quit(); break; }
 	}

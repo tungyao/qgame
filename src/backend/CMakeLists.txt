@@ -19,6 +19,26 @@ compile_shader_spirv(
     "${SHADER_GEN}/msdf_frag_spv.h" msdf_frag_spv
     "${SHADER_FALLBACK}/msdf_frag_spv.h"
 )
+compile_shader_spirv(
+    "${SHADER_SRC}/sprite_culling.comp"  comp
+    "${SHADER_GEN}/sprite_culling_spv.h" sprite_culling_spv
+    "${SHADER_FALLBACK}/sprite_culling_spv.h"
+)
+compile_shader_spirv(
+    "${SHADER_SRC}/sprite_sort.comp"  comp
+    "${SHADER_GEN}/sprite_sort_spv.h" sprite_sort_spv
+    "${SHADER_FALLBACK}/sprite_sort_spv.h"
+)
+compile_shader_spirv(
+    "${SHADER_SRC}/sprite_gpu.vert.glsl"  vert
+    "${SHADER_GEN}/sprite_gpu_vert_spv.h" sprite_gpu_vert_spv
+    "${SHADER_FALLBACK}/sprite_gpu_vert_spv.h"
+)
+compile_shader_spirv(
+    "${SHADER_SRC}/sprite_gpu.frag.glsl"  frag
+    "${SHADER_GEN}/sprite_gpu_frag_spv.h" sprite_gpu_frag_spv
+    "${SHADER_FALLBACK}/sprite_gpu_frag_spv.h"
+)
 
 set(DXIL_SHADER_DEPS "")
 if(DXC_EXE)
@@ -37,10 +57,22 @@ if(DXC_EXE)
         "${SHADER_GEN}/msdf_frag_dxil.h" msdf_frag_dxil
         "${SHADER_FALLBACK}/msdf_frag_dxil.h"
     )
+    compile_shader_dxil(
+        "${SHADER_SRC}/sprite_culling.hlsl"   cs
+        "${SHADER_GEN}/sprite_culling_dxil.h" sprite_culling_dxil
+        "${SHADER_FALLBACK}/sprite_culling_dxil.h"
+    )
+    compile_shader_dxil(
+        "${SHADER_SRC}/sprite_sort.hlsl"   cs
+        "${SHADER_GEN}/sprite_sort_dxil.h" sprite_sort_dxil
+        "${SHADER_FALLBACK}/sprite_sort_dxil.h"
+    )
     list(APPEND DXIL_SHADER_DEPS
         "${SHADER_GEN}/sprite_vert_dxil.h"
         "${SHADER_GEN}/sprite_frag_dxil.h"
         "${SHADER_GEN}/msdf_frag_dxil.h"
+        "${SHADER_GEN}/sprite_culling_dxil.h"
+        "${SHADER_GEN}/sprite_sort_dxil.h"
     )
 endif()
 
@@ -51,7 +83,7 @@ add_library(backend STATIC
     audio/sdl_mixer/SDLMixerAudioDevice.cpp
 )
 
-set(ALL_SHADER_DEPS "${SHADER_GEN}/sprite_vert_spv.h;${SHADER_GEN}/sprite_frag_spv.h;${SHADER_GEN}/msdf_frag_spv.h")
+set(ALL_SHADER_DEPS "${SHADER_GEN}/sprite_vert_spv.h;${SHADER_GEN}/sprite_frag_spv.h;${SHADER_GEN}/msdf_frag_spv.h;${SHADER_GEN}/sprite_culling_spv.h;${SHADER_GEN}/sprite_sort_spv.h;${SHADER_GEN}/sprite_gpu_vert_spv.h;${SHADER_GEN}/sprite_gpu_frag_spv.h")
 if(DXIL_SHADER_DEPS)
     list(JOIN DXIL_SHADER_DEPS ";" dxil_deps_str)
     string(APPEND ALL_SHADER_DEPS ";${dxil_deps_str}")

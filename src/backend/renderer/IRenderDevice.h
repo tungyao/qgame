@@ -102,6 +102,18 @@ public:
 
     virtual void* getRawTexture(TextureHandle) const = 0;
     virtual bool getTextureDimensions(TextureHandle, int& outW, int& outH) const = 0;
+    
+    struct GPURenderParams {
+        BufferHandle spriteBuffer;
+        BufferHandle visibleIndexBuffer;
+        uint32_t spriteCount;
+        uint32_t visibleCount;
+        CameraData camera;
+        bool clearEnabled = true;
+        core::Color clearColor = core::Color::Black;
+    };
+    
+    virtual void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) = 0;
 };
 
 } // namespace backend

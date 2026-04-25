@@ -10,6 +10,8 @@
 
 namespace backend {
 
+inline constexpr uint32_t MAX_COMPUTE_BINDINGS = 8;
+
 struct CameraData {
     float x = 0.f, y = 0.f;
     float zoom = 1.f;
@@ -36,6 +38,19 @@ struct CameraData {
         outWx = screenToWorldX(sx);
         outWy = screenToWorldY(sy);
     }
+};
+
+struct ComputeBindings {
+    BufferHandle readonlyStorageBuffers[MAX_COMPUTE_BINDINGS];
+    BufferHandle readwriteStorageBuffers[MAX_COMPUTE_BINDINGS];
+    TextureHandle readonlyStorageTextures[MAX_COMPUTE_BINDINGS];
+    TextureHandle readwriteStorageTextures[MAX_COMPUTE_BINDINGS];
+    TextureHandle sampledTextures[MAX_COMPUTE_BINDINGS];
+    uint32_t readonlyStorageBufferCount = 0;
+    uint32_t readwriteStorageBufferCount = 0;
+    uint32_t readonlyStorageTextureCount = 0;
+    uint32_t readwriteStorageTextureCount = 0;
+    uint32_t sampledTextureCount = 0;
 };
 
 struct DrawSpriteCmd {
@@ -84,18 +99,6 @@ struct ClearCmd {
     core::Color color = core::Color::Black;
 };
 
-struct ComputeBindings {
-    BufferHandle readonlyStorageBuffers[8];
-    BufferHandle readwriteStorageBuffers[8];
-    TextureHandle readonlyStorageTextures[8];
-    TextureHandle readwriteStorageTextures[8];
-    TextureHandle sampledTextures[8];
-    uint32_t readonlyStorageBufferCount = 0;
-    uint32_t readwriteStorageBufferCount = 0;
-    uint32_t readonlyStorageTextureCount = 0;
-    uint32_t readwriteStorageTextureCount = 0;
-    uint32_t sampledTextureCount = 0;
-};
 
 struct DispatchCmd {
     ComputePipelineHandle pipeline;

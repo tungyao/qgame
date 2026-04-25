@@ -101,7 +101,8 @@ RenderSystem::RenderSystem(EngineContext& ctx)
 RenderSystem::~RenderSystem() = default;
 
 void RenderSystem::init() {
-    spriteBuffer_.init(&ctx_.renderDevice(), 1024);
+    spriteBuffer_.init(&ctx_.renderDevice(), SpriteBuffer::INITIAL_CAPACITY);
+    gpuRenderer_.init(&ctx_.renderDevice());
 
     destroyConnection_ = ctx_.world.on_destroy<Sprite>().connect<&RenderSystem::freeGPUSlot>(this);
     transformUpdateConnection_ = ctx_.world.on_update<Transform>().connect<&RenderSystem::onTransformUpdate>(this);
@@ -114,7 +115,7 @@ void RenderSystem::init() {
         }
     }
 
-    core::logInfo("RenderSystem initialized (S3: Persistent GPU Sprite Buffer)");
+    core::logInfo("RenderSystem initialized (S3: Persistent GPU Sprite Buffer + M1/M2 GPU-Driven)");
 }
 
 void RenderSystem::update(float /*dt*/) {
@@ -124,12 +125,18 @@ void RenderSystem::update(float /*dt*/) {
     syncEntitiesToGPU();
     spriteBuffer_.advanceFrame();
     spriteBuffer_.uploadDirty();
-    buildCommandBuffer();
+    
+    if (gpuDrivenEnabled_ && gpuRenderer_.isInitialized() && gpuRenderer_.hasCullingPipeline()) {
+        buildCommandBufferGPUDriven();
+    } else {
+        buildCommandBuffer();
+    }
 }
 
 void RenderSystem::shutdown() {
     destroyConnection_.release();
     transformUpdateConnection_.release();
+    gpuRenderer_.shutdown();
     spriteBuffer_.shutdown();
 }
 
@@ -398,6 +405,108 @@ void RenderSystem::buildCommandBuffer() {
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
         dev.submitPass(info, filtered);
+    }
+}
+
+void RenderSystem::buildCommandBufferGPUDriven() {
+    const int w = ctx_.window->width();
+    const int h = ctx_.window->height();
+    
+    struct CamEntry {
+        const Transform* tf;
+        const Camera*    cam;
+    };
+    std::vector<CamEntry> cameras;
+    auto camView = ctx_.world.view<Transform, Camera>();
+    for (auto [ent, tf, cam] : camView.each()) {
+        if (!cam.primary) continue;
+        cameras.push_back({ &tf, &cam });
+    }
+    std::stable_sort(cameras.begin(), cameras.end(),
+                     [](const CamEntry& a, const CamEntry& b) {
+                         return a.cam->depth < b.cam->depth;
+                     });
+
+    backend::IRenderDevice& dev = ctx_.renderDevice();
+    
+    if (cameras.empty()) {
+        backend::IRenderDevice::PassSubmitInfo info;
+        info.camera.viewportW = w;
+        info.camera.viewportH = h;
+        info.clearEnabled = true;
+        info.clearColor   = core::Color::Black;
+        dev.submitPass(info, {});
+        return;
+    }
+
+    uint32_t spriteCount = spriteBuffer_.activeCount();
+    
+    for (size_t i = 0; i < cameras.size(); ++i) {
+        const Transform& tf = *cameras[i].tf;
+        const Camera&    cam = *cameras[i].cam;
+        
+        const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+        const float halfW = (w * 0.5f) / zoom;
+        const float halfH = (h * 0.5f) / zoom;
+        float rx = halfW, ry = halfH;
+        if (cam.rotation != 0.f) {
+            const float c = std::abs(std::cos(cam.rotation));
+            const float s = std::abs(std::sin(cam.rotation));
+            rx = halfW * c + halfH * s;
+            ry = halfW * s + halfH * c;
+        }
+        
+        float viewMinX = tf.x - rx;
+        float viewMinY = tf.y - ry;
+        float viewMaxX = tf.x + rx;
+        float viewMaxY = tf.y + ry;
+        
+        std::vector<uint32_t> visibleIndices;
+        visibleIndices.reserve(spriteCount);
+        
+        for (uint32_t idx = 0; idx < spriteCount; ++idx) {
+            const GPUSprite* sprite = spriteBuffer_.getSlot(GPUHandle{idx, 0});
+            if (!sprite) continue;
+            
+            uint32_t passBits = (sprite->flags >> 1) & 0x7;
+            if ((cam.layerMask & (1u << passBits)) == 0) continue;
+            
+            if (cam.cullEnabled) {
+                float tx = sprite->transform[3];
+                float ty = sprite->transform[7];
+                float hw = fabsf(sprite->transform[0]) * 0.5f;
+                float hh = fabsf(sprite->transform[5]) * 0.5f;
+                
+                if (tx + hw < viewMinX || tx - hw > viewMaxX ||
+                    ty + hh < viewMinY || ty - hh > viewMaxY) {
+                    continue;
+                }
+            }
+            
+            visibleIndices.push_back(idx);
+        }
+        
+        uint32_t visibleCount = static_cast<uint32_t>(visibleIndices.size());
+        
+        if (visibleCount > 0) {
+            BufferHandle visibleBuf = gpuRenderer_.getVisibleIndexBuffer();
+            if (visibleBuf.valid()) {
+                dev.uploadToBuffer(visibleBuf, visibleIndices.data(), 
+                                   visibleCount * sizeof(uint32_t), 0);
+            }
+        }
+        
+        backend::IRenderDevice::PassSubmitInfo info;
+        info.camera       = toBackendCamera(tf, cam, w, h);
+        info.clearEnabled = cam.clear;
+        info.clearColor   = cam.clearColor;
+        
+        backend::IRenderDevice::GPURenderParams params;
+        params.spriteBuffer = spriteBuffer_.currentBuffer();
+        params.visibleIndexBuffer = gpuRenderer_.getVisibleIndexBuffer();
+        params.spriteCount = spriteCount;
+        params.visibleCount = visibleCount;
+        dev.submitGPUDrivenPass(info, params);
     }
 }
 

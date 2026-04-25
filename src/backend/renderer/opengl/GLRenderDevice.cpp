@@ -1226,4 +1226,164 @@ void GLRenderDevice::buildOrthoMatrixCamera(float w, float h,
     }
 }
 
+void GLRenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
+                                         const GPURenderParams& params) {
+    int w = 0, h = 0;
+    SDL_GetWindowSize(window_, &w, &h);
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, w, h);
+    
+    if (info.clearEnabled) {
+        glClearColor(info.clearColor.r / 255.f, info.clearColor.g / 255.f,
+                     info.clearColor.b / 255.f, info.clearColor.a / 255.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    
+    if (params.visibleCount == 0) {
+        return;
+    }
+    
+    if (!buffers_.valid(params.spriteBuffer) || !buffers_.valid(params.visibleIndexBuffer)) {
+        return;
+    }
+    
+    BufferEntry& spriteBuf = buffers_.get(params.spriteBuffer);
+    BufferEntry& indexBuf = buffers_.get(params.visibleIndexBuffer);
+    
+    std::vector<uint32_t> visibleIndices(params.visibleCount);
+    glBindBuffer(GL_COPY_READ_BUFFER, indexBuf.glBuffer);
+    void* mapped = glMapBufferRange(GL_COPY_READ_BUFFER, 0, params.visibleCount * sizeof(uint32_t),
+                                     GL_MAP_READ_BIT);
+    if (mapped) {
+        memcpy(visibleIndices.data(), mapped, params.visibleCount * sizeof(uint32_t));
+        glUnmapBuffer(GL_COPY_READ_BUFFER);
+    }
+    
+    glBindBuffer(GL_COPY_READ_BUFFER, spriteBuf.glBuffer);
+    std::vector<uint8_t> spriteData(spriteBuf.size);
+    mapped = glMapBufferRange(GL_COPY_READ_BUFFER, 0, spriteBuf.size, GL_MAP_READ_BIT);
+    if (mapped) {
+        memcpy(spriteData.data(), mapped, spriteBuf.size);
+        glUnmapBuffer(GL_COPY_READ_BUFFER);
+    }
+    
+    engine::GPUSprite* sprites = reinterpret_cast<engine::GPUSprite*>(spriteData.data());
+    
+    batchVerts_.clear();
+    batchIdx_.clear();
+    std::vector<BatchSegment> batches;
+    TextureHandle currentTex{};
+    bool hasCurrent = false;
+    uint32_t batchIdxStart = 0;
+    int32_t batchVertStart = 0;
+    
+    auto flush = [&]() {
+        if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
+            batches.push_back({ currentTex, batchIdxStart,
+                                static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
+                                batchVertStart, false, 4.0f });
+            batchIdxStart = static_cast<uint32_t>(batchIdx_.size());
+            batchVertStart = static_cast<int32_t>(batchVerts_.size());
+        }
+    };
+    
+    for (uint32_t i = 0; i < params.visibleCount; ++i) {
+        uint32_t spriteIdx = visibleIndices[i];
+        if (spriteIdx >= params.spriteCount) continue;
+        
+        engine::GPUSprite& s = sprites[spriteIdx];
+        
+        TextureHandle texHandle;
+        texHandle.index = s.textureIndex;
+        
+        if (!textures_.valid(texHandle)) continue;
+        
+        if (!hasCurrent || texHandle != currentTex) {
+            flush();
+            currentTex = texHandle;
+            hasCurrent = true;
+        }
+        
+        if (static_cast<size_t>(batchVertStart) + 4 >= MAX_SPRITES_PER_BATCH * 4) {
+            flush();
+        }
+        
+        float tx = s.transform[3];
+        float ty = s.transform[7];
+        float m00 = s.transform[0];
+        float m01 = s.transform[1];
+        float m10 = s.transform[4];
+        float m11 = s.transform[5];
+        
+        float hw = std::abs(m00) * 0.5f;
+        float hh = std::abs(m11) * 0.5f;
+        
+        float x0 = tx - hw, y0 = ty - hh;
+        float x1 = tx + hw, y1 = ty + hh;
+        
+        float u0 = s.uv[0], v0 = s.uv[1];
+        float u1 = s.uv[2], v1 = s.uv[3];
+        
+        uint8_t r = static_cast<uint8_t>(s.color[0] * 255);
+        uint8_t g = static_cast<uint8_t>(s.color[1] * 255);
+        uint8_t b = static_cast<uint8_t>(s.color[2] * 255);
+        uint8_t a = static_cast<uint8_t>(s.color[3] * 255);
+        
+        const auto base = static_cast<uint16_t>(batchVerts_.size() - static_cast<size_t>(batchVertStart));
+        batchVerts_.push_back({ x0, y0, u0, v0, r, g, b, a });
+        batchVerts_.push_back({ x1, y0, u1, v0, r, g, b, a });
+        batchVerts_.push_back({ x1, y1, u1, v1, r, g, b, a });
+        batchVerts_.push_back({ x0, y1, u0, v1, r, g, b, a });
+        batchIdx_.insert(batchIdx_.end(), {
+            base, static_cast<uint16_t>(base + 1), static_cast<uint16_t>(base + 2),
+            base, static_cast<uint16_t>(base + 2), static_cast<uint16_t>(base + 3)
+        });
+    }
+    flush();
+    
+    if (batchVerts_.empty()) return;
+    
+    glUseProgram(shaderProgram_);
+    
+    float proj[16];
+    float view[16];
+    float mvp[16];
+    const float zoom = (info.camera.zoom > 0.f) ? info.camera.zoom : 1.f;
+    buildOrthoProjectionMatrix(static_cast<float>(w), static_cast<float>(h), proj);
+    buildViewMatrix(info.camera.x, info.camera.y, zoom, info.camera.rotation, view);
+    
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            mvp[i * 4 + j] = 0.f;
+            for (int k = 0; k < 4; ++k) {
+                mvp[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
+            }
+        }
+    }
+    glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
+    
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    glBufferData(GL_ARRAY_BUFFER, batchVerts_.size() * sizeof(SpriteVertex),
+                 batchVerts_.data(), GL_STREAM_DRAW);
+    
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, batchIdx_.size() * sizeof(uint16_t),
+                 batchIdx_.data(), GL_STREAM_DRAW);
+    
+    for (const auto& batch : batches) {
+        if (!textures_.valid(batch.tex)) continue;
+        
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, textures_.get(batch.tex).glTex);
+        
+        glDrawElementsBaseVertex(GL_TRIANGLES, batch.idxCount, GL_UNSIGNED_SHORT,
+                                 reinterpret_cast<void*>(batch.idxOffset * sizeof(uint16_t)),
+                                 batch.vertOffset);
+    }
+    
+    glBindVertexArray(0);
+}
+
 } // namespace backend

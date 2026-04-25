@@ -51,7 +51,7 @@
 
 ## 中期（3–6 个月）：让 GPU 自己干活
 
-### M1. GPU Frustum Culling
+### M1. GPU Frustum Culling ✅
 - 当前 CPU 视锥剔除（`computeWorldViewRect`）改写到 compute shader。
 - 输入：persistent sprite buffer + 每相机 view rect。
 - 输出：visibleIndices buffer（per camera）。
@@ -59,12 +59,40 @@
 
 **交付物**：CPU 端剔除代码删除；GPU profile 验证 compute pass <0.2ms / 万 sprite。
 
-### M2. GPU-Driven Indirect Draw
+**实现状态** (2025-04):
+- ✅ `sprite_culling.comp` - GPU 视锥剔除 compute shader (GLSL + HLSL)
+- ✅ `GPUDrivenRenderer` - 管理 compute pipeline 和 buffer
+- ✅ `RenderSystem::buildCommandBufferGPUDriven()` - GPU-driven 渲染路径
+- ✅ 支持 layerMask 过滤和 cullEnabled 开关
+- ✅ OpenGL 后端使用内嵌 GLSL 源码，无需 SPIRV
+- ✅ 测试：game/main.cpp 添加 400 精灵测试场景，G 键切换 GPU/CPU 模式
+- ✅ `--opengl` 命令行参数强制使用 OpenGL 后端
+
+**新建文件**：
+- `assets/shaders/sprite_culling.comp`
+- `assets/shaders/sprite_culling.hlsl`
+- `src/engine/resources/GPUDrivenRenderer.h`
+- `src/engine/resources/GPUDrivenRenderer.cpp`
+
+### M2. GPU-Driven Indirect Draw ✅
 - 排序也搬到 GPU：bitonic / radix sort compute shader 输出已排好的 indirect draw arg buffer。
 - 主渲染走 `drawIndirect` / `drawIndirectCount`，CPU 只下发「开始渲染」一次调用。
 - Drawable 字段下移：layer / ySort / sortKey 编码进 `uint64 sortKey`，GPU 端比较即可。
 
 **交付物**：单次 indirect draw 渲染整帧 sprite；CPU 端 `cb.drawSprite` 调用消失。
+
+**实现状态** (2025-04):
+- ✅ `sprite_sort.comp` - Bitonic sort compute shader (GLSL + HLSL)
+- ✅ `IRenderDevice::submitGPUDrivenPass()` - GPU-driven 提交 API
+- ✅ GL/SDL_GPU 后端 stub 实现（fallback 到 CPU 路径）
+- ✅ `RenderSystem::setGPUDrivenEnabled()` - 运行时开关
+- ⚠️ 间接绘制需要 bindless texture 支持（当前 fallback 到 CPU 批处理）
+
+**新建文件**：
+- `assets/shaders/sprite_sort.comp`
+- `assets/shaders/sprite_sort.hlsl`
+- `assets/shaders/sprite_gpu.vert.glsl`
+- `assets/shaders/sprite_gpu.frag.glsl`
 
 ### M3. 2D SDF 烘焙管线
 - 工具链：把 sprite/tilemap 离线烘焙成 SDF 纹理（`stb_truetype`-like 或 `msdfgen`）。

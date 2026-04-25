@@ -1,0 +1,46 @@
+#version 450
+layout(local_size_x = 64) in;
+
+struct GPUSprite {
+    float transform[12];
+    float color[4];
+    float uv[4];
+    uint textureIndex;
+    uint layer;
+    int sortKey;
+    uint flags;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer SpriteBuffer {
+    GPUSprite sprites[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer IndexBuffer {
+    uint visibleIndices[];
+};
+
+layout(set = 0, binding = 2, std430) buffer DrawArgsBuffer {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+};
+
+layout(set = 0, binding = 3) uniform CullParams {
+    uint spriteCount;
+    uint cullEnabled;
+    uint pad1;
+    uint pad2;
+};
+
+layout(set = 0, binding = 4, std430) buffer CounterBuffer {
+    uint visibleCount;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    if (idx == 0) {
+        instanceCount = visibleCount;
+    }
+}

@@ -53,6 +53,26 @@ void EngineContext::init(const EngineConfig& cfg) {
         renderDevice_ = std::make_unique<backend::SDLGPURenderDevice>(sdlWin);
     }
     renderDevice_->init();
+    
+    // Fallback to OpenGL if SDL_GPU failed
+    if (cfg.renderBackend != RenderBackend::OpenGL) {
+        auto* gpuDevice = static_cast<backend::SDLGPURenderDevice*>(renderDevice_.get());
+        if (!gpuDevice->gpuDevice()) {
+            core::logWarn("SDL_GPU initialization failed, falling back to OpenGL");
+            renderDevice_->shutdown();
+            renderDevice_.reset();
+            
+            // Recreate window in OpenGL mode
+            window.reset();
+            wcfg.openglMode = true;
+            window = std::make_unique<platform::Window>(wcfg);
+            sdlWin = static_cast<SDL_Window*>(window->sdlWindow());
+            
+            renderDevice_ = std::make_unique<backend::GLRenderDevice>(sdlWin);
+            renderDevice_->init();
+        }
+    }
+    
     assetManager.init(renderDevice_.get(), nullptr); // audio device 还未创建，稍后在 audio init 后更新
 
     // Audio device + command queue

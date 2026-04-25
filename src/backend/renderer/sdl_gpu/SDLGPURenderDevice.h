@@ -51,6 +51,8 @@ public:
     void*         getRawTexture(TextureHandle handle) const override;
     bool          getTextureDimensions(TextureHandle, int& outW, int& outH) const override;
     SDL_GPUTexture* getSDLTexture(TextureHandle handle) const;
+    
+    void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) override;
 
     // 供 RenderSystem 查询设备，上传纹理用
     SDL_GPUDevice* gpuDevice() const { return device_; }

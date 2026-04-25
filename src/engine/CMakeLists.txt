@@ -13,6 +13,7 @@ add_library(engine SHARED
     assets/AssetManager.cpp
     assets/FontLoader.cpp
     scene/SceneSerializer.cpp
+    resources/GPUDrivenRenderer.cpp
 )
 
 target_compile_definitions(engine PRIVATE QGAME_ENGINE_EXPORTS)
@@ -23,6 +24,7 @@ if(WIN32)
 endif()
 
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(engine PRIVATE "${CMAKE_BINARY_DIR}/generated/shaders")
 
 target_link_libraries(engine
     PUBLIC  core

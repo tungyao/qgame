@@ -1269,4 +1269,45 @@ void SDLGPURenderDevice::buildOrthoMatrixCamera(float w, float h,
     }
 }
 
+void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
+                                             const GPURenderParams& params) {
+    if (!gpuCmdBuf_ || !swapchainTex_) return;
+    
+    CameraData cam = info.camera;
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(swapW_);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(swapH_);
+    
+    if (params.visibleCount == 0) {
+        if (info.clearEnabled) {
+            SDL_GPUColorTargetInfo colorTarget{};
+            colorTarget.texture = swapchainTex_;
+            colorTarget.clear_color = SDL_FColor{
+                info.clearColor.r / 255.f,
+                info.clearColor.g / 255.f,
+                info.clearColor.b / 255.f,
+                info.clearColor.a / 255.f
+            };
+            colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+            colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+            
+            SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
+            SDL_EndGPURenderPass(pass);
+        }
+        return;
+    }
+    
+    if (!buffers_.valid(params.spriteBuffer) || !buffers_.valid(params.visibleIndexBuffer)) {
+        return;
+    }
+    
+    BufferEntry& indexBuf = buffers_.get(params.visibleIndexBuffer);
+    
+    std::vector<uint32_t> visibleIndices(params.visibleCount);
+    downloadFromBuffer(params.visibleIndexBuffer, visibleIndices.data(), 
+                        params.visibleCount * sizeof(uint32_t), 0);
+    
+    std::vector<const RenderCmd*> fallbackCmds;
+    submitPass(info, fallbackCmds);
+}
+
 } // namespace backend

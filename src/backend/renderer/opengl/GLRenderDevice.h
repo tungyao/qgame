@@ -49,6 +49,8 @@ public:
     TextureHandle renderToTextureOffscreen(const CommandBuffer&, int w, int h) override;
     void*         getRawTexture(TextureHandle) const                            override;
     bool          getTextureDimensions(TextureHandle, int& outW, int& outH) const override;
+    
+    void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) override;
 
 private:
     struct TextureEntry {
