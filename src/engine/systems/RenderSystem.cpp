@@ -6,9 +6,55 @@
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../core/Logger.h"
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace engine {
+
+namespace {
+
+// 世界空间视锥矩形（轴对齐）。zoom <= 0 表示禁用剔除。
+struct ViewRect {
+    float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
+    bool  enabled = false;
+
+    bool contains(float x, float y) const {
+        return enabled ? (x >= minX && x <= maxX && y >= minY && y <= maxY) : true;
+    }
+    bool intersectsAABB(float x0, float y0, float x1, float y1) const {
+        if (!enabled) return true;
+        return !(x1 < minX || x0 > maxX || y1 < minY || y0 > maxY);
+    }
+};
+
+ViewRect computeWorldViewRect(EngineContext& ctx, int viewportW, int viewportH) {
+    ViewRect vr{};
+    auto camView = ctx.world.view<Transform, Camera>();
+    for (auto [ent, tf, camera] : camView.each()) {
+        if (camera.type != CameraType::World || !camera.primary) continue;
+        if (camera.zoom <= 0.f) return vr;
+
+        // 旋转相机时取外接 AABB（乘 sqrt(2) 足够覆盖任意角度）
+        const float halfW = (viewportW * 0.5f) / camera.zoom;
+        const float halfH = (viewportH * 0.5f) / camera.zoom;
+        float rx = halfW, ry = halfH;
+        if (camera.rotation != 0.f) {
+            const float c = std::abs(std::cos(camera.rotation));
+            const float s = std::abs(std::sin(camera.rotation));
+            rx = halfW * c + halfH * s;
+            ry = halfW * s + halfH * c;
+        }
+        vr.minX = tf.x - rx;
+        vr.maxX = tf.x + rx;
+        vr.minY = tf.y - ry;
+        vr.maxY = tf.y + ry;
+        vr.enabled = true;
+        return vr;
+    }
+    return vr;
+}
+
+} // namespace
 
 void RenderSystem::init() {
     // 默认两个 pass：World 先、UI 后；World 清屏，UI 叠加
@@ -68,16 +114,31 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
     //   - editor 离屏路径需自行在 submit 前 cb.clear()/cb.setCamera()
     cb.begin();
 
+    const ViewRect viewRect = computeWorldViewRect(ctx, viewportW, viewportH);
+
     static std::vector<Drawable> drawables;
     drawables.clear();
     int seq = 0;
 
-    // tilemap
+    // tilemap：先把 view rect 反变换到 tile 网格坐标，按可见范围裁剪
     auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
+        if (tmap.tileSize <= 0) continue;
+
+        int xBegin = 0, xEnd = tmap.width;
+        int yBegin = 0, yEnd = tmap.height;
+        if (viewRect.enabled) {
+            const float ts = static_cast<float>(tmap.tileSize);
+            xBegin = std::max(0,           static_cast<int>(std::floor((viewRect.minX - tf.x) / ts)));
+            xEnd   = std::min(tmap.width,  static_cast<int>(std::ceil ((viewRect.maxX - tf.x) / ts)) + 1);
+            yBegin = std::max(0,           static_cast<int>(std::floor((viewRect.minY - tf.y) / ts)));
+            yEnd   = std::min(tmap.height, static_cast<int>(std::ceil ((viewRect.maxY - tf.y) / ts)) + 1);
+            if (xBegin >= xEnd || yBegin >= yEnd) continue;
+        }
+
         for (int layer = 0; layer < TileMap::MAX_LAYERS; ++layer) {
-            for (int y = 0; y < tmap.height; ++y) {
-                for (int x = 0; x < tmap.width; ++x) {
+            for (int y = yBegin; y < yEnd; ++y) {
+                for (int x = xBegin; x < xEnd; ++x) {
                     int tileId = tmap.tileAt(layer, x, y);
                     if (tileId < 0) continue;
                     Drawable d{};
@@ -103,9 +164,29 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         }
     }
 
-    // sprite
+    // sprite：仅对 World pass 做 AABB 剔除，UI/Screen pass 不裁
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
+        if (viewRect.enabled && sprite.pass == RenderPass::World) {
+            const float w = sprite.srcRect.w * std::abs(tf.scaleX);
+            const float h = sprite.srcRect.h * std::abs(tf.scaleY);
+            // pivot 偏移：中心相对 (tf.x,tf.y) 的位移
+            const float cx = tf.x + (0.5f - sprite.pivotX) * w;
+            const float cy = tf.y + (0.5f - sprite.pivotY) * h;
+            // 旋转外接：sqrt(2)/2 ≈ 0.7071 用于半边长
+            float halfW = w * 0.5f;
+            float halfH = h * 0.5f;
+            if (tf.rotation != 0.f) {
+                const float c = std::abs(std::cos(tf.rotation));
+                const float s = std::abs(std::sin(tf.rotation));
+                const float hw = halfW, hh = halfH;
+                halfW = hw * c + hh * s;
+                halfH = hw * s + hh * c;
+            }
+            if (!viewRect.intersectsAABB(cx - halfW, cy - halfH, cx + halfW, cy + halfH)) {
+                continue;
+            }
+        }
         Drawable d{};
         d.pass    = sprite.pass;
         d.layer   = sprite.layer;
