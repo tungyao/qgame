@@ -242,6 +242,39 @@ int main(int argc, char* argv[]) {
 		api.addComponent(player, anim);
 	}
 
+	// ── Phase 3 测试: FSM 驱动的 hero ──────────────────────────────────────
+	entt::entity fsmHero;
+	{
+		fsmHero = api.spawnEntity();
+		api.addComponent(fsmHero, engine::Transform{ 200.f, 400.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 5;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 120, 220, 255, 255 };
+		api.addComponent(fsmHero, sp);
+
+		auto ctrl = std::make_shared<engine::AnimatorController>();
+		ctrl->states = {
+			{ "Idle",   playerAnim, 0.5f, engine::PlayMode::Loop },
+			{ "Walk",   playerAnim, 1.5f, engine::PlayMode::Loop },
+			{ "Attack", attackAnim, 1.0f, engine::PlayMode::Once },
+		};
+		ctrl->transitions = {
+			{ 0, 1, { { "speed",  engine::ConditionOp::Greater, 0.1f } }, false, 1.f, 0.05f, true },
+			{ 1, 0, { { "speed",  engine::ConditionOp::Less,    0.1f } }, false, 1.f, 0.05f, true },
+			{ engine::kAnyState, 2, { { "attack", engine::ConditionOp::Trigger, 0.f } }, false, 1.f, 0.f, true },
+			{ 2, 0, {}, /*hasExitTime*/ true, 1.f, 0.f, true },
+		};
+		ctrl->defaultState = 0;
+
+		engine::AnimatorComponent ac{};
+		ac.applyTexture = true;
+		ac.controller   = ctrl;
+		api.addComponent(fsmHero, ac);
+	}
+
 	// ── 状态文字 (World 层) ───────────────────────────────────────────────────
 	entt::entity statusText;
 	{
@@ -456,6 +489,25 @@ int main(int argc, char* argv[]) {
 			for (auto& ev : eq->events) {
 				printf("[Phase2] event '%s' @ t=%.3f (int=%d float=%.2f str='%s')\n",
 				       ev.name.c_str(), ev.time, ev.intParam, ev.floatParam, ev.stringParam.c_str());
+			}
+		}
+
+		// ── Phase 3: 仅写参数, 不调 play() ──────────────────────────────────
+		{
+			auto& fsm = api.getComponent<engine::AnimatorComponent>(fsmHero);
+			fsm.setFloat("speed", isMoving ? 1.f : 0.f);
+			if (api.isKeyJustPressed(SDLK_F)) {
+				fsm.setTrigger("attack");
+				printf("[Phase3] F: setTrigger(attack)\n");
+			}
+			if (auto* eq = ctx.world.try_get<engine::AnimEventQueue>(fsmHero)) {
+				for (auto& ev : eq->events) {
+					if (ev.name.rfind("state_", 0) == 0) {
+						printf("[Phase3] %s\n", ev.name.c_str());
+					} else {
+						printf("[Phase3] anim event '%s' @ t=%.3f\n", ev.name.c_str(), ev.time);
+					}
+				}
 			}
 		}
 

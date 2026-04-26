@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <memory>
+#include <unordered_map>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../../core/math/Rect.h"
 
@@ -61,6 +63,51 @@ struct PlayOptions {
     PlayMode mode         = PlayMode::ClipDefault;
 };
 
+// ── Phase 3: 参数 / 状态机 (FSM) ──────────────────────────────────────────
+enum class ParamType : uint8_t { Float, Int, Bool, Trigger };
+
+struct AnimParam {
+    ParamType type = ParamType::Float;
+    float     f    = 0.f;       // float 直接存; int 存为 float; bool / trigger: 0/非0
+};
+
+enum class ConditionOp : uint8_t {
+    Greater, GreaterEq, Less, LessEq, Equal, NotEqual,
+    IsTrue, IsFalse,
+    Trigger,    // 仅参数为 Trigger 类型: 已 set
+};
+
+struct TransitionCondition {
+    std::string parameter;
+    ConditionOp op = ConditionOp::Greater;
+    float       threshold = 0.f;    // 数值参数比较的阈值
+};
+
+constexpr int kAnyState = -1;
+
+struct AnimState {
+    std::string     name;
+    AnimationHandle clip;
+    float           speed = 1.f;
+    PlayMode        mode  = PlayMode::ClipDefault;  // 状态级播放模式
+};
+
+struct AnimTransition {
+    int  from = kAnyState;
+    int  to   = 0;
+    std::vector<TransitionCondition> conditions;
+    bool  hasExitTime  = false;
+    float exitTime     = 1.f;       // 归一化 [0,1]，相对 from 状态 clip duration
+    float duration     = 0.f;       // crossfade (秒)
+    bool  interruptible = true;     // crossfade 期间是否允许被新 transition 打断
+};
+
+struct AnimatorController {
+    std::vector<AnimState>      states;
+    std::vector<AnimTransition> transitions;
+    int                         defaultState = 0;
+};
+
 struct AnimatorComponent {
     // ── 当前播放 ──────────────────────────────────────────────────────────
     AnimationHandle currentAnim;
@@ -79,6 +126,32 @@ struct AnimatorComponent {
     AnimationHandle queuedAnim;
     PlayOptions     queuedOpts{};
     bool            hasQueued = false;
+
+    // ── Phase 3: 参数 / 状态机 ────────────────────────────────────────────
+    std::shared_ptr<AnimatorController> controller;
+    std::unordered_map<std::string, AnimParam> parameters;
+
+    int   currentState = -1;
+    int   fromState    = -1;        // crossfade 中的源状态; -1 表示无 transition
+    float transitionT  = 0.f;       // 已经过的 transition 时间
+    float transitionDuration = 0.f; // 总 transition 时长
+
+    // 上一帧此状态是否已经触发过 state_finished (避免每帧重复发)
+    bool  stateFinishedFired = false;
+
+    // 参数 API
+    void setFloat  (const std::string& n, float v) { auto& p = parameters[n]; p.type = ParamType::Float;   p.f = v; }
+    void setInt    (const std::string& n, int v)   { auto& p = parameters[n]; p.type = ParamType::Int;     p.f = static_cast<float>(v); }
+    void setBool   (const std::string& n, bool v)  { auto& p = parameters[n]; p.type = ParamType::Bool;    p.f = v ? 1.f : 0.f; }
+    void setTrigger(const std::string& n)          { auto& p = parameters[n]; p.type = ParamType::Trigger; p.f = 1.f; }
+    void resetTrigger(const std::string& n) {
+        auto it = parameters.find(n);
+        if (it != parameters.end() && it->second.type == ParamType::Trigger) it->second.f = 0.f;
+    }
+    float getFloat(const std::string& n) const {
+        auto it = parameters.find(n);
+        return it != parameters.end() ? it->second.f : 0.f;
+    }
 
     // ── 兼容旧接口 ────────────────────────────────────────────────────────
     void play(AnimationHandle anim) {
