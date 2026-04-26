@@ -89,6 +89,9 @@ add_library(backend STATIC
     renderer/sdl_gpu/SDLGPURenderDevice.cpp
     renderer/opengl/GLRenderDevice.cpp
     audio/sdl_mixer/SDLMixerAudioDevice.cpp
+    
+    # GPU-Driven 2D Rendering (架构设计文档，参考用)
+    # renderer/gpu_driven/GPUDrivenRenderer2D.cpp
 )
 
 set(ALL_SHADER_DEPS 
