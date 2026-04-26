@@ -135,9 +135,10 @@ int main(int argc, char* argv[]) {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// 相机 1：World 渲染 (depth=0，先绘制，清屏)
 	// ═══════════════════════════════════════════════════════════════════════════
+	entt::entity worldCamera;
 	{
-		auto e = api.spawnEntity();
-		api.addComponent(e, engine::Transform{ 400.0f, 200.0f });
+		worldCamera = api.spawnEntity();
+		api.addComponent(worldCamera, engine::Transform{ 400.0f, 200.0f });
 		engine::Camera cam{};
 		cam.zoom = 1.5f;
 		cam.primary = true;
@@ -146,7 +147,7 @@ int main(int argc, char* argv[]) {
 		cam.clear = true;
 		//cam.clearColor = core::Color{ 20, 20, 40, 255 };
 		cam.cullEnabled = true;
-		api.addComponent(e, cam);
+		api.addComponent(worldCamera, cam);
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -275,6 +276,269 @@ int main(int argc, char* argv[]) {
 		api.addComponent(fsmHero, ac);
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Phase 4 测试: 多层动画 (Layered Animation)
+	// ═══════════════════════════════════════════════════════════════════════════
+	// 实体说明：测试额外层如何覆盖/混合基础层的 SrcRect/Texture
+	entt::entity layeredHero;
+	{
+		layeredHero = api.spawnEntity();
+		api.addComponent(layeredHero, engine::Transform{ 500.f, 400.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 5;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 180, 100, 255 };
+		api.addComponent(layeredHero, sp);
+
+		auto ctrl = std::make_shared<engine::AnimatorController>();
+		// 基础层状态
+		ctrl->states = {
+			{ "Idle",   playerAnim, 0.8f, engine::PlayMode::Loop },
+		};
+		ctrl->transitions = {};
+		ctrl->defaultState = 0;
+
+		// 额外层 0: 使用不同的动画和混合模式 (Override)
+		engine::AnimatorLayer layer0;
+		layer0.name = "Overlay";
+		layer0.weight = 0.7f;
+		layer0.blendMode = engine::LayerBlendMode::Override;
+		layer0.mask = engine::LayerChannel::SrcRect;
+		layer0.states = {
+			{ "OverlayIdle", attackAnim, 1.2f, engine::PlayMode::Loop },
+		};
+		layer0.transitions = {};
+		layer0.defaultState = 0;
+
+		// 额外层 1: 使用 Additive 混合
+		engine::AnimatorLayer layer1;
+		layer1.name = "AdditiveLayer";
+		layer1.weight = 0.5f;
+		layer1.blendMode = engine::LayerBlendMode::Override;
+		layer1.mask = engine::LayerChannel::SrcRect;
+		layer1.states = {
+			{ "AddIdle", playerAnim, 2.0f, engine::PlayMode::Loop },
+		};
+		layer1.transitions = {};
+		layer1.defaultState = 0;
+
+		ctrl->layers = { layer0, layer1 };
+
+		engine::AnimatorComponent ac{};
+		ac.applyTexture = true;
+		ac.controller = ctrl;
+		api.addComponent(layeredHero, ac);
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Phase 5.3 测试: 程序化动画层 (Procedural Animation Layers)
+	// ═══════════════════════════════════════════════════════════════════════════
+	
+	// Phase 5.3a: HitShake - 受击抖动
+	entt::entity hitShakeTest;
+	{
+		hitShakeTest = api.spawnEntity();
+		api.addComponent(hitShakeTest, engine::Transform{ 700.f, 300.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 5;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 100, 100, 255 };
+		api.addComponent(hitShakeTest, sp);
+
+		auto ctrl = std::make_shared<engine::AnimatorController>();
+		ctrl->states = {
+			{ "Idle", playerAnim, 0.5f, engine::PlayMode::Loop },
+		};
+		ctrl->defaultState = 0;
+
+		engine::AnimatorLayer shakeLayer;
+		shakeLayer.name = "HitShake";
+		shakeLayer.kind = engine::ProceduralKind::HitShake;
+		shakeLayer.weight = 1.f;
+		shakeLayer.blendMode = engine::LayerBlendMode::Additive;
+		shakeLayer.procedural.triggerParam = "hit";
+		shakeLayer.procedural.amplitude = 8.f;
+		shakeLayer.procedural.frequency = 20.f;
+		shakeLayer.procedural.duration = 0.4f;
+
+		ctrl->layers = { shakeLayer };
+
+		engine::AnimatorComponent ac{};
+		ac.applyTexture = true;
+		ac.controller = ctrl;
+		api.addComponent(hitShakeTest, ac);
+	}
+
+	// Phase 5.3b: HurtFlash - 受击红闪
+	entt::entity hurtFlashTest;
+	{
+		hurtFlashTest = api.spawnEntity();
+		api.addComponent(hurtFlashTest, engine::Transform{ 800.f, 300.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 5;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 100, 200, 255, 255 };
+		api.addComponent(hurtFlashTest, sp);
+
+		auto ctrl = std::make_shared<engine::AnimatorController>();
+		ctrl->states = {
+			{ "Idle", playerAnim, 0.6f, engine::PlayMode::Loop },
+		};
+		ctrl->defaultState = 0;
+
+		engine::AnimatorLayer flashLayer;
+		flashLayer.name = "HurtFlash";
+		flashLayer.kind = engine::ProceduralKind::HurtFlash;
+		flashLayer.weight = 1.f;
+		flashLayer.blendMode = engine::LayerBlendMode::Additive;
+		flashLayer.procedural.triggerParam = "hurt";
+		flashLayer.procedural.amplitude = 0.8f;
+		flashLayer.procedural.duration = 0.25f;
+
+		ctrl->layers = { flashLayer };
+
+		engine::AnimatorComponent ac{};
+		ac.applyTexture = true;
+		ac.controller = ctrl;
+		api.addComponent(hurtFlashTest, ac);
+	}
+
+	// Phase 5.3c: BreatheBob - 呼吸抖动 (持续效果)
+	entt::entity breatheBobTest;
+	{
+		breatheBobTest = api.spawnEntity();
+		api.addComponent(breatheBobTest, engine::Transform{ 900.f, 300.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 5;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 150, 255, 150, 255 };
+		api.addComponent(breatheBobTest, sp);
+
+		auto ctrl = std::make_shared<engine::AnimatorController>();
+		ctrl->states = {
+			{ "Idle", playerAnim, 0.4f, engine::PlayMode::Loop },
+		};
+		ctrl->defaultState = 0;
+
+		engine::AnimatorLayer bobLayer;
+		bobLayer.name = "BreatheBob";
+		bobLayer.kind = engine::ProceduralKind::BreatheBob;
+		bobLayer.weight = 1.f;
+		bobLayer.blendMode = engine::LayerBlendMode::Additive;
+		bobLayer.procedural.amplitude = 3.f;
+		bobLayer.procedural.frequency = 0.5f;
+		bobLayer.procedural.strengthParam = "breathStrength";
+
+		ctrl->layers = { bobLayer };
+
+		engine::AnimatorComponent ac{};
+		ac.applyTexture = true;
+		ac.controller = ctrl;
+		ac.setFloat("breathStrength", 1.f);
+		api.addComponent(breatheBobTest, ac);
+	}
+
+	// Phase 5.3d: SquashStretchOnLand - 落地挤压
+	entt::entity squashTest;
+	{
+		squashTest = api.spawnEntity();
+		api.addComponent(squashTest, engine::Transform{ 1000.f, 300.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 5;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 200, 150, 255 };
+		api.addComponent(squashTest, sp);
+
+		auto ctrl = std::make_shared<engine::AnimatorController>();
+		ctrl->states = {
+			{ "Idle", playerAnim, 0.5f, engine::PlayMode::Loop },
+		};
+		ctrl->defaultState = 0;
+
+		engine::AnimatorLayer squashLayer;
+		squashLayer.name = "SquashStretch";
+		squashLayer.kind = engine::ProceduralKind::SquashStretchOnLand;
+		squashLayer.weight = 1.f;
+		squashLayer.blendMode = engine::LayerBlendMode::Override;
+		squashLayer.procedural.triggerParam = "land";
+		squashLayer.procedural.amplitude = 0.3f;
+		squashLayer.procedural.duration = 0.3f;
+
+		ctrl->layers = { squashLayer };
+
+		engine::AnimatorComponent ac{};
+		ac.applyTexture = true;
+		ac.controller = ctrl;
+		api.addComponent(squashTest, ac);
+	}
+
+	// Phase 5.3e: 综合测试实体 - 多程序化层叠加
+	entt::entity proceduralComboTest;
+	{
+		proceduralComboTest = api.spawnEntity();
+		api.addComponent(proceduralComboTest, engine::Transform{ 1100.f, 300.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 5;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 200, 180, 255, 255 };
+		api.addComponent(proceduralComboTest, sp);
+
+		auto ctrl = std::make_shared<engine::AnimatorController>();
+		ctrl->states = {
+			{ "Idle", playerAnim, 0.5f, engine::PlayMode::Loop },
+		};
+		ctrl->defaultState = 0;
+
+		// 层 0: 持续呼吸
+		engine::AnimatorLayer bobLayer;
+		bobLayer.name = "Breathe";
+		bobLayer.kind = engine::ProceduralKind::BreatheBob;
+		bobLayer.weight = 0.6f;
+		bobLayer.blendMode = engine::LayerBlendMode::Additive;
+		bobLayer.procedural.amplitude = 2.f;
+		bobLayer.procedural.frequency = 0.8f;
+
+		// 层 1: 受击抖动
+		engine::AnimatorLayer shakeLayer;
+		shakeLayer.name = "HitShake";
+		shakeLayer.kind = engine::ProceduralKind::HitShake;
+		shakeLayer.weight = 1.f;
+		shakeLayer.blendMode = engine::LayerBlendMode::Additive;
+		shakeLayer.procedural.triggerParam = "comboHit";
+		shakeLayer.procedural.amplitude = 5.f;
+		shakeLayer.procedural.frequency = 15.f;
+		shakeLayer.procedural.duration = 0.3f;
+
+		// 层 2: 受击红闪
+		engine::AnimatorLayer flashLayer;
+		flashLayer.name = "HurtFlash";
+		flashLayer.kind = engine::ProceduralKind::HurtFlash;
+		flashLayer.weight = 0.8f;
+		flashLayer.blendMode = engine::LayerBlendMode::Additive;
+		flashLayer.procedural.triggerParam = "comboHurt";
+		flashLayer.procedural.amplitude = 0.5f;
+		flashLayer.procedural.duration = 0.2f;
+
+		ctrl->layers = { bobLayer, shakeLayer, flashLayer };
+
+		engine::AnimatorComponent ac{};
+		ac.applyTexture = true;
+		ac.controller = ctrl;
+		api.addComponent(proceduralComboTest, ac);
+	}
+
 	// ── 状态文字 (World 层) ───────────────────────────────────────────────────
 	entt::entity statusText;
 	{
@@ -294,7 +558,7 @@ int main(int argc, char* argv[]) {
 		auto e = api.spawnEntity();
 		api.addComponent(e, engine::Transform{ 40.f, 80.f });
 		engine::TextComponent txt{};
-		txt.text = "Hello, StarEngine! @#$%^&*()";
+		txt.text = "WASD: player move, up down left right: camera move";
 		txt.font = font;
 		txt.fontSize = 48.f;
 		txt.color = { 255, 255, 255, 255 };
@@ -333,12 +597,24 @@ int main(int argc, char* argv[]) {
 	// ── Screen 提示 ──────────────────────────────────────────────────────────
 	{
 		auto e = api.spawnEntity();
-		api.addComponent(e, engine::Transform{ 20.f, 680.f });
+		api.addComponent(e, engine::Transform{ 20.f, 650.f });
 		engine::TextComponent txt{};
-		txt.text = "WASD to move | G: toggle GPU-driven | ESC to quit";
+		txt.text = "WASD:move | Arrows:camera | J/K/L/U:Phase1 | F:Phase3 | 1-7:Phase5 | G:GPU | ESC:quit";
 		txt.font = font;
-		txt.fontSize = 18.f;
+		txt.fontSize = 16.f;
 		txt.color = { 150, 150, 150, 255 };
+		txt.pass = engine::RenderPass::Screen;
+		txt.layer = 100;
+		api.addComponent(e, txt);
+	}
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 20.f, 670.f });
+		engine::TextComponent txt{};
+		txt.text = "Phase5: 1=HitShake 2=HurtFlash 3=BreathStr 4=Squash 5=Combo 6/7:TimeScale";
+		txt.font = font;
+		txt.fontSize = 14.f;
+		txt.color = { 120, 120, 150, 255 };
 		txt.pass = engine::RenderPass::Screen;
 		txt.layer = 100;
 		api.addComponent(e, txt);
@@ -424,11 +700,12 @@ int main(int argc, char* argv[]) {
 		float dt = ctx.scheduler.deltaTime();
 		auto& anim = api.getComponent<engine::AnimatorComponent>(player);
 
+		// WASD 控制 player 移动
 		float dx = 0.f, dy = 0.f;
-		if (api.isKeyDown(SDLK_W) || api.isKeyDown(SDLK_UP))    dy -= 1.f;
-		if (api.isKeyDown(SDLK_S) || api.isKeyDown(SDLK_DOWN))  dy += 1.f;
-		if (api.isKeyDown(SDLK_A) || api.isKeyDown(SDLK_LEFT))  dx -= 1.f;
-		if (api.isKeyDown(SDLK_D) || api.isKeyDown(SDLK_RIGHT)) dx += 1.f;
+		if (api.isKeyDown(SDLK_W)) dy -= 1.f;
+		if (api.isKeyDown(SDLK_S)) dy += 1.f;
+		if (api.isKeyDown(SDLK_A)) dx -= 1.f;
+		if (api.isKeyDown(SDLK_D)) dx += 1.f;
 		const bool isMoving = (dx != 0.f || dy != 0.f);
 
 		// 只有真正移动时才 patch —— 触发 on_update 让 RenderSystem 把新位置回写 GPU；
@@ -437,6 +714,19 @@ int main(int argc, char* argv[]) {
 			api.patchComponent<engine::Transform>(player, [&](engine::Transform& tf) {
 				tf.x += dx * kSpeed * dt;
 				tf.y += dy * kSpeed * dt;
+			});
+		}
+
+		// 方向键控制 World 摄像机位置
+		float camDx = 0.f, camDy = 0.f;
+		if (api.isKeyDown(SDLK_UP))    camDy -= 1.f;
+		if (api.isKeyDown(SDLK_DOWN))  camDy += 1.f;
+		if (api.isKeyDown(SDLK_LEFT))  camDx -= 1.f;
+		if (api.isKeyDown(SDLK_RIGHT)) camDx += 1.f;
+		if (camDx != 0.f || camDy != 0.f) {
+			api.patchComponent<engine::Transform>(worldCamera, [&](engine::Transform& tf) {
+				tf.x += camDx * kSpeed * dt;
+				tf.y += camDy * kSpeed * dt;
 			});
 		}
 
@@ -509,6 +799,57 @@ int main(int argc, char* argv[]) {
 					}
 				}
 			}
+		}
+
+		// ═════════════════════════════════════════════════════════════════════
+		// Phase 5.3: 程序化层触发测试
+		// ═════════════════════════════════════════════════════════════════════
+		// 1: HitShake 受击抖动
+		if (api.isKeyJustPressed(SDLK_1)) {
+			auto& anim = api.getComponent<engine::AnimatorComponent>(hitShakeTest);
+			anim.setTrigger("hit");
+			printf("[Phase5] 1: HitShake triggered on entity @700,300\n");
+		}
+		// 2: HurtFlash 受击红闪
+		if (api.isKeyJustPressed(SDLK_2)) {
+			auto& anim = api.getComponent<engine::AnimatorComponent>(hurtFlashTest);
+			anim.setTrigger("hurt");
+			printf("[Phase5] 2: HurtFlash triggered on entity @800,300\n");
+		}
+		// 3: BreatheBob 强度调整 (循环增加)
+		if (api.isKeyJustPressed(SDLK_3)) {
+			auto& anim = api.getComponent<engine::AnimatorComponent>(breatheBobTest);
+			float strength = anim.getFloat("breathStrength") + 0.5f;
+			if (strength > 3.f) strength = 0.5f;
+			anim.setFloat("breathStrength", strength);
+			printf("[Phase5] 3: BreatheBob strength = %.1f\n", strength);
+		}
+		// 4: SquashStretch 落地挤压
+		if (api.isKeyJustPressed(SDLK_4)) {
+			auto& anim = api.getComponent<engine::AnimatorComponent>(squashTest);
+			anim.setTrigger("land");
+			printf("[Phase5] 4: SquashStretch triggered on entity @1000,300\n");
+		}
+		// 5: 综合测试 - 同时触发多个效果
+		if (api.isKeyJustPressed(SDLK_5)) {
+			auto& anim = api.getComponent<engine::AnimatorComponent>(proceduralComboTest);
+			anim.setTrigger("comboHit");
+			anim.setTrigger("comboHurt");
+			printf("[Phase5] 5: Combo (HitShake + HurtFlash) triggered on entity @1100,300\n");
+		}
+
+		// Phase 5 时间缩放测试 (6/7 键)
+		if (api.isKeyJustPressed(SDLK_6)) {
+			auto& anim = api.getComponent<engine::AnimatorComponent>(hitShakeTest);
+			anim.localTimeScale = anim.localTimeScale * 0.5f;
+			if (anim.localTimeScale < 0.125f) anim.localTimeScale = 1.f;
+			printf("[Phase5] 6: HitShake timeScale = %.2f\n", anim.localTimeScale);
+		}
+		if (api.isKeyJustPressed(SDLK_7)) {
+			auto& anim = api.getComponent<engine::AnimatorComponent>(breatheBobTest);
+			anim.localTimeScale = anim.localTimeScale * 0.5f;
+			if (anim.localTimeScale < 0.125f) anim.localTimeScale = 1.f;
+			printf("[Phase5] 7: BreatheBob timeScale = %.2f\n", anim.localTimeScale);
 		}
 
 		auto& statusSpr = api.getComponent<engine::Sprite>(statusText);
