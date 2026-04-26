@@ -3,6 +3,7 @@
 #include "../components/RenderComponents.h"
 #include "../runtime/EngineContext.h"
 #include "../assets/AssetManager.h"
+#include <algorithm>
 #include <cmath>
 
 namespace engine {
@@ -211,6 +212,93 @@ namespace {
         return clip;
     }
 
+    // ── Phase 5.3: 程序化层求值 ──────────────────────────────────────────
+    // 检查 trigger 参数；若命中则消费并重置 phase
+    bool consumeTrigger(AnimatorComponent& anim, const std::string& name) {
+        if (name.empty()) return false;
+        auto it = anim.parameters.find(name);
+        if (it == anim.parameters.end()) return false;
+        if (it->second.type != ParamType::Trigger || it->second.f == 0.f) return false;
+        it->second.f = 0.f;
+        return true;
+    }
+
+    inline uint8_t addClampU8(int a, int b) {
+        int v = a + b;
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        return static_cast<uint8_t>(v);
+    }
+
+    void evalProcedural(AnimatorComponent& anim, const AnimatorLayer& L,
+                        AnimatorLayerRuntime& rt, AnimatorOutput& out, float dt) {
+        const ProceduralConfig& c = L.procedural;
+        const float w = L.weight;
+        constexpr float kPi = 3.14159265358979323846f;
+
+        switch (L.kind) {
+        case ProceduralKind::None: return;
+
+        case ProceduralKind::HitShake: {
+            if (consumeTrigger(anim, c.triggerParam)) { rt.procPhase = 0.f; rt.procActive = true; }
+            if (!rt.procActive) return;
+            rt.procPhase += dt;
+            if (rt.procPhase >= c.duration) { rt.procActive = false; return; }
+            const float k = 1.f - rt.procPhase / c.duration;        // 衰减
+            const float s = std::sin(rt.procPhase * c.frequency * 2.f * kPi);
+            const float ox = s * c.amplitude * k * w;
+            const float oy = std::cos(rt.procPhase * c.frequency * 2.f * kPi * 1.3f) * c.amplitude * k * w;
+            if (L.blendMode == LayerBlendMode::Override) { out.offsetX = ox; out.offsetY = oy; }
+            else                                          { out.offsetX += ox; out.offsetY += oy; }
+            break;
+        }
+
+        case ProceduralKind::HurtFlash: {
+            if (consumeTrigger(anim, c.triggerParam)) { rt.procPhase = 0.f; rt.procActive = true; }
+            if (!rt.procActive) return;
+            rt.procPhase += dt;
+            if (rt.procPhase >= c.duration) { rt.procActive = false; return; }
+            const float k = 1.f - rt.procPhase / c.duration;        // 0..1 衰减
+            const int add = static_cast<int>(c.amplitude * k * w * 255.f);
+            // Additive 红色叠加；Override 直接置红色
+            if (L.blendMode == LayerBlendMode::Override) {
+                out.tintMul.r = static_cast<uint8_t>(std::min(255, add));
+                out.tintMul.g = 0; out.tintMul.b = 0;
+            } else {
+                out.tintMul.r = addClampU8(out.tintMul.r, add);
+                out.tintMul.g = addClampU8(out.tintMul.g, -add / 2);
+                out.tintMul.b = addClampU8(out.tintMul.b, -add / 2);
+            }
+            break;
+        }
+
+        case ProceduralKind::BreatheBob: {
+            rt.procPhase += dt;
+            float strength = c.amplitude;
+            if (!c.strengthParam.empty()) strength *= anim.getFloat(c.strengthParam);
+            const float oy = std::sin(rt.procPhase * c.frequency * 2.f * kPi) * strength * w;
+            if (L.blendMode == LayerBlendMode::Override) out.offsetY = oy;
+            else                                          out.offsetY += oy;
+            break;
+        }
+
+        case ProceduralKind::SquashStretchOnLand: {
+            if (consumeTrigger(anim, c.triggerParam)) { rt.procPhase = 0.f; rt.procActive = true; }
+            if (!rt.procActive) return;
+            rt.procPhase += dt;
+            if (rt.procPhase >= c.duration) { rt.procActive = false; return; }
+            const float u = rt.procPhase / c.duration;              // 0..1
+            // 半正弦脉冲：先压扁再回弹
+            const float pulse = std::sin(u * kPi);                  // 0..1..0
+            const float sx = 1.f + pulse * c.amplitude * w;         // 横向胖
+            const float sy = 1.f - pulse * c.amplitude * w;         // 纵向矮
+            if (L.blendMode == LayerBlendMode::Override) { out.scaleMulX = sx; out.scaleMulY = sy; }
+            else                                          { out.scaleMulX *= sx; out.scaleMulY *= sy; }
+            break;
+        }
+        }
+    }
+
     // 从 clip + time 计算当前帧索引
     size_t resolveFrameIndex(const AnimationClip& clip, float time) {
         float t = time;
@@ -223,9 +311,12 @@ namespace {
     }
 } // namespace
 
-void AnimatorSystem::update(float dt) {
+void AnimatorSystem::update(float rawDt) {
+    const float globalScale = ctx_.timeScale;
     auto view = ctx_.world.view<AnimatorComponent>();
     for (auto [ent, anim] : view.each()) {
+        // Phase 5.4: 缩放 dt = raw * global * local
+        const float dt = rawDt * globalScale * anim.localTimeScale;
         // 单帧事件队列：每帧开始清空
         AnimEventQueue* queuePtr = ctx_.world.try_get<AnimEventQueue>(ent);
         if (queuePtr) queuePtr->events.clear();
@@ -244,12 +335,13 @@ void AnimatorSystem::update(float dt) {
             tickFSM(anim, base, ctrl.states, ctrl.transitions, ctrl.defaultState,
                     ctx_.assetManager, *queuePtr, dt);
 
-            // ── Phase 4: 额外层 FSM ────────────────────────────────────────
+            // ── Phase 4: 额外层 FSM (跳过程序化层) ─────────────────────────
             if (anim.extraLayers.size() != ctrl.layers.size()) {
                 anim.extraLayers.resize(ctrl.layers.size());
             }
             for (size_t li = 0; li < ctrl.layers.size(); ++li) {
                 const AnimatorLayer& Ldef = ctrl.layers[li];
+                if (Ldef.kind != ProceduralKind::None) continue;
                 AnimatorLayerRuntime& Lrt = anim.extraLayers[li];
                 LayerRT lrv{
                     Lrt.currentAnim, Lrt.time, Lrt.speed, Lrt.playing, Lrt.finished,
@@ -293,12 +385,31 @@ void AnimatorSystem::update(float dt) {
             spr->gpuDirty = true;
         }
 
-        // ── Phase 4: 额外层时间推进 + 写回合成 ──────────────────────────────
+        // ── Phase 4/5: 额外层时间推进 + 写回合成 ────────────────────────────
         if (anim.controller) {
             AnimatorController& ctrl = *anim.controller;
+
+            // 重置/拿到 AnimatorOutput (程序化层会填充)
+            AnimatorOutput* outPtr = nullptr;
+            bool hasProcedural = false;
+            for (const auto& L : ctrl.layers) if (L.kind != ProceduralKind::None) { hasProcedural = true; break; }
+            if (hasProcedural) {
+                outPtr = ctx_.world.try_get<AnimatorOutput>(ent);
+                if (!outPtr) outPtr = &ctx_.world.emplace<AnimatorOutput>(ent);
+                *outPtr = AnimatorOutput{}; // 每帧重置（procedural 层重新累加）
+            }
+
             for (size_t li = 0; li < ctrl.layers.size() && li < anim.extraLayers.size(); ++li) {
                 const AnimatorLayer& Ldef = ctrl.layers[li];
                 AnimatorLayerRuntime& Lrt = anim.extraLayers[li];
+
+                // ── Phase 5.3: 程序化层 ─────────────────────────────────
+                if (Ldef.kind != ProceduralKind::None) {
+                    if (outPtr && Ldef.weight > 0.f) evalProcedural(anim, Ldef, Lrt, *outPtr, dt);
+                    continue;
+                }
+
+                // ── Phase 4: clip 驱动层 ────────────────────────────────
                 LayerRT lrv{
                     Lrt.currentAnim, Lrt.time, Lrt.speed, Lrt.playing, Lrt.finished,
                     Lrt.currentMode, Lrt.currentState, Lrt.fromState,
@@ -319,7 +430,7 @@ void AnimatorSystem::update(float dt) {
 
                 const bool wantSrcRect = (Ldef.mask & LayerChannel::SrcRect) != 0;
                 const bool wantTexture = (Ldef.mask & LayerChannel::Texture) != 0;
-                if (!wantSrcRect && !wantTexture) continue; // 其他通道无 clip 数据源 (Phase 5)
+                if (!wantSrcRect && !wantTexture) continue;
 
                 const size_t idx = resolveFrameIndex(*lClip, Lrt.time);
                 if (Ldef.blendMode == LayerBlendMode::Override) {
@@ -327,8 +438,10 @@ void AnimatorSystem::update(float dt) {
                     if (wantTexture && lClip->texture.valid()) spr->texture = lClip->texture;
                     spr->gpuDirty = true;
                 }
-                // Additive: 帧动画无每帧 srcRect 增量语义，留给 Phase 5 程序化层
             }
+
+            // AnimatorOutput 留给 RenderSystem 在 updateGPUSlot 时叠加 (offset/scale/tint)
+            if (outPtr && spr) spr->gpuDirty = true;
         }
     }
 }

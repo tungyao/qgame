@@ -9,6 +9,7 @@ add_library(engine SHARED
     systems/PhysicsSystem.cpp
     systems/InputSystem.cpp
     systems/AnimatorSystem.cpp
+    systems/TweenSystem.cpp
     input/SDLInputProvider.cpp
     assets/AssetManager.cpp
     assets/FontLoader.cpp

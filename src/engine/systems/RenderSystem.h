@@ -1,5 +1,7 @@
 #pragma once
 #include "ISystem.h"
+#include "../components/RenderComponents.h"
+#include "../components/AnimatorComponent.h"
 #include "../resources/SpriteBuffer.h"
 #include "../resources/GPUDrivenRenderer.h"
 #include <entt/entt.hpp>
@@ -33,7 +35,7 @@ private:
     void syncEntitiesToGPU();
     void allocateGPUSlot(entt::entity e, Sprite& spr);
     void freeGPUSlot(entt::registry& reg, entt::entity e);
-    void updateGPUSlot(const Transform& tf, const Sprite& spr);
+    void updateGPUSlot(const Transform& tf, const Sprite& spr, const AnimatorOutput* aout = nullptr);
     void onTransformUpdate(entt::registry& reg, entt::entity e);
 
     EngineContext& ctx_;

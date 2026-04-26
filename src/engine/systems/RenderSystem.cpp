@@ -164,8 +164,11 @@ void RenderSystem::syncEntitiesToGPU() {
             allocateGPUSlot(e, spr);
             spr.gpuDirty = true;
         }
+        // Phase 5.3: 程序化输出每帧重新合成
+        const AnimatorOutput* aout = ctx_.world.try_get<AnimatorOutput>(e);
+        if (aout) spr.gpuDirty = true;
         if (spr.gpuDirty) {
-            updateGPUSlot(tf, spr);
+            updateGPUSlot(tf, spr, aout);
             spr.gpuDirty = false;
         }
     }
@@ -185,19 +188,37 @@ void RenderSystem::freeGPUSlot(entt::registry& reg, entt::entity e) {
     }
 }
 
-void RenderSystem::updateGPUSlot(const Transform& tf, const Sprite& spr) {
+void RenderSystem::updateGPUSlot(const Transform& tf, const Sprite& spr, const AnimatorOutput* aout) {
     GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
     if (!slot) return;
 
     float w = spr.srcRect.w;
     float h = spr.srcRect.h;
-    buildTransform2D(slot->transform, tf.x, tf.y, tf.rotation,
-                     tf.scaleX, tf.scaleY, spr.pivotX, spr.pivotY, w, h);
 
-    slot->color[0] = spr.tint.r / 255.0f;
-    slot->color[1] = spr.tint.g / 255.0f;
-    slot->color[2] = spr.tint.b / 255.0f;
-    slot->color[3] = spr.tint.a / 255.0f;
+    // Phase 5.3: 程序化层位移/旋转/缩放叠加
+    float px = tf.x, py = tf.y, prot = tf.rotation;
+    float psx = tf.scaleX, psy = tf.scaleY;
+    if (aout) {
+        px   += aout->offsetX;
+        py   += aout->offsetY;
+        prot += aout->rotationOffset;
+        psx  *= aout->scaleMulX;
+        psy  *= aout->scaleMulY;
+    }
+    buildTransform2D(slot->transform, px, py, prot,
+                     psx, psy, spr.pivotX, spr.pivotY, w, h);
+
+    // Phase 5.3: 程序化层 tint 加色 (HurtFlash 等)
+    int rr = spr.tint.r, gg = spr.tint.g, bb = spr.tint.b, aa = spr.tint.a;
+    if (aout) {
+        rr += aout->tintMul.r;  // tintMul.r 实为加色偏移 (HurtFlash 写入)
+        // tintMul.g/b 此处不参与；HurtFlash 通过 r 通道表达红闪强度
+    }
+    if (rr > 255) rr = 255;
+    slot->color[0] = rr / 255.0f;
+    slot->color[1] = gg / 255.0f;
+    slot->color[2] = bb / 255.0f;
+    slot->color[3] = aa / 255.0f;
 
     int tw = 1, th = 1;
     ctx_.renderDevice().getTextureDimensions(spr.texture, tw, th);

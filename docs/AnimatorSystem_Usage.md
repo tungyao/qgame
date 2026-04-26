@@ -1,8 +1,7 @@
 # AnimatorSystem 使用文档
 
-> 覆盖 Phase 1–4 已落地能力：优先级/打断/队列、帧事件、参数+FSM+Crossfade、动画分层
-> 源码：`src/engine/components/AnimatorComponent.h`、`src/engine/systems/AnimatorSystem.cpp`
-> Phase 5（程序化动画 / Tween / Spring / hit-stop）尚未实现，参见 `PLAN_AnimatorSystem_Evolution.md`
+> 覆盖 Phase 1–5 已落地能力：优先级/打断/队列、帧事件、参数+FSM+Crossfade、动画分层、Tween/Spring/程序化层/时间缩放
+> 源码：`src/engine/components/AnimatorComponent.h`、`src/engine/systems/AnimatorSystem.cpp`、`src/engine/systems/TweenSystem.cpp`、`src/engine/anim/{Easing,SpringValue}.h`
 
 ---
 
@@ -14,10 +13,11 @@
 4. [Phase 2：帧事件 (Animation Notify)](#4-phase-2帧事件-animation-notify)
 5. [Phase 3：参数 + FSM + Crossfade](#5-phase-3参数--fsm--crossfade)
 6. [Phase 4：动画分层 (Layers)](#6-phase-4动画分层-layers)
-7. [系统执行顺序](#7-系统执行顺序)
-8. [事件命名约定](#8-事件命名约定)
-9. [常见用法配方](#9-常见用法配方)
-10. [限制与注意事项](#10-限制与注意事项)
+7. [Phase 5：Tween / Spring / 程序化层 / 时间缩放](#7-phase-5tween--spring--程序化层--时间缩放)
+8. [系统执行顺序](#8-系统执行顺序)
+9. [事件命名约定](#9-事件命名约定)
+10. [常见用法配方](#10-常见用法配方)
+11. [限制与注意事项](#11-限制与注意事项)
 
 ---
 
@@ -291,7 +291,107 @@ ctrl->layers.push_back(std::move(upper));
 
 ---
 
-## 7. 系统执行顺序
+## 7. Phase 5：Tween / Spring / 程序化层 / 时间缩放
+
+### 7.1 时间缩放 (5.4)
+- `EngineContext.timeScale`：全局时间缩放（hit-stop / 慢动作）
+- `AnimatorComponent.localTimeScale`：单体缩放
+- AnimatorSystem 内 `dt = rawDt * global * local`；TweenSystem 内 `dt = rawDt * global`
+```cpp
+ctx.timeScale = 0.05f;       // 全局顿帧
+anim.localTimeScale = 2.0f;  // 该 entity 加倍速
+```
+
+### 7.2 TweenSystem (5.1)
+轻量补间，独立于 Animator。挂 `TweenComponent`，每个实例为 `TweenInstance`。
+```cpp
+engine::TweenComponent& tc = api.getOrEmplace<engine::TweenComponent>(ent);
+engine::TweenInstance t{};
+t.channel  = engine::TweenChannel::ScaleX;
+t.from     = 0.f;  t.to = 1.f;
+t.duration = 0.4f;
+t.easing   = engine::Easing::BackOut;     // 弹入
+tc.add(t);
+```
+通道：`PositionX/Y、Rotation、ScaleX/Y、SpriteTintR/G/B/A、CameraZoom、Custom`。
+完成后默认从容器移除 (`removeOnFinish=true`)；`loop`、`pingpong` 可选；`Custom` 通道由调用者读 `outValue`。
+
+Easing：`Linear/Quad/Cubic/Quart/Sine/Expo/Back/Elastic/Bounce` × `In/Out/InOut`。
+
+### 7.3 SpringValue (5.2)
+header-only 工具，调用方按需 `update(dt)`。
+```cpp
+engine::SpringValue camFollow{};
+camFollow.stiffness = 120.f;
+camFollow.damping   = engine::SpringValue::criticalDamping(120.f);
+// 每帧：
+camFollow.target = player.x;
+camera.x = camFollow.update(dt);
+```
+适用：相机跟随、UI 弹入、采集物吸附、命中位移回弹。
+
+### 7.4 程序化层 (5.3)
+`AnimatorLayer.kind != ProceduralKind::None` 即为程序化层，忽略 `states/transitions`，每帧由 AnimatorSystem 调用对应求值器，写入 `AnimatorOutput` 组件，RenderSystem 在 `updateGPUSlot` 时合成到 Sprite/Transform。
+
+内置类型：
+
+| Kind | 通道 | 触发方式 | 关键 config |
+|---|---|---|---|
+| `HitShake` | Offset (X+Y) | trigger | amplitude (像素)、frequency (Hz)、duration (秒) |
+| `HurtFlash` | Tint 加色 (R+) | trigger | amplitude (0..1 红色强度)、duration |
+| `BreatheBob` | Offset Y | strength 参数（持续） | amplitude、frequency |
+| `SquashStretchOnLand` | Scale (XY 反向) | trigger | amplitude (比例 0..1)、duration |
+
+`AnimatorOutput`（per-entity，AnimatorSystem 自动 emplace + 每帧重置）：
+```cpp
+struct AnimatorOutput {
+    float       offsetX, offsetY;
+    float       rotationOffset;
+    float       scaleMulX, scaleMulY;
+    core::Color tintMul;        // 仅 r 通道用作 HurtFlash 加色偏移
+};
+```
+
+### 配方：受击红闪 + 抖动
+```cpp
+ctrl->layers.push_back({
+    "Hurt", 1.f, engine::LayerBlendMode::Override, /*mask*/ 0,
+    {}, {}, 0,
+    engine::ProceduralKind::HurtFlash,
+    { /*trigger*/"hurt_flash", "", /*amp*/1.0f, 0.f, /*duration*/0.15f }
+});
+ctrl->layers.push_back({
+    "Shake", 1.f, engine::LayerBlendMode::Additive, 0, {}, {}, 0,
+    engine::ProceduralKind::HitShake,
+    { "hurt_flash", "", /*amp*/4.f, /*freq*/30.f, /*duration*/0.18f }
+});
+// gameplay 命中时：
+anim.setTrigger("hurt_flash");
+```
+
+### 配方：呼吸抖动（持续，强度由参数控制）
+```cpp
+anim.setFloat("breath", 1.0f);
+ctrl->layers.push_back({
+    "Breathe", 1.f, engine::LayerBlendMode::Additive, 0, {}, {}, 0,
+    engine::ProceduralKind::BreatheBob,
+    { "", /*strength*/"breath", /*amp*/1.5f, /*freq*/0.6f, 0.f }
+});
+```
+
+### 配方：hit-stop
+```cpp
+// 命中触发：
+ctx.timeScale = 0.05f;
+springTimer = 0.05f;
+// 主循环：
+springTimer -= rawDt;
+if (springTimer <= 0) ctx.timeScale = 1.0f;
+```
+
+---
+
+## 8. 系统执行顺序
 
 `AnimatorSystem::update(dt)` 对每个 entity：
 
@@ -307,7 +407,7 @@ ctrl->layers.push_back(std::move(upper));
 
 ---
 
-## 8. 事件命名约定
+## 9. 事件命名约定
 
 | 名称 | 含义 |
 |---|---|
@@ -324,7 +424,7 @@ ctrl->layers.push_back(std::move(upper));
 
 ---
 
-## 9. 常见用法配方
+## 10. 常见用法配方
 
 ### A. gameplay 只写参数，不写 play()
 ```cpp
@@ -335,8 +435,8 @@ if (tookDamage)              anim.setTrigger("hurt");
 // AnyState→Hurt、Idle⇄Walk、Attack→Idle 等转移由 controller 处理
 ```
 
-### B. 受击红闪（占位，等 Phase 5 程序化层）
-当前 Phase 4 帧动画无法直接写 tint。**临时方案**：gameplay 直接写 `Sprite.tint`，并用 `state_enter:Hurt` 事件触发 0.1s 计时器复位。Phase 5 落地后改为 `Tint` 通道的 Additive 程序化层。
+### B. 受击红闪
+见 §7.4 程序化层 `HurtFlash`：在 controller 加一层 + `setTrigger("hurt_flash")` 即可。
 
 ### C. queued 续播（无 FSM 时）
 ```cpp
@@ -360,16 +460,92 @@ ctrl->transitions.push_back({
 
 ---
 
-## 10. 限制与注意事项
+## 11. 限制与注意事项
 
 - **Crossfade 不做像素混合**：sprite 模式下 transition.duration 仅是逻辑过渡时长，画面是硬切。骨骼/Spine 接入后再启用真混合。
-- **PingPong = Loop**：当前实现把 `PingPong` 视作 Loop；真正反向播放（speed<0）已支持，但 PingPong 自动反向需 Phase 5。
+- **PingPong = Loop**：当前实现把 Animator 的 `PingPong` 视作 Loop（真反向 speed<0 已支持）；TweenSystem 的 `pingpong` 标志已实现来回往返。
 - **trigger 复位时机**：transition 命中时由系统消费一次。多个 transition 在同一帧都依赖同一 trigger 时，仅首条生效（顺序匹配）。
 - **events 必须升序**：未排序时跨边界扫描可能漏发。资产导入端应做校验。
 - **AnimEventQueue 单帧**：消费侧若跨帧延迟处理会丢事件，应在同帧用完。
-- **Layer Tint/Offset/Rotation/Scale 通道暂为占位**：Phase 4 仅落地 SrcRect/Texture 合成，其余通道等 Phase 5 程序化层提供数据源。
+- **clip 驱动层只用 SrcRect/Texture 通道**：Tint/Offset/Rotation/Scale 由 Phase 5 程序化层填充 `AnimatorOutput`，RenderSystem 在 GPU 上传时叠加。
+- **HurtFlash 仅红色加色**：`AnimatorOutput.tintMul.r` 用作 R 通道加色偏移，未实现完整 RGBA 乘法/加法管线。需要更复杂染色请扩 `AnimatorOutput` 与 `RenderSystem::updateGPUSlot`。
+- **TweenSystem 与 AnimatorSystem 各自缩放 dt**：均读 `EngineContext.timeScale`；`AnimatorComponent.localTimeScale` 仅作用于 Animator，不影响 Tween。
 - **额外层无 priority/queued**：层级是结构性叠加，不参与基础层的请求队列模型。
 - **基础层兼容字段**：`AnimatorController.states/transitions/defaultState` 等价于"Base 层"。新代码可继续使用扁平字段，只在需要叠加时往 `layers` 里推。
+
+---
+
+## 12. 当前不足 / 后续工作
+
+按子系统列出实现折衷与未覆盖项；优先级 = 影响面 × 出现频率。
+
+### 12.1 状态机 / 转移
+- **Crossfade 无像素混合**：2D sprite 模式下 transition.duration 仅作为逻辑过渡时长（打断窗口），画面是硬切；骨骼/Spine 接入后才能真混合。
+- **transition.interruptible 字段未严格生效**：当前过渡期内允许任意新 transition 抢占（计划简化版），后续应按 `interruptible=false` 阻止打断。源码 `tickFSM` 内有占位注释。
+- **trigger 仅消费首条匹配**：多个 transition 同帧依赖同一 trigger 时，按声明顺序首条命中即消费，其余 transition 看不到 trigger。需要分支选择请用 bool/float 参数。
+- **AnyState→自身**会被静默跳过，但 `from=具体状态, to=自身` 不会跳过——代码不对称，可能造成意外 self-loop。
+- **hasExitTime 在 loop 状态下行为模糊**：当前用 `time/duration` 取整数倍归一，跨圈语义未严格定义；非循环状态用 `time/duration + finished` clamp 到 1。
+- **defaultState 越界不报错**：直接 silently 不进入任何状态。资产加载端应做校验。
+
+### 12.2 帧事件
+- **events 必须按 time 升序**：未排序时扫描行为未定义；当前实现无排序兜底。资产导入端缺失校验。
+- **AnimEventQueue 单帧生命周期**：消费 system 必须排在 AnimatorSystem 之后、下一帧 update 之前；跨帧延迟消费会丢事件。
+- **状态机 `state_enter/exit/finished` 与帧 events 共用同一队列**：消费方需按 `name` 前缀区分（`state_*`），事件多时遍历开销线性。
+- **暂停 (speed=0) 时不发事件**：单帧 `prevTime == newTime` 直接跳过扫描；如果需要"恢复时补发"目前没做。
+
+### 12.3 分层 (Phase 4)
+- **额外层无 priority/queued/lock 语义**：层级是结构性叠加，不参与请求队列模型；想"上半身打断重启"目前只能换 trigger。
+- **Layer.weight 仅作 0/非 0 开关**：clip 驱动层不做权重插值（2D sprite 无法插值 srcRect），weight 实际只决定要不要写入。Procedural 层把 weight 用作幅度倍率。
+- **Additive 模式对 SrcRect/Texture 通道无意义**：帧动画无"增量 srcRect"，当前直接跳过；只有 Procedural 层的 Offset/Scale/Tint 才能 Additive 叠加。
+- **layers 不支持嵌套/分组**：扁平数组，写回顺序 = 声明顺序。
+
+### 12.4 程序化层 (Phase 5.3)
+- **HurtFlash 只用 R 通道**：`AnimatorOutput.tintMul.r` 用作 R 加色偏移，G/B 通道字段定义了但 RenderSystem 没消费；想做绿/蓝/降饱和闪烁需扩 `updateGPUSlot`。
+- **AnimatorOutput 没有完整 RGBA 乘+加管线**：当前只做 `gpuColor.r += tintMul.r/255`，没有 mul（颜色滤镜、亮度衰减）和 alpha 通道叠加。
+- **每帧强制 `gpuDirty = true`**：只要 entity 持有 AnimatorOutput 就每帧重传 GPU slot，不区分输出是否实际变化；高密度场景可加 dirty 比对。
+- **内置 procedural kind 只有 4 种**：`HitShake / HurtFlash / BreatheBob / SquashStretchOnLand`。需要 AimOffset、Recoil、Tilt、ColorPulse 等需自己加 case 或开放回调式 layer。
+- **procedural 层没有 onComplete 回调**：触发型层完成后只是 `procActive = false`，不发事件；想链式触发还得 gameplay 层自己计时。
+- **多个 procedural 层共享 AnimatorOutput**：同通道 Override + Additive 混排时按声明顺序覆盖/累加，没有"先全部 Override 再 Additive"的两遍合成。
+- **strengthParam 仅 BreatheBob 用**：其他 kind 的强度都得通过 trigger 重置 phase 表达，不支持运行时连续调节振幅。
+
+### 12.5 Tween (Phase 5.1)
+- **不支持 onComplete 回调**：`TweenInstance` 没有 `std::function` 字段（避免组件 trivially 不可拷贝），调用方需轮询 `finished` 或用 `removeOnFinish=false` + `userId` 查询。
+- **不支持延迟启动 (delay)**：要延迟需自己计时或用 chained tween（也未提供）。
+- **不支持序列 (sequence/parallel)**：每个 instance 独立推进，没有 group/yoyo/sequence 容器；复杂时序得手写状态机。
+- **Custom 通道值需要调用方自己读**：没有"绑定到任意成员指针"的回调式赋值，C++ 反射缺位的妥协。
+- **不影响 `localTimeScale`**：TweenSystem 只乘 `EngineContext.timeScale`；想给单实体做慢动作只能改 `duration`。
+- **pingpong 单回合即结束**：`pingpong=true && loop=false` 走完一来一回就 finished；想无限往返需 `loop=true && pingpong=true`。
+- **从容器中间删除是 O(n)**：`std::vector` + `remove_if`，每帧重排；活跃 tween > 几百时考虑改 stable list。
+
+### 12.6 Spring (Phase 5.2)
+- **裸工具，不参与 ECS**：调用方必须自己存 `SpringValue` 并 `update(dt)`；没有 `SpringComponent` + 系统驱动版本。
+- **半隐式欧拉**：在 stiffness 极高 + 大 dt 时可能数值不稳；高频物理推荐 substep 或换 RK4。
+- **标量版本**：Vec2/Vec3 需要自己用三个独立实例。
+
+### 12.7 时间缩放 (Phase 5.4)
+- **TweenSystem 不读 `localTimeScale`**：单体 hit-stop 只对 Animator 生效，Tween 仍按全局速率推进；想完全冻结需把 `EngineContext.timeScale = 0`。
+- **PhysicsSystem / 其他 system 不缩放**：当前只有 Animator + Tween 读 timeScale；hit-stop 期间物理仍正常推进，可能与画面期望不符。
+- **没有 hit-stop 工具/事件 API**：要实现"命中 0.05s 顿帧"得 gameplay 自己计时复位 timeScale；可后续封装 `requestHitStop(dt)` 工具。
+- **timeScale 极端值不夹紧**：`<0` 或 `>很大` 不报错，行为未定义。
+
+### 12.8 资产 / 序列化
+- **AnimatorController / AnimatorLayer 还没有 JSON 加载器**：当前只能代码里手写。`PLAN_AnimatorSystem_Evolution.md` §三里的 JSON schema 尚未在 AssetManager 里实现。
+- **procedural layer 配置无 JSON 表达**：`ProceduralKind` 枚举到字符串映射缺失。
+- **运行时无可视化编辑器**：状态多时手写易错；编辑器扩展留给 Month 7+ Inspector。
+
+### 12.9 性能
+- **AnimatorSystem 内每实体多次 `try_get<Sprite>` / `try_get<AnimEventQueue>`**：未做 cached view + group；千实体规模可考虑改 `view<AnimatorComponent, Sprite>`。
+- **每帧扫描所有 transitions**：无加速结构；状态/转移多时 O(N) 线性。
+- **GPU sprite 每帧因 procedural 全量重传**：见 §12.4。
+- **未做 LOD / 距相机剔除**：远处 entity 也照常推进 FSM、写 GPU slot。
+
+### 12.10 不在本计划范围（保留给后续）
+- Blend Tree (1D / 2D)
+- Root Motion
+- Skeletal / Spine / DragonBones（也是 crossfade 真混合的前提）
+- AnimGraph 可视化编辑器
+- LOD / 批量 / Job 化
+- 网络回放 / 同步
 
 ---
 
@@ -382,4 +558,8 @@ ctrl->transitions.push_back({
 | `AnimatorComponent`（组件） | 当前播放、参数黑板、各层运行时 |
 | `AnimEventQueue`（组件，单帧） | 帧事件 + 状态事件输出口 |
 | `Sprite`（组件） | 写回目标：srcRect / texture |
-| `AnimatorSystem`（系统） | 每帧驱动以上全部 |
+| `AnimatorSystem`（系统） | 每帧驱动 FSM/层/程序化输出 |
+| `AnimatorOutput`（组件，单帧重置） | 程序化层输出 (offset/rotation/scaleMul/tintMul) |
+| `TweenComponent` / `TweenSystem` | 独立补间，按通道写回 Transform/Sprite/Camera |
+| `SpringValue`（工具） | 阻尼弹簧；调用方手动 `update(dt)` |
+| `EngineContext.timeScale` | 全局时间缩放 (hit-stop) |

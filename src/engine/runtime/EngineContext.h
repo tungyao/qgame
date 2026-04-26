@@ -40,6 +40,7 @@ public:
 
     uint64_t frameCounter = 0;
     float deltaTime = 0.0f;
+    float timeScale = 1.0f;   // Phase 5.4: 全局时间缩放 (hit-stop / 慢动作)
     std::function<void()> beforePresentCallback;
     bool renderToSwapchain = true;  // 设为 false 可禁用自动渲染到 swapchain（editor 模式）
 

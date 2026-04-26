@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../../core/math/Rect.h"
+#include "../../core/math/Color.h"
 
 namespace engine {
 
@@ -117,6 +118,24 @@ namespace LayerChannel {
 
 enum class LayerBlendMode : uint8_t { Override, Additive };
 
+// Phase 5.3: 程序化层类型 — 不依赖 clip，直接对 Sprite/Transform 通道写偏移
+enum class ProceduralKind : uint8_t {
+    None,               // 普通 clip 驱动层
+    HitShake,           // 受击位移抖动 (Offset)
+    HurtFlash,          // 受击红闪 (Tint, Additive 红色叠加)
+    BreatheBob,         // 呼吸抖动 (Offset Y, 慢正弦)
+    SquashStretchOnLand,// 落地挤压 (Scale, 衰减脉冲)
+};
+
+// 触发参数：程序化层一般由 trigger / float 参数驱动
+struct ProceduralConfig {
+    std::string triggerParam;     // 触发型 (HitShake/SquashStretchOnLand/HurtFlash)：trigger 命中即重置 phase
+    std::string strengthParam;    // 持续强度 (BreatheBob：呼吸幅度由 float 参数控制)
+    float       amplitude  = 1.0f; // 通用：基础幅度 (像素 / 比例 / 颜色 0..1)
+    float       frequency  = 1.0f; // BreatheBob / HitShake 频率 (Hz)
+    float       duration   = 0.3f; // 一次脉冲总时长 (秒, 触发型)
+};
+
 struct AnimatorLayer {
     std::string                       name;
     float                             weight    = 1.f;       // 0..1
@@ -125,6 +144,10 @@ struct AnimatorLayer {
     std::vector<AnimState>            states;
     std::vector<AnimTransition>       transitions;
     int                               defaultState = 0;
+
+    // Phase 5.3: 程序化层 (kind != None 时忽略 states/transitions)
+    ProceduralKind                    kind = ProceduralKind::None;
+    ProceduralConfig                  procedural;
 };
 
 struct AnimatorController {
@@ -151,6 +174,20 @@ struct AnimatorLayerRuntime {
     float           transitionT  = 0.f;
     float           transitionDuration = 0.f;
     bool            stateFinishedFired = false;
+
+    // Phase 5.3: 程序化层运行时
+    float           procPhase    = 0.f; // 当前已经过的脉冲时间
+    bool            procActive   = false; // 触发型层是否处于进行中
+};
+
+// Phase 5.3: 程序化层合成输出 — 由 AnimatorSystem 写入，RenderSystem 在矩阵合成时叠加
+struct AnimatorOutput {
+    float       offsetX        = 0.f;
+    float       offsetY        = 0.f;
+    float       rotationOffset = 0.f;
+    float       scaleMulX      = 1.f;
+    float       scaleMulY      = 1.f;
+    core::Color tintMul        = core::Color::White; // R/G/B/A 各通道 0..255 倍率分母 = 255
 };
 
 struct AnimatorComponent {
@@ -161,6 +198,9 @@ struct AnimatorComponent {
     bool            playing = false;
     bool            applyTexture = true;
     bool            finished = false;
+
+    // Phase 5.4: 单体时间缩放 (与 EngineContext.timeScale 相乘)
+    float           localTimeScale = 1.0f;
 
     // ── Phase 1: 优先级 / 打断 / 队列 ─────────────────────────────────────
     int             currentPriority = 0;
