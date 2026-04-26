@@ -79,7 +79,8 @@ int main(int argc, char* argv[]) {
 	cfg.windowTitle = "StarEngine - Two Camera Demo";
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
-	if (useOpenGL) {
+	cfg.debug = true;
+	if (0) {
 		cfg.renderBackend = engine::RenderBackend::OpenGL;
 	}
 	engine::EngineContext ctx;
@@ -403,7 +404,7 @@ int main(int argc, char* argv[]) {
 		{
 			if (ctx.systems.has<engine::RenderSystem>()) {
 				auto& renderSystem = ctx.systems.get<engine::RenderSystem>();
-				uint32_t spriteCount = renderSystem.spriteBuffer().activeCount();
+				uint32_t spriteCount = renderSystem.spriteBuffer().activeCount(); // #获取当前活跃的 GPU 精灵数量 是获取不到的 只能在gpu初始化进行占用slot才行
 				auto& countTxt = api.getComponent<engine::TextComponent>(spriteCountText);
 				char buf[64];
 				snprintf(buf, sizeof(buf), "Sprites: %u | Mode: %s", 

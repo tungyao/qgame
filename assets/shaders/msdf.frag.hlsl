@@ -1,6 +1,6 @@
 // SDL3 GPU D3D12: PS samplers at register(t0/s0, space2)
 
-// SDL3 GPU D3D12: PS samplers at space2, PS UBOs at space3
+// SDL3 GPU D3D12: PS samplers at space2, PS UBOs use push constants (space3)
 Texture2D    tex  : register(t0, space2);
 SamplerState samp : register(s0, space2);
 

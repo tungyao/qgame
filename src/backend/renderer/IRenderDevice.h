@@ -48,8 +48,15 @@ struct BufferDesc {
 };
 
 struct ComputePipelineDesc {
+       // OpenGL backend: GLSL source via code/codeSize.
+       // SDL3 GPU backend: prefers spirvCode/dxilCode based on its shaderFormat,
+       // falls back to code/codeSize if those are not set.
     const void* code = nullptr;
     size_t codeSize = 0;
+    const void* spirvCode = nullptr;
+    size_t      spirvSize = 0;
+    const void* dxilCode = nullptr;
+    size_t      dxilSize = 0;
     const char* entryPoint = "main";
     uint32_t threadCountX = 64;
     uint32_t threadCountY = 1;
@@ -114,6 +121,8 @@ public:
     };
     
     virtual void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) = 0;
+
+    bool debug_ = false;
 };
 
 } // namespace backend

@@ -10,11 +10,13 @@ struct GPUSprite {
     uint flags;
 };
 
-StructuredBuffer<GPUSprite> SpriteBuffer : register(t0);
-StructuredBuffer<uint> IndexBuffer : register(t1);
-RWStructuredBuffer<uint> SortedBuffer : register(u0);
+// SDL_GPU compute HLSL convention:
+//   t#,space0: readonly    u#,space1: readwrite    b#,space2: uniforms
+StructuredBuffer<GPUSprite> SpriteBuffer : register(t0, space0);
+StructuredBuffer<uint> IndexBuffer : register(t1, space0);
+RWStructuredBuffer<uint> SortedBuffer : register(u0, space1);
 
-cbuffer SortParams : register(b0) {
+cbuffer SortParams : register(b0, space2) {
     uint itemCount;
     uint stage;
     uint pass;

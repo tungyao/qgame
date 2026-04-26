@@ -235,10 +235,11 @@ void main() {
 
 // ── ctor/dtor ─────────────────────────────────────────────────────────────────
 
-GLRenderDevice::GLRenderDevice(SDL_Window* window)
-    : window_(window) {
+GLRenderDevice::GLRenderDevice(SDL_Window* window , bool debug)
+    : window_(window), debug_(debug) {
     batchVerts_.reserve(MAX_SPRITES_PER_BATCH * 4);
     batchIdx_.reserve(MAX_SPRITES_PER_BATCH * 6);
+    debug_ = debug;
 }
 
 GLRenderDevice::~GLRenderDevice() {

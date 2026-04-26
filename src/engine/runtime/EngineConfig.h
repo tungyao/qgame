@@ -14,6 +14,7 @@ struct EngineConfig {
     int           windowHeight  = 720;
     bool          vsync         = true;
     bool          resizable     = true;
+    bool            debug = false;
     float         targetFps     = 60.f;
     RenderBackend renderBackend = RenderBackend::SDL_GPU;
 };

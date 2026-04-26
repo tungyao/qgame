@@ -11,16 +11,24 @@ struct GPUSprite {
     uint flags;
 };
 
+// SDL_GPU compute binding convention:
+//   set=0 readonly storage (textures then buffers)
+//   set=1 readwrite storage (textures then buffers)
+//   set=2 uniform buffers
 layout(set = 0, binding = 0, std430) readonly buffer SpriteBuffer {
     GPUSprite sprites[];
 };
 
-layout(set = 0, binding = 1, std430) buffer VisibleBuffer {
+layout(set = 1, binding = 0, std430) buffer VisibleBuffer {
     uint visibleCount;
     uint visibleIndices[];
 };
 
-layout(set = 0, binding = 2) uniform CameraParams {
+layout(set = 1, binding = 1, std430) buffer CounterBuffer {
+    uint atomicCounter;
+};
+
+layout(set = 2, binding = 0) uniform CameraParams {
     float camX, camY;
     float zoom;
     float rotation;
@@ -29,10 +37,6 @@ layout(set = 0, binding = 2) uniform CameraParams {
     uint spriteCount;
     uint cullEnabled;
     uint layerMask;
-};
-
-layout(set = 0, binding = 3, std430) buffer CounterBuffer {
-    uint atomicCounter;
 };
 
 shared uint localCount;

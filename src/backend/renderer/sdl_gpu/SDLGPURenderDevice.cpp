@@ -21,8 +21,8 @@
 
 namespace backend {
 
-SDLGPURenderDevice::SDLGPURenderDevice(SDL_Window* window)
-    : window_(window) {
+SDLGPURenderDevice::SDLGPURenderDevice(SDL_Window* window,bool debug)
+    : window_(window), debug_(debug) {
     batchVerts_.reserve(MAX_SPRITES_PER_BATCH * 4);
     batchIdx_.reserve(MAX_SPRITES_PER_BATCH * 6);
 }
@@ -37,7 +37,7 @@ void SDLGPURenderDevice::init() {
     formats |= SDL_GPU_SHADERFORMAT_DXIL;
 #endif
 
-    device_ = SDL_CreateGPUDevice(formats, false, nullptr);
+    device_ = SDL_CreateGPUDevice(formats,debug_ , nullptr);
     if (!device_) {
         core::logError("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         return;
@@ -442,13 +442,35 @@ void SDLGPURenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t s
 }
 
 ComputePipelineHandle SDLGPURenderDevice::createComputePipeline(const ComputePipelineDesc& desc) {
-    if (!device_ || !desc.code || desc.codeSize == 0) {
-        return {};
+    if (!device_) return {};
+   
+         const void* blob = nullptr;
+    size_t blobSize = 0;
+ if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV && desc.spirvCode && desc.spirvSize) {
+     blob = desc.spirvCode;
+     blobSize = desc.spirvSize;
+    
     }
-
+    else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL && desc.dxilCode && desc.dxilSize) {
+     blob = desc.dxilCode;
+     blobSize = desc.dxilSize;
+  
+    }
+    else if (desc.code && desc.codeSize) {
+   blob = desc.code;
+     blobSize = desc.codeSize;
+     
+    }
+    else {
+      core::logError("createComputePipeline: no shader blob matches device format 0x%x", shaderFormat_);
+                 return {};
+       
+    }
+    core::logInfo("createComputePipeline: format=0x%x blobSize=%zu (spirv=%zu dxil=%zu)",
+     shaderFormat_, blobSize, desc.spirvSize, desc.dxilSize);
     SDL_GPUComputePipelineCreateInfo info{};
-    info.code_size = desc.codeSize;
-    info.code = static_cast<const Uint8*>(desc.code);
+    info.code_size = blobSize;
+    info.code = static_cast<const Uint8*>(blob);
     info.entrypoint = desc.entryPoint ? desc.entryPoint : "main";
     info.format = shaderFormat_;
     info.num_samplers = desc.numSamplers;

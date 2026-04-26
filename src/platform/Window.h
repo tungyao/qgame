@@ -13,6 +13,7 @@ struct WindowConfig {
     bool        vsync      = true;
     bool        resizable  = true;
     bool        openglMode = false;  // true → 设置 SDL_WINDOW_OPENGL，供 GL backend 使用
+    bool        debug   = false;
 };
 
 class Window {

@@ -10,7 +10,7 @@ namespace backend {
 // 兼容不支持 Vulkan 的老显卡（Intel HD 2000+, GeForce 400+, Radeon HD 5000+）
 class GLRenderDevice final : public IRenderDevice {
 public:
-    explicit GLRenderDevice(SDL_Window* window);
+    explicit GLRenderDevice(SDL_Window* window, bool debug = false);
     ~GLRenderDevice() override;
 
     // IBackendSystem
@@ -121,6 +121,7 @@ private:
     void destroyFbo(FboEntry& fbo, TextureHandle& colorHandle);
 
     SDL_Window*     window_    = nullptr;
+	bool		   debug_ = false;
     SDL_GLContext   glContext_ = nullptr;
 
     // Shader program

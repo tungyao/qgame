@@ -26,6 +26,18 @@ endif()
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(engine PRIVATE "${CMAKE_BINARY_DIR}/generated/shaders")
 
+set(ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_spv.h")
+if(DXC_EXE)
+    list(APPEND ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_dxil.h")
+    target_compile_definitions(engine PRIVATE QGAME_HAS_DXIL_SHADERS)
+
+
+endif()
+set_source_files_properties(
+    resources/GPUDrivenRenderer.cpp PROPERTIES
+    OBJECT_DEPENDS "${ENGINE_SHADER_DEPS}"
+)
+
 target_link_libraries(engine
     PUBLIC  core
     PUBLIC  EnTT::EnTT

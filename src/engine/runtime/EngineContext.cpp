@@ -37,6 +37,7 @@ void EngineContext::init(const EngineConfig& cfg) {
     wcfg.height     = cfg.windowHeight;
     wcfg.vsync      = cfg.vsync;
     wcfg.resizable  = cfg.resizable;
+    wcfg.debug      = cfg.debug;
     wcfg.openglMode = (cfg.renderBackend == RenderBackend::OpenGL);
     window = std::make_unique<platform::Window>(wcfg);
 
@@ -47,10 +48,10 @@ void EngineContext::init(const EngineConfig& cfg) {
     SDL_Window* sdlWin = static_cast<SDL_Window*>(window->sdlWindow());
     if (cfg.renderBackend == RenderBackend::OpenGL) {
         core::logInfo("Render backend: OpenGL 3.3");
-        renderDevice_ = std::make_unique<backend::GLRenderDevice>(sdlWin);
+        renderDevice_ = std::make_unique<backend::GLRenderDevice>(sdlWin,wcfg.debug);
     } else {
         core::logInfo("Render backend: SDL_GPU (Vulkan/Metal/D3D12)");
-        renderDevice_ = std::make_unique<backend::SDLGPURenderDevice>(sdlWin);
+        renderDevice_ = std::make_unique<backend::SDLGPURenderDevice>(sdlWin, wcfg.debug);
     }
     renderDevice_->init();
     

@@ -46,7 +46,6 @@ public:
     void init(const EngineConfig& cfg);
     void run();
     void shutdown();
-
     backend::IRenderDevice& renderDevice();
     backend::IAudioDevice& audioDevice();
     backend::CommandBuffer& renderCommandBuffer();
@@ -60,6 +59,7 @@ private:
     std::unique_ptr<backend::AudioCommandQueue> audioCmdQueue_;
 
     bool running_ = false;
+    bool debug = false;
 };
 
 } // namespace engine

@@ -13,7 +13,7 @@ namespace backend {
 // 支持 Vulkan（Linux/Windows）/ Metal（macOS/iOS）/ D3D12（Windows）
 class SDLGPURenderDevice final : public IRenderDevice {
 public:
-    explicit SDLGPURenderDevice(SDL_Window* window);
+    explicit SDLGPURenderDevice(SDL_Window* window, bool debug = false);
     ~SDLGPURenderDevice() override;
 
     // IBackendSystem
@@ -116,12 +116,13 @@ private:
 
     // ── 成员 ──────────────────────────────────────────────────────────────────
     SDL_Window*              window_             = nullptr;
+    bool                     debug_              = false;
     SDL_GPUDevice*           device_             = nullptr;
     SDL_GPUGraphicsPipeline* pipeline_           = nullptr;
     SDL_GPUGraphicsPipeline* offscreenPipeline_  = nullptr;
     SDL_GPUGraphicsPipeline* msdfPipeline_       = nullptr;
     SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
-    SDL_GPUShaderFormat      shaderFormat_       = SDL_GPU_SHADERFORMAT_INVALID;
+    SDL_GPUShaderFormat      shaderFormat_       = SDL_GPU_SHADERFORMAT_DXIL;
 
     // 每帧动态顶点/索引缓冲（CPU→GPU transfer）
     SDL_GPUBuffer*           vertexBuf_ = nullptr;

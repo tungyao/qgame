@@ -1,12 +1,17 @@
 #include "GPUDrivenRenderer.h"
 #include "../../core/Logger.h"
+#include "sprite_culling_spv.h"
+#ifdef QGAME_HAS_DXIL_SHADERS
+#include "sprite_culling_dxil.h"
+#endif
+
 #include <cstring>
 #include <cmath>
 
 namespace engine {
 
 namespace {
-    const char* cullingShaderGLSL = R"GLSL(
+    [[maybe_unused]] const char* cullingShaderGLSL_reference = R"GLSL(
 #version 450
 layout(local_size_x = 64) in;
 
@@ -109,8 +114,14 @@ void GPUDrivenRenderer::init(backend::IRenderDevice* device) {
 
 void GPUDrivenRenderer::createPipelines() {
     backend::ComputePipelineDesc desc{};
-    desc.code = cullingShaderGLSL;
-    desc.codeSize = strlen(cullingShaderGLSL);
+
+    desc.spirvCode = sprite_culling_spv;
+    desc.spirvSize = sprite_culling_spv_size;
+    #ifdef QGAME_HAS_DXIL_SHADERS
+        desc.dxilCode = sprite_culling_dxil;
+        desc.dxilSize = sprite_culling_dxil_size;
+    #endif
+
     desc.entryPoint = "main";
     desc.threadCountX = CULLING_WORKGROUP_SIZE;
     desc.threadCountY = 1;
