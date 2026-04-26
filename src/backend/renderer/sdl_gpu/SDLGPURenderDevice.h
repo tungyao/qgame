@@ -89,6 +89,8 @@ private:
     void createPipeline();
     SDL_GPUGraphicsPipeline* createPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);
+    SDL_GPUGraphicsPipeline* createGPUDrivenPipelineForFormat(SDL_GPUTextureFormat format);
+    void                     createGPUDrivenIndexBuffer();
     SDL_GPUShader* loadShader(const uint8_t* code, size_t size,
                               SDL_GPUShaderStage stage,
                               int numSamplers, int numUniformBuffers,
@@ -122,6 +124,8 @@ private:
     SDL_GPUGraphicsPipeline* offscreenPipeline_  = nullptr;
     SDL_GPUGraphicsPipeline* msdfPipeline_       = nullptr;
     SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* gpuDrivenPipeline_  = nullptr;
+    SDL_GPUBuffer*           gpuDrivenQuadIndexBuf_ = nullptr;
     SDL_GPUShaderFormat      shaderFormat_       = SDL_GPU_SHADERFORMAT_DXIL;
 
     // 每帧动态顶点/索引缓冲（CPU→GPU transfer）

@@ -363,14 +363,23 @@ int main(int argc, char* argv[]) {
 	
 	while (ctx.scheduler.tick()) {
 		float dt = ctx.scheduler.deltaTime();
-		auto& tf = api.getComponent<engine::Transform>(player);
 		auto& anim = api.getComponent<engine::AnimatorComponent>(player);
 
-		bool isMoving = false;
-		if (api.isKeyDown(SDLK_W) || api.isKeyDown(SDLK_UP)) { tf.y -= kSpeed * dt; isMoving = true; }
-		if (api.isKeyDown(SDLK_S) || api.isKeyDown(SDLK_DOWN)) { tf.y += kSpeed * dt; isMoving = true; }
-		if (api.isKeyDown(SDLK_A) || api.isKeyDown(SDLK_LEFT)) { tf.x -= kSpeed * dt; isMoving = true; }
-		if (api.isKeyDown(SDLK_D) || api.isKeyDown(SDLK_RIGHT)) { tf.x += kSpeed * dt; isMoving = true; }
+		float dx = 0.f, dy = 0.f;
+		if (api.isKeyDown(SDLK_W) || api.isKeyDown(SDLK_UP))    dy -= 1.f;
+		if (api.isKeyDown(SDLK_S) || api.isKeyDown(SDLK_DOWN))  dy += 1.f;
+		if (api.isKeyDown(SDLK_A) || api.isKeyDown(SDLK_LEFT))  dx -= 1.f;
+		if (api.isKeyDown(SDLK_D) || api.isKeyDown(SDLK_RIGHT)) dx += 1.f;
+		const bool isMoving = (dx != 0.f || dy != 0.f);
+
+		// 只有真正移动时才 patch —— 触发 on_update 让 RenderSystem 把新位置回写 GPU；
+		// 直接通过 get<>() 的引用赋值不会触发信号，GPU 缓冲会停留在旧位置。
+		if (isMoving) {
+			api.patchComponent<engine::Transform>(player, [&](engine::Transform& tf) {
+				tf.x += dx * kSpeed * dt;
+				tf.y += dy * kSpeed * dt;
+			});
+		}
 
 		if (isMoving) {
 			if (!anim.playing) anim.play(playerAnim);

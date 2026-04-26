@@ -20,12 +20,12 @@ compile_shader_spirv(
     "${SHADER_FALLBACK}/msdf_frag_spv.h"
 )
 compile_shader_spirv(
-    "${SHADER_SRC}/sprite_culling.comp"  comp
+    "${SHADER_SRC}/sprite_culling.comp.glsl"  comp
     "${SHADER_GEN}/sprite_culling_spv.h" sprite_culling_spv
     "${SHADER_FALLBACK}/sprite_culling_spv.h"
 )
 compile_shader_spirv(
-    "${SHADER_SRC}/sprite_sort.comp"  comp
+    "${SHADER_SRC}/sprite_sort.comp.glsl"  comp
     "${SHADER_GEN}/sprite_sort_spv.h" sprite_sort_spv
     "${SHADER_FALLBACK}/sprite_sort_spv.h"
 )

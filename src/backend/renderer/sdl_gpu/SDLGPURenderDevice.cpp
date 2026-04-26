@@ -13,6 +13,8 @@
 #include "sprite_vert_spv.h"
 #include "sprite_frag_spv.h"
 #include "msdf_frag_spv.h"
+#include "sprite_gpu_vert_spv.h"
+#include "sprite_gpu_frag_spv.h"
 #ifdef QGAME_HAS_DXIL_SHADERS
 #include "sprite_vert_dxil.h"
 #include "sprite_frag_dxil.h"
@@ -136,6 +138,8 @@ void SDLGPURenderDevice::shutdown() {
     if (offscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, offscreenPipeline_); offscreenPipeline_ = nullptr; }
     if (msdfPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfPipeline_); msdfPipeline_ = nullptr; }
     if (msdfOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfOffscreenPipeline_); msdfOffscreenPipeline_ = nullptr; }
+    if (gpuDrivenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenPipeline_); gpuDrivenPipeline_ = nullptr; }
+    if (gpuDrivenQuadIndexBuf_) { SDL_ReleaseGPUBuffer(device_, gpuDrivenQuadIndexBuf_); gpuDrivenQuadIndexBuf_ = nullptr; }
     if (vertexBuf_) { SDL_ReleaseGPUBuffer(device_, vertexBuf_); vertexBuf_ = nullptr; }
     if (indexBuf_) { SDL_ReleaseGPUBuffer(device_, indexBuf_); indexBuf_ = nullptr; }
     if (transferBuf_) { SDL_ReleaseGPUTransferBuffer(device_, transferBuf_); transferBuf_ = nullptr; }
@@ -305,7 +309,9 @@ BufferHandle SDLGPURenderDevice::createBuffer(const BufferDesc& desc) {
         gpuUsage |= SDL_GPU_BUFFERUSAGE_INDEX;
     }
     if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
-        gpuUsage |= SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ;
+        gpuUsage |= SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE
+                  | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ
+                  | SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
     }
     if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Indirect)) {
         gpuUsage |= SDL_GPU_BUFFERUSAGE_INDIRECT;
@@ -1010,7 +1016,19 @@ void SDLGPURenderDevice::createPipeline() {
     msdfOffscreenPipeline_ = createMSDFPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
     ASSERT_MSG(msdfOffscreenPipeline_, "Failed to create MSDF offscreen pipeline");
 
-    core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8)", static_cast<int>(swapchainFormat));
+    // GPU-driven 通路目前只在 SPIRV 后端有预编译 shader（DXIL 暂未提供）
+    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+        gpuDrivenPipeline_ = createGPUDrivenPipelineForFormat(swapchainFormat);
+        if (!gpuDrivenPipeline_) {
+            core::logError("createPipeline: failed to create GPU-driven pipeline");
+        } else {
+            createGPUDrivenIndexBuffer();
+        }
+    }
+
+    core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8, gpuDriven: %s)",
+                  static_cast<int>(swapchainFormat),
+                  gpuDrivenPipeline_ ? "yes" : "no");
 }
 
 SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUTextureFormat format) {
@@ -1291,45 +1309,189 @@ void SDLGPURenderDevice::buildOrthoMatrixCamera(float w, float h,
     }
 }
 
+SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createGPUDrivenPipelineForFormat(SDL_GPUTextureFormat format) {
+    // GPU-driven 顶点着色器通过 storage buffer 读取 sprite/index 数据，
+    // 因此既不需要 vertex buffer，也不需要 vertex attribute。
+    SDL_GPUShaderCreateInfo vsInfo{};
+    vsInfo.code      = sprite_gpu_vert_spv;
+    vsInfo.code_size = sprite_gpu_vert_spv_size;
+    vsInfo.entrypoint = "main";
+    vsInfo.format    = SDL_GPU_SHADERFORMAT_SPIRV;
+    vsInfo.stage     = SDL_GPU_SHADERSTAGE_VERTEX;
+    vsInfo.num_samplers         = 0;
+    vsInfo.num_storage_buffers  = 2;   // set=0,b=0: spriteBuffer; set=0,b=1: visibleIndices
+    vsInfo.num_storage_textures = 0;
+    vsInfo.num_uniform_buffers  = 1;   // set=1,b=0: viewProj
+    SDL_GPUShader* vs = SDL_CreateGPUShader(device_, &vsInfo);
+
+    SDL_GPUShaderCreateInfo fsInfo{};
+    fsInfo.code      = sprite_gpu_frag_spv;
+    fsInfo.code_size = sprite_gpu_frag_spv_size;
+    fsInfo.entrypoint = "main";
+    fsInfo.format    = SDL_GPU_SHADERFORMAT_SPIRV;
+    fsInfo.stage     = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    fsInfo.num_samplers        = 1;
+    fsInfo.num_storage_buffers = 0;
+    fsInfo.num_uniform_buffers = 0;
+    SDL_GPUShader* fs = SDL_CreateGPUShader(device_, &fsInfo);
+
+    if (!vs || !fs) {
+        core::logError("createGPUDrivenPipelineForFormat: shader compile failed: %s", SDL_GetError());
+        if (vs) SDL_ReleaseGPUShader(device_, vs);
+        if (fs) SDL_ReleaseGPUShader(device_, fs);
+        return nullptr;
+    }
+
+    SDL_GPUColorTargetDescription colorTarget{};
+    colorTarget.format = format;
+    colorTarget.blend_state.enable_blend          = true;
+    colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    colorTarget.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    colorTarget.blend_state.color_blend_op        = SDL_GPU_BLENDOP_ADD;
+    colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    colorTarget.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    colorTarget.blend_state.alpha_blend_op        = SDL_GPU_BLENDOP_ADD;
+
+    SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+    pipeInfo.vertex_shader   = vs;
+    pipeInfo.fragment_shader = fs;
+    pipeInfo.vertex_input_state.num_vertex_buffers    = 0;
+    pipeInfo.vertex_input_state.num_vertex_attributes = 0;
+    pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    pipeInfo.target_info.color_target_descriptions = &colorTarget;
+    pipeInfo.target_info.num_color_targets         = 1;
+
+    SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
+    SDL_ReleaseGPUShader(device_, vs);
+    SDL_ReleaseGPUShader(device_, fs);
+    return pipeline;
+}
+
+void SDLGPURenderDevice::createGPUDrivenIndexBuffer() {
+    // 6 个索引、复用 4 个 quad 顶点 (vertIdx = gl_VertexIndex & 3)
+    static const uint16_t quadIdx[6] = { 0, 1, 2, 0, 2, 3 };
+    SDL_GPUBufferCreateInfo bufInfo{};
+    bufInfo.usage = SDL_GPU_BUFFERUSAGE_INDEX;
+    bufInfo.size  = sizeof(quadIdx);
+    gpuDrivenQuadIndexBuf_ = SDL_CreateGPUBuffer(device_, &bufInfo);
+    if (!gpuDrivenQuadIndexBuf_) {
+        core::logError("createGPUDrivenIndexBuffer: SDL_CreateGPUBuffer failed: %s", SDL_GetError());
+        return;
+    }
+
+    SDL_GPUTransferBufferCreateInfo tbInfo{};
+    tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    tbInfo.size  = sizeof(quadIdx);
+    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tbInfo);
+    void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
+    memcpy(mapped, quadIdx, sizeof(quadIdx));
+    SDL_UnmapGPUTransferBuffer(device_, tb);
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation src{ tb, 0 };
+    SDL_GPUBufferRegion           dst{ gpuDrivenQuadIndexBuf_, 0, sizeof(quadIdx) };
+    SDL_UploadToGPUBuffer(copy, &src, &dst, false);
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(device_, tb);
+}
+
 void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
                                              const GPURenderParams& params) {
     if (!gpuCmdBuf_ || !swapchainTex_) return;
-    
+
     CameraData cam = info.camera;
     if (cam.viewportW == 0) cam.viewportW = static_cast<int>(swapW_);
     if (cam.viewportH == 0) cam.viewportH = static_cast<int>(swapH_);
-    
-    if (params.visibleCount == 0) {
-        if (info.clearEnabled) {
-            SDL_GPUColorTargetInfo colorTarget{};
-            colorTarget.texture = swapchainTex_;
-            colorTarget.clear_color = SDL_FColor{
-                info.clearColor.r / 255.f,
-                info.clearColor.g / 255.f,
-                info.clearColor.b / 255.f,
-                info.clearColor.a / 255.f
-            };
-            colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
-            colorTarget.store_op = SDL_GPU_STOREOP_STORE;
-            
-            SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
-            SDL_EndGPURenderPass(pass);
-        }
+
+    auto beginAndEndEmpty = [&]() {
+        if (!info.clearEnabled) return;
+        SDL_GPUColorTargetInfo colorTarget{};
+        colorTarget.texture     = swapchainTex_;
+        colorTarget.load_op     = SDL_GPU_LOADOP_CLEAR;
+        colorTarget.store_op    = SDL_GPU_STOREOP_STORE;
+        colorTarget.clear_color = SDL_FColor{
+            info.clearColor.r / 255.f, info.clearColor.g / 255.f,
+            info.clearColor.b / 255.f, info.clearColor.a / 255.f
+        };
+        SDL_GPURenderPass* p = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
+        SDL_EndGPURenderPass(p);
+    };
+
+    // 没有可见 sprite 时只处理清屏，其他 pass 会接力补画。
+    if (params.visibleCount == 0) { beginAndEndEmpty(); return; }
+
+    if (!gpuDrivenPipeline_ || !gpuDrivenQuadIndexBuf_) {
+        core::logError("submitGPUDrivenPass: GPU-driven pipeline not ready");
+        beginAndEndEmpty();
         return;
     }
-    
+
     if (!buffers_.valid(params.spriteBuffer) || !buffers_.valid(params.visibleIndexBuffer)) {
+        beginAndEndEmpty();
         return;
     }
-    
-    BufferEntry& indexBuf = buffers_.get(params.visibleIndexBuffer);
-    
-    std::vector<uint32_t> visibleIndices(params.visibleCount);
-    downloadFromBuffer(params.visibleIndexBuffer, visibleIndices.data(), 
-                        params.visibleCount * sizeof(uint32_t), 0);
-    
-    std::vector<const RenderCmd*> fallbackCmds;
-    submitPass(info, fallbackCmds);
+    if (params.batches.empty()) { beginAndEndEmpty(); return; }
+
+    BufferEntry& spriteBuf  = buffers_.get(params.spriteBuffer);
+    BufferEntry& visibleBuf = buffers_.get(params.visibleIndexBuffer);
+
+    // viewProj，列主序 = view * proj（与现有 renderCmdsToTarget 同步）
+    float proj[16], view[16], viewProj[16];
+    const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+    buildOrthoProjectionMatrix(static_cast<float>(cam.viewportW),
+                               static_cast<float>(cam.viewportH), proj);
+    buildViewMatrix(cam.x, cam.y, zoom, cam.rotation, view);
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            viewProj[i * 4 + j] = 0.f;
+            for (int k = 0; k < 4; ++k)
+                viewProj[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
+        }
+
+    SDL_GPUColorTargetInfo colorTarget{};
+    colorTarget.texture     = swapchainTex_;
+    colorTarget.load_op     = info.clearEnabled ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+    colorTarget.store_op    = SDL_GPU_STOREOP_STORE;
+    colorTarget.clear_color = SDL_FColor{
+        info.clearColor.r / 255.f, info.clearColor.g / 255.f,
+        info.clearColor.b / 255.f, info.clearColor.a / 255.f
+    };
+
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
+    if (!pass) {
+        core::logError("submitGPUDrivenPass: SDL_BeginGPURenderPass failed: %s", SDL_GetError());
+        return;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, gpuDrivenPipeline_);
+
+    SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, viewProj, sizeof(viewProj));
+
+    SDL_GPUBuffer* vsStorage[2] = { spriteBuf.gpuBuffer, visibleBuf.gpuBuffer };
+    SDL_BindGPUVertexStorageBuffers(pass, 0, vsStorage, 2);
+
+    SDL_GPUBufferBinding idxBinding{ gpuDrivenQuadIndexBuf_, 0 };
+    SDL_BindGPUIndexBuffer(pass, &idxBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+    TextureHandle currentTex{};
+    for (const GPUDrawBatch& batch : params.batches) {
+        if (batch.instanceCount == 0) continue;
+        if (!textures_.valid(batch.texture)) continue;
+
+        if (!(batch.texture == currentTex)) {
+            const TextureEntry& te = textures_.get(batch.texture);
+            SDL_GPUTextureSamplerBinding tb{ te.gpuTex, te.sampler };
+            SDL_BindGPUFragmentSamplers(pass, 0, &tb, 1);
+            currentTex = batch.texture;
+        }
+
+        SDL_DrawGPUIndexedPrimitives(pass, 6, batch.instanceCount, 0, 0, batch.firstInstance);
+    }
+
+    SDL_EndGPURenderPass(pass);
 }
 
 } // namespace backend

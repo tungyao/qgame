@@ -35,7 +35,7 @@ public:
 
         generations_.resize(capacity_, 0);
         slots_.resize(capacity_);
-        dirty_.resize(capacity_, false);
+        dirty_.resize(capacity_, 0);
         freeList_.reserve(capacity_);
 
         for (uint32_t i = capacity_; i > 0; --i) {
@@ -91,12 +91,14 @@ public:
 
     void markDirty(GPUHandle handle) {
         if (validate(handle)) {
-            dirty_[handle.index] = true;
+            // 同一份修改要广播到所有 frame buffer，下次每个 buffer 第一次轮到时才会被刷写
+            dirty_[handle.index] = static_cast<uint8_t>((1u << FRAME_COUNT) - 1u);
         }
     }
 
     void markAllDirty() {
-        std::fill(dirty_.begin(), dirty_.end(), true);
+        std::fill(dirty_.begin(), dirty_.end(),
+                  static_cast<uint8_t>((1u << FRAME_COUNT) - 1u));
     }
 
     uint32_t activeCount() const { return activeCount_; }
@@ -111,11 +113,12 @@ public:
     }
 
     void uploadDirty() {
+        const uint8_t bit = static_cast<uint8_t>(1u << frameIndex_);
         std::vector<UpdateRange> updates;
         updates.reserve(64);
 
         for (uint32_t i = 0; i < capacity_; ++i) {
-            if (!dirty_[i] || generations_[i] == 0) continue;
+            if ((dirty_[i] & bit) == 0 || generations_[i] == 0) continue;
 
             UpdateRange range;
             range.offset = i * sizeof(GPUSprite);
@@ -124,7 +127,7 @@ public:
             std::memcpy(range.data.data(), &slots_[i], sizeof(GPUSprite));
             updates.push_back(std::move(range));
 
-            dirty_[i] = false;
+            dirty_[i] &= static_cast<uint8_t>(~bit);
         }
 
         if (updates.empty()) return;
@@ -152,8 +155,9 @@ public:
     }
 
     uint32_t dirtyCount() const {
+        const uint8_t bit = static_cast<uint8_t>(1u << frameIndex_);
         uint32_t count = 0;
-        for (bool d : dirty_) if (d) count++;
+        for (uint8_t d : dirty_) if (d & bit) count++;
         return count;
     }
 
@@ -161,7 +165,7 @@ private:
     void grow(uint32_t newCapacity) {
         std::vector<uint32_t> newGenerations(newCapacity, 0);
         std::vector<GPUSprite> newSlots(newCapacity);
-        std::vector<bool> newDirty(newCapacity, false);
+        std::vector<uint8_t> newDirty(newCapacity, 0);
 
         for (uint32_t i = 0; i < capacity_; ++i) {
             newGenerations[i] = generations_[i];
@@ -187,7 +191,8 @@ private:
             buffers_[i] = device_->createBuffer(desc);
         }
 
-        std::fill(dirty_.begin(), dirty_.end(), true);
+        std::fill(dirty_.begin(), dirty_.end(),
+                  static_cast<uint8_t>((1u << FRAME_COUNT) - 1u));
     }
 
     void coalesceAndUpload(std::vector<UpdateRange>& ranges) {
@@ -234,7 +239,7 @@ private:
     std::vector<uint32_t> freeList_;
     std::vector<uint32_t> generations_;
     std::vector<GPUSprite> slots_;
-    std::vector<bool> dirty_;
+    std::vector<uint8_t> dirty_;
 
     uint32_t capacity_ = 0;
     uint32_t activeCount_ = 0;

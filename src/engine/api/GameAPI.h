@@ -27,6 +27,12 @@ public:
     template<typename T>
     bool hasComponent(entt::entity e) const;
 
+    // 通过函数对象修改组件，结束后触发 EnTT on_update<T> 信号。
+    // 与 getComponent 的引用赋值不同，这条路径会让 RenderSystem 等监听者得到通知，
+    // 用来改 Transform/Sprite 等"被订阅"的组件时必须走这里。
+    template<typename T, typename Fn>
+    void patchComponent(entt::entity e, Fn&& fn);
+
     // ── Audio（Month 4 实现）──────────────────────────────────────────────
     SoundHandle loadSound(const char* assetPath);
     void        playSound(SoundHandle h, float vol = 1.f);
@@ -94,6 +100,11 @@ T& GameAPI::getComponent(entt::entity e) {
 template<typename T>
 bool GameAPI::hasComponent(entt::entity e) const {
     return ctx_.world.template all_of<T>(e);
+}
+
+template<typename T, typename Fn>
+void GameAPI::patchComponent(entt::entity e, Fn&& fn) {
+    ctx_.world.template patch<T>(e, std::forward<Fn>(fn));
 }
 
 template<typename Listener>

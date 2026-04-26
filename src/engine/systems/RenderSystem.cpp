@@ -127,8 +127,18 @@ void RenderSystem::update(float /*dt*/) {
     spriteBuffer_.uploadDirty();
     
     if (gpuDrivenEnabled_ && gpuRenderer_.isInitialized() && gpuRenderer_.hasCullingPipeline()) {
+        static bool logged = false;
+        if (!logged) { core::logInfo("[GPU-driven] using GPU-driven path"); logged = true; }
         buildCommandBufferGPUDriven();
     } else {
+        if (gpuDrivenEnabled_) {
+            static bool warned = false;
+            if (!warned) {
+                core::logError("[GPU-driven] enabled but falling back: initialized=%d hasCulling=%d",
+                               gpuRenderer_.isInitialized(), gpuRenderer_.hasCullingPipeline());
+                warned = true;
+            }
+        }
         buildCommandBuffer();
     }
 }
@@ -191,16 +201,15 @@ void RenderSystem::updateGPUSlot(const Transform& tf, const Sprite& spr) {
 
     int tw = 1, th = 1;
     ctx_.renderDevice().getTextureDimensions(spr.texture, tw, th);
-
     slot->uv[0] = spr.srcRect.x / static_cast<float>(tw);
     slot->uv[1] = spr.srcRect.y / static_cast<float>(th);
     slot->uv[2] = (spr.srcRect.x + spr.srcRect.w) / static_cast<float>(tw);
     slot->uv[3] = (spr.srcRect.y + spr.srcRect.h) / static_cast<float>(th);
 
     slot->textureIndex = spr.texture.index;
-    slot->layer = static_cast<uint32_t>(spr.layer);
-    slot->sortKey = spr.sortOrder;
-    slot->flags = (spr.ySort ? 1 : 0) | (static_cast<uint32_t>(spr.pass) << 1);
+    slot->layer        = static_cast<uint32_t>(spr.layer);
+    slot->sortKey      = spr.sortOrder;
+    slot->flags        = (spr.ySort ? 1u : 0u) | (static_cast<uint32_t>(spr.pass) << 1);
 
     spriteBuffer_.markDirty(spr.gpuHandle);
 }
@@ -440,12 +449,23 @@ void RenderSystem::buildCommandBufferGPUDriven() {
     }
 
     uint32_t spriteCount = spriteBuffer_.activeCount();
-    
+    auto spriteView = ctx_.world.view<Transform, Sprite>();
+
+    struct Visible {
+        uint32_t      gpuIndex;
+        TextureHandle texture;
+        int           layer;
+        bool          ySort;
+        float         y;
+        int           sortKey;
+        int           seq;
+    };
+
     for (size_t i = 0; i < cameras.size(); ++i) {
         const Transform& tf = *cameras[i].tf;
         const Camera&    cam = *cameras[i].cam;
-        
-        const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+
+        const float zoom  = (cam.zoom > 0.f) ? cam.zoom : 1.f;
         const float halfW = (w * 0.5f) / zoom;
         const float halfH = (h * 0.5f) / zoom;
         float rx = halfW, ry = halfH;
@@ -455,57 +475,90 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             rx = halfW * c + halfH * s;
             ry = halfW * s + halfH * c;
         }
-        
-        float viewMinX = tf.x - rx;
-        float viewMinY = tf.y - ry;
-        float viewMaxX = tf.x + rx;
-        float viewMaxY = tf.y + ry;
-        
-        std::vector<uint32_t> visibleIndices;
-        visibleIndices.reserve(spriteCount);
-        
-        for (uint32_t idx = 0; idx < spriteCount; ++idx) {
-            const GPUSprite* sprite = spriteBuffer_.getSlot(GPUHandle{idx, 0});
-            if (!sprite) continue;
-            
-            uint32_t passBits = (sprite->flags >> 1) & 0x7;
+        const float viewMinX = tf.x - rx;
+        const float viewMinY = tf.y - ry;
+        const float viewMaxX = tf.x + rx;
+        const float viewMaxY = tf.y + ry;
+
+        std::vector<Visible> visibles;
+        visibles.reserve(spriteCount);
+        int seq = 0;
+
+        for (auto [ent, eTf, spr] : spriteView.each()) {
+            if (!spr.gpuHandle.valid()) continue;
+            const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
+            if (!slot) continue;
+
+            const uint32_t passBits = (slot->flags >> 1) & 0x7;
             if ((cam.layerMask & (1u << passBits)) == 0) continue;
-            
+
             if (cam.cullEnabled) {
-                float tx = sprite->transform[3];
-                float ty = sprite->transform[7];
-                float hw = fabsf(sprite->transform[0]) * 0.5f;
-                float hh = fabsf(sprite->transform[5]) * 0.5f;
-                
+                const float tx = slot->transform[3];
+                const float ty = slot->transform[7];
+                const float hw = fabsf(slot->transform[0]) * 0.5f;
+                const float hh = fabsf(slot->transform[5]) * 0.5f;
                 if (tx + hw < viewMinX || tx - hw > viewMaxX ||
                     ty + hh < viewMinY || ty - hh > viewMaxY) {
                     continue;
                 }
             }
-            
-            visibleIndices.push_back(idx);
+
+            visibles.push_back(Visible{
+                spr.gpuHandle.index, spr.texture,
+                spr.layer, spr.ySort, eTf.y, spr.sortOrder, seq++
+            });
         }
-        
-        uint32_t visibleCount = static_cast<uint32_t>(visibleIndices.size());
-        
+
+        // 与 CPU 路径 drawableLess 保持一致：layer → ySort → y → sortKey → texture(同 key 内分组减少切换) → seq。
+        std::sort(visibles.begin(), visibles.end(),
+                  [](const Visible& A, const Visible& B) {
+                      if (A.layer != B.layer) return A.layer < B.layer;
+                      if (A.ySort != B.ySort) return !A.ySort;
+                      if (A.ySort) {
+                          int ay = static_cast<int>(A.y);
+                          int by = static_cast<int>(B.y);
+                          if (ay != by) return ay < by;
+                      }
+                      if (A.sortKey != B.sortKey) return A.sortKey < B.sortKey;
+                      if (A.texture.index != B.texture.index)
+                          return A.texture.index < B.texture.index;
+                      return A.seq < B.seq;
+                  });
+
+        const uint32_t visibleCount = static_cast<uint32_t>(visibles.size());
+        std::vector<uint32_t> visibleIndices(visibleCount);
+        std::vector<backend::IRenderDevice::GPUDrawBatch> batches;
+        batches.reserve(8);
+
+        for (uint32_t k = 0; k < visibleCount; ++k) {
+            visibleIndices[k] = visibles[k].gpuIndex;
+            const TextureHandle tex = visibles[k].texture;
+            if (batches.empty() || !(batches.back().texture == tex)) {
+                batches.push_back({ tex, k, 1 });
+            } else {
+                batches.back().instanceCount++;
+            }
+        }
+
         if (visibleCount > 0) {
             BufferHandle visibleBuf = gpuRenderer_.getVisibleIndexBuffer();
             if (visibleBuf.valid()) {
-                dev.uploadToBuffer(visibleBuf, visibleIndices.data(), 
+                dev.uploadToBuffer(visibleBuf, visibleIndices.data(),
                                    visibleCount * sizeof(uint32_t), 0);
             }
         }
-        
+
         backend::IRenderDevice::PassSubmitInfo info;
         info.camera       = toBackendCamera(tf, cam, w, h);
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
-        
+
         backend::IRenderDevice::GPURenderParams params;
-        params.spriteBuffer = spriteBuffer_.currentBuffer();
+        params.spriteBuffer       = spriteBuffer_.currentBuffer();
         params.visibleIndexBuffer = gpuRenderer_.getVisibleIndexBuffer();
-        params.spriteCount = spriteCount;
-        params.visibleCount = visibleCount;
+        params.spriteCount        = spriteCount;
+        params.visibleCount       = visibleCount;
+        params.batches            = std::move(batches);
         dev.submitGPUDrivenPass(info, params);
     }
 }

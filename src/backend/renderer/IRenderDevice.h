@@ -110,11 +110,19 @@ public:
     virtual void* getRawTexture(TextureHandle) const = 0;
     virtual bool getTextureDimensions(TextureHandle, int& outW, int& outH) const = 0;
     
+    // 一段连续的可见 sprite，绑定同一张纹理。firstInstance 是 visibleIndexBuffer 中的偏移。
+    struct GPUDrawBatch {
+        TextureHandle texture;
+        uint32_t      firstInstance = 0;
+        uint32_t      instanceCount = 0;
+    };
+
     struct GPURenderParams {
         BufferHandle spriteBuffer;
         BufferHandle visibleIndexBuffer;
-        uint32_t spriteCount;
-        uint32_t visibleCount;
+        uint32_t     spriteCount  = 0;
+        uint32_t     visibleCount = 0;
+        std::vector<GPUDrawBatch> batches;
         CameraData camera;
         bool clearEnabled = true;
         core::Color clearColor = core::Color::Black;

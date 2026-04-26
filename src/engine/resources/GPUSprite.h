@@ -5,7 +5,7 @@
 namespace engine {
 
 struct GPUHandle {
-    uint32_t index = 0;
+    uint32_t index = 0xFFFFFFFF;
     uint32_t generation = 0;
 
     bool valid() const { return index != 0xFFFFFFFF; }
