@@ -482,6 +482,70 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         int           seq;
     };
 
+    // ========== 预先收集文字和瓦片命令 (CPU 路径) ==========
+    // GPU-driven 模式下，精灵用 GPU 路径，文字/瓦片用传统 CPU 路径
+    static std::vector<Drawable> nonSpriteDrawables;
+    nonSpriteDrawables.clear();
+    int seq = 0;
+
+    // 收集 TileMap
+    auto tileView = ctx_.world.view<Transform, TileMap>();
+    for (auto [ent, tf, tmap] : tileView.each()) {
+        if (tmap.tileSize <= 0) continue;
+        for (int layer = 0; layer < TileMap::MAX_LAYERS; ++layer) {
+            for (int y = 0; y < tmap.height; ++y) {
+                for (int x = 0; x < tmap.width; ++x) {
+                    int tileId = tmap.tileAt(layer, x, y);
+                    if (tileId < 0) continue;
+                    Drawable d{};
+                    d.pass    = RenderPass::World;
+                    d.layer   = layer;
+                    d.ySort   = true;
+                    d.y       = tf.y + static_cast<float>(y * tmap.tileSize);
+                    d.sortKey = 0;
+                    d.seq     = seq++;
+                    d.kind    = DrawKind::Tile;
+                    d.tile.tileset  = tmap.tileset;
+                    d.tile.tileId   = tileId;
+                    d.tile.gridX    = static_cast<int>(tf.x) + x;
+                    d.tile.gridY    = static_cast<int>(tf.y) + y;
+                    d.tile.tileSize = tmap.tileSize;
+                    d.tile.layer    = layer;
+                    d.tile.sortKey  = 0;
+                    d.tile.ySort    = true;
+                    d.tile.pass     = RenderPass::World;
+                    nonSpriteDrawables.push_back(d);
+                }
+            }
+        }
+    }
+
+    // 收集 Text
+    auto textView = ctx_.world.view<Transform, TextComponent>();
+    for (auto [ent, tf, text] : textView.each()) {
+        if (!text.visible || text.text.empty()) continue;
+        Drawable d{};
+        d.pass    = text.pass;
+        d.layer   = text.layer;
+        d.ySort   = text.ySort;
+        d.y       = tf.y;
+        d.sortKey = text.sortOrder;
+        d.seq     = seq++;
+        d.kind    = DrawKind::Text;
+        auto& t = d.text;
+        t.font     = text.font;
+        t.text     = text.text;
+        t.x        = tf.x;
+        t.y        = tf.y;
+        t.fontSize = text.fontSize;
+        t.layer    = text.layer;
+        t.sortKey  = text.sortOrder;
+        t.ySort    = text.ySort;
+        t.color    = text.color;
+        t.pass     = text.pass;
+        nonSpriteDrawables.push_back(d);
+    }
+
     for (size_t i = 0; i < cameras.size(); ++i) {
         const Transform& tf = *cameras[i].tf;
         const Camera&    cam = *cameras[i].cam;
@@ -503,8 +567,9 @@ void RenderSystem::buildCommandBufferGPUDriven() {
 
         std::vector<Visible> visibles;
         visibles.reserve(spriteCount);
-        int seq = 0;
+        int spriteSeq = 0;
 
+        // ========== 收集 Sprite (GPU 路径) ==========
         for (auto [ent, eTf, spr] : spriteView.each()) {
             if (!spr.gpuHandle.valid()) continue;
             const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
@@ -526,11 +591,11 @@ void RenderSystem::buildCommandBufferGPUDriven() {
 
             visibles.push_back(Visible{
                 spr.gpuHandle.index, spr.texture,
-                spr.layer, spr.ySort, eTf.y, spr.sortOrder, seq++
+                spr.layer, spr.ySort, eTf.y, spr.sortOrder, spriteSeq++
             });
         }
 
-        // 与 CPU 路径 drawableLess 保持一致：layer → ySort → y → sortKey → texture(同 key 内分组减少切换) → seq。
+        // 排序 Sprite
         std::sort(visibles.begin(), visibles.end(),
                   [](const Visible& A, const Visible& B) {
                       if (A.layer != B.layer) return A.layer < B.layer;
@@ -574,13 +639,75 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
 
+        // ========== Step 1: GPU 渲染 Sprite ==========
         backend::IRenderDevice::GPURenderParams params;
         params.spriteBuffer       = spriteBuffer_.currentBuffer();
         params.visibleIndexBuffer = gpuRenderer_.getVisibleIndexBuffer();
         params.spriteCount        = spriteCount;
         params.visibleCount       = visibleCount;
         params.batches            = std::move(batches);
+        params.camera             = info.camera;
+        params.clearEnabled       = false;  // 只在第一次清除
+        params.clearColor         = info.clearColor;
+        
+        // 第一个相机清除，后续不清除
+        if (i == 0) {
+            params.clearEnabled = info.clearEnabled;
+        }
+        
         dev.submitGPUDrivenPass(info, params);
+
+        // ========== Step 2: CPU 渲染 Text 和 Tile (叠加在 Sprite 之上) ==========
+        if (!nonSpriteDrawables.empty()) {
+            // 存储实际的 RenderCmd 对象
+            static std::vector<backend::RenderCmd> textCommands;
+            textCommands.clear();
+            
+            for (const Drawable& d : nonSpriteDrawables) {
+                // 检查 Pass 是否匹配
+                if ((cam.layerMask & renderPassBit(d.pass)) == 0) continue;
+                
+                // 视口裁剪 (仅 World pass)
+                if (cam.cullEnabled && d.pass == RenderPass::World) {
+                    if (d.kind == DrawKind::Tile) {
+                        float ts = static_cast<float>(d.tile.tileSize);
+                        float cx = d.tile.gridX * ts + ts * 0.5f;
+                        float cy = d.tile.gridY * ts + ts * 0.5f;
+                        if (cx + ts < viewMinX || cx - ts > viewMaxX ||
+                            cy + ts < viewMinY || cy - ts > viewMaxY) {
+                            continue;
+                        }
+                    }
+                    // 文字暂不裁剪
+                }
+                
+                // 转换为 RenderCmd 并存储
+                if (d.kind == DrawKind::Tile) {
+                    backend::RenderCmd cmd = d.tile;  // 复制到 vector
+                    textCommands.push_back(cmd);
+                } else if (d.kind == DrawKind::Text) {
+                    backend::RenderCmd cmd = d.text;  // 复制到 vector
+                    textCommands.push_back(cmd);
+                }
+            }
+            
+            if (!textCommands.empty()) {
+                // 创建指针数组
+                static std::vector<const backend::RenderCmd*> cmdPtrs;
+                cmdPtrs.clear();
+                cmdPtrs.reserve(textCommands.size());
+                for (const auto& cmd : textCommands) {
+                    cmdPtrs.push_back(&cmd);
+                }
+                
+                // 不清除，直接叠加渲染
+                backend::IRenderDevice::PassSubmitInfo textInfo;
+                textInfo.camera       = info.camera;
+                textInfo.clearEnabled = false;
+                textInfo.clearColor   = core::Color::Black;
+                dev.submitPass(textInfo, cmdPtrs);
+            }
+        }
     }
 }
 
