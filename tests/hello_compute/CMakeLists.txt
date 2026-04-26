@@ -7,18 +7,17 @@ set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}")
 set(SHADER_GEN "${CMAKE_BINARY_DIR}/generated/tests/hello_compute")
 set(SHADER_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/shaders_precompiled")
 
-# Compile SPIRV compute shader
-compile_shader_spirv(
-    "${SHADER_SRC}/hello_compute.comp"  comp
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/hello_compute.hlsl"  comp
     "${SHADER_GEN}/hello_compute_spv.h" hello_compute_spv
     "${SHADER_FALLBACK}/hello_compute_spv.h"
 )
 
-# Compile DXIL compute shader (if dxc available)
 set(COMPUTE_SHADER_DEPS "${SHADER_GEN}/hello_compute_spv.h")
+
 if(DXC_EXE)
-    compile_shader_dxil(
-        "${SHADER_SRC}/hello_compute.hlsl"   cs
+    compile_hlsl_to_dxil(
+        "${SHADER_SRC}/hello_compute.hlsl"   comp
         "${SHADER_GEN}/hello_compute_dxil.h" hello_compute_dxil
         "${SHADER_FALLBACK}/hello_compute_dxil.h"
     )
