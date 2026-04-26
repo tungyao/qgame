@@ -47,6 +47,7 @@ void AnimatorSystem::update(float dt) {
             if (anim.applyTexture && clip->texture.valid()) {
                 spr->texture = clip->texture;
             }
+            spr->gpuDirty = true;
         }
     }
 }
