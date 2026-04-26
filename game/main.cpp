@@ -106,6 +106,27 @@ int main(int argc, char* argv[]) {
 	// ── 动画 ───────────────────────────────────────────────────────────────────
 	AnimationHandle playerAnim = api.assetManager().loadAnimation("assets/test_anim.json");
 
+	// Phase 1 测试：构造一个 one-shot "attack" clip，复用 spriteTex
+	AnimationHandle attackAnim;
+	{
+		engine::AnimationClip clip;
+		clip.name = "attack_test";
+		clip.texture = spriteTex;
+		clip.loop = false;
+		auto pushFrame = [&](float x, float y, float dur) {
+			engine::AnimationFrame f;
+			f.srcRect = { x, y, 32.f, 32.f };
+			f.duration = dur;
+			clip.frames.push_back(f);
+			clip.duration += dur;
+		};
+		pushFrame(0.f,  0.f,  0.10f);
+		pushFrame(32.f, 0.f,  0.10f);
+		pushFrame(32.f, 32.f, 0.10f);
+		pushFrame(0.f,  32.f, 0.10f);
+		attackAnim = api.assetManager().registerAnimation("attack_test", clip);
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// 相机 1：World 渲染 (depth=0，先绘制，清屏)
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -381,10 +402,48 @@ int main(int argc, char* argv[]) {
 			});
 		}
 
+		// Phase 1: walk 走最低优先级；attack 锁定时不打断
 		if (isMoving) {
-			if (!anim.playing) anim.play(playerAnim);
+			if (!anim.playing && anim.interruptible) {
+				engine::PlayOptions o; o.priority = 0;
+				anim.play(playerAnim, o);
+			}
 		} else {
-			if (anim.playing) anim.stop();
+			if (anim.playing && anim.interruptible && anim.currentAnim == playerAnim) anim.stop();
+		}
+
+		// Phase 1 手动测试键
+		// J: 高优先级 attack + lock（不可被打断的 one-shot）
+		if (api.isKeyJustPressed(SDLK_J)) {
+			engine::PlayOptions opts;
+			opts.priority = 10;
+			opts.forceRestart = true;
+			opts.mode = engine::PlayMode::Once;
+			anim.play(attackAnim, opts);
+			anim.lock();
+			printf("[Phase1] J: attack play (prio=10, locked, one-shot)\n");
+		}
+		// K: 低优先级 walk 请求 — 锁定时应入队、否则立即播
+		if (api.isKeyJustPressed(SDLK_K)) {
+			engine::PlayOptions opts; opts.priority = 1;
+			bool wasLocked = !anim.interruptible;
+			AnimationHandle prev = anim.currentAnim;
+			anim.play(playerAnim, opts);
+			const char* result = (anim.currentAnim == playerAnim && prev != playerAnim) ? "switched"
+				: anim.hasQueued ? "queued"
+				: "kept-current";
+			printf("[Phase1] K: low-prio walk -> %s (locked=%d)\n", result, wasLocked ? 1 : 0);
+		}
+		// L: 入队 walk —— 在 attack 完成后自动接续
+		if (api.isKeyJustPressed(SDLK_L)) {
+			engine::PlayOptions opts; opts.priority = 0;
+			anim.queue(playerAnim, opts);
+			printf("[Phase1] L: queued walk for after current\n");
+		}
+		// U: 解锁当前
+		if (api.isKeyJustPressed(SDLK_U)) {
+			anim.unlock();
+			printf("[Phase1] U: unlocked\n");
 		}
 
 		auto& statusSpr = api.getComponent<engine::Sprite>(statusText);

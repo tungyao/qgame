@@ -19,13 +19,29 @@ void AnimatorSystem::update(float dt) {
 
         if (anim.playing) {
             anim.time += dt * anim.speed;
+
+            const bool loop = (anim.currentMode == PlayMode::Loop)
+                           || (anim.currentMode == PlayMode::PingPong)
+                           || (anim.currentMode == PlayMode::ClipDefault && clip->loop)
+                           || (anim.currentMode == PlayMode::Once ? false : false);
+
             if (anim.time >= clip->duration) {
-                if (clip->loop) {
+                if (loop) {
                     anim.time = std::fmod(anim.time, clip->duration);
                 } else {
                     anim.time = clip->duration;
                     anim.playing = false;
-                    anim.finished = true;  // 标记动画完成
+                    anim.finished = true;
+                    anim.interruptible = true;
+                    // Phase 1: 完成后消费 queued
+                    if (anim.hasQueued && anim.queuedAnim.valid()) {
+                        AnimationHandle next = anim.queuedAnim;
+                        PlayOptions     opts = anim.queuedOpts;
+                        anim.hasQueued = false;
+                        anim.play(next, opts);
+                        clip = ctx_.assetManager.getAnimationClip(anim.currentAnim);
+                        if (!clip || clip->frames.empty() || clip->duration <= 0.f) continue;
+                    }
                 }
             }
         }
