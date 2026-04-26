@@ -18,7 +18,7 @@ layout(set = 0, binding = 1, std430) readonly buffer IndexBuffer {
     uint visibleIndices[];
 };
 
-layout(set = 0, binding = 2) uniform ViewUBO {
+layout(set = 1, binding = 0) uniform ViewUBO {
     mat4 viewProj;
 } ubo;
 

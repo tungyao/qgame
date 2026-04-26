@@ -29,6 +29,7 @@ layout(set = 2, binding = 0) uniform SortParams {
     uint itemCount;
     uint stage;
     uint pass;
+    uint pad;
 };
 
 uint getSortKey(uint idx) {

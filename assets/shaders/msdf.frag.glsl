@@ -1,12 +1,12 @@
 #version 450
 
-// SDL3 GPU SPIR-V layout: fragment samplers set=2, fragment UBOs use push constants (set=0)
+// SDL3 GPU SPIR-V layout: fragment samplers set=2, fragment UBOs set=3
 layout(location = 0) in vec2 inUV;
 layout(location = 1) in vec4 inColor;
 
 layout(set = 2, binding = 0) uniform sampler2D tex;
 
-layout(set = 0, binding = 0) uniform MSDFParams {
+layout(set = 3, binding = 0) uniform MSDFParams {
     float pxRange;
 } params;
 

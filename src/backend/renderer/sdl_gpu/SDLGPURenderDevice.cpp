@@ -37,7 +37,7 @@ void SDLGPURenderDevice::init() {
     formats |= SDL_GPU_SHADERFORMAT_DXIL;
 #endif
 
-    device_ = SDL_CreateGPUDevice(formats,debug_ , nullptr);
+    device_ = SDL_CreateGPUDevice(formats,debug_ , "vulkan");
     if (!device_) {
         core::logError("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         return;
