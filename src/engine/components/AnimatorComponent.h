@@ -102,10 +102,55 @@ struct AnimTransition {
     bool  interruptible = true;     // crossfade 期间是否允许被新 transition 打断
 };
 
+// ── Phase 4: 动画分层 (Layers) ────────────────────────────────────────────
+// 通道掩码：标记某层会写回哪些目标通道
+namespace LayerChannel {
+    enum : uint32_t {
+        SrcRect  = 1u << 0,
+        Texture  = 1u << 1,
+        Tint     = 1u << 2,
+        Offset   = 1u << 3,   // Transform 平移偏移 (procedural)
+        Rotation = 1u << 4,   // Transform 旋转偏移 (procedural)
+        Scale    = 1u << 5,   // Transform 缩放偏移 (procedural)
+    };
+}
+
+enum class LayerBlendMode : uint8_t { Override, Additive };
+
+struct AnimatorLayer {
+    std::string                       name;
+    float                             weight    = 1.f;       // 0..1
+    LayerBlendMode                    blendMode = LayerBlendMode::Override;
+    uint32_t                          mask      = LayerChannel::SrcRect | LayerChannel::Texture;
+    std::vector<AnimState>            states;
+    std::vector<AnimTransition>       transitions;
+    int                               defaultState = 0;
+};
+
 struct AnimatorController {
+    // Base 层：保留扁平字段 (向后兼容)；mask 默认 SrcRect|Texture，blendMode=Override，weight=1
     std::vector<AnimState>      states;
     std::vector<AnimTransition> transitions;
     int                         defaultState = 0;
+
+    // 额外层 (索引 0 → AnimatorComponent.extraLayers[0])
+    std::vector<AnimatorLayer>  layers;
+};
+
+// 单个额外层的运行时状态 (基础层运行时复用 AnimatorComponent 既有字段)
+struct AnimatorLayerRuntime {
+    AnimationHandle currentAnim;
+    float           time     = 0.f;
+    float           speed    = 1.f;
+    bool            playing  = false;
+    bool            finished = false;
+    PlayMode        currentMode = PlayMode::ClipDefault;
+
+    int             currentState = -1;
+    int             fromState    = -1;
+    float           transitionT  = 0.f;
+    float           transitionDuration = 0.f;
+    bool            stateFinishedFired = false;
 };
 
 struct AnimatorComponent {
@@ -138,6 +183,9 @@ struct AnimatorComponent {
 
     // 上一帧此状态是否已经触发过 state_finished (避免每帧重复发)
     bool  stateFinishedFired = false;
+
+    // ── Phase 4: 额外层运行时 (索引对齐 controller->layers) ───────────────
+    std::vector<AnimatorLayerRuntime> extraLayers;
 
     // 参数 API
     void setFloat  (const std::string& n, float v) { auto& p = parameters[n]; p.type = ParamType::Float;   p.f = v; }
