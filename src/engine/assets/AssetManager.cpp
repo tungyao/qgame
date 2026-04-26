@@ -236,6 +236,22 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
     }
     clip.loop = loop;
 
+    // Phase 2: 解析 events 数组
+    // 形式: "events": [ { "time": 0.10, "name": "hitbox_on", "int": 0, "float": 0.0, "string": "" }, ... ]
+    if (j.contains("events") && j["events"].is_array()) {
+        for (auto& e : j["events"]) {
+            AnimEvent ev;
+            ev.time        = e.value("time", 0.f);
+            ev.name        = e.value("name", std::string{});
+            ev.intParam    = e.value("int", 0);
+            ev.floatParam  = e.value("float", 0.f);
+            ev.stringParam = e.value("string", std::string{});
+            clip.events.push_back(std::move(ev));
+        }
+        std::sort(clip.events.begin(), clip.events.end(),
+                  [](const AnimEvent& a, const AnimEvent& b) { return a.time < b.time; });
+    }
+
     // 4) 加载 spritesheet 贴图 (meta.image 相对 JSON 文件目录)
     if (j.contains("meta") && j["meta"].contains("image")) {
         std::filesystem::path dir = std::filesystem::path(filePath).parent_path();

@@ -11,12 +11,38 @@ struct AnimationFrame {
     float      duration;    // 本帧持续时长 (秒)
 };
 
+// Phase 2: 帧事件 (Animation Notify)
+struct AnimEvent {
+    float       time = 0.f;     // 在 clip 内的时间 (秒)
+    std::string name;           // 约定: hitbox_on / hitbox_off / footstep / sfx / vfx ...
+    int         intParam    = 0;
+    float       floatParam  = 0.f;
+    std::string stringParam;
+};
+
 struct AnimationClip {
     std::string                 name;        // tag 名 (或文件名)
     TextureHandle               texture;     // 关联的 spritesheet
     std::vector<AnimationFrame> frames;
     float                       duration = 0.f; // 所有帧累计时长
     bool                        loop = true;
+    std::vector<AnimEvent>      events;      // Phase 2: 帧事件 (按 time 升序)
+};
+
+// Phase 2: 当帧派发的事件实例 (per-entity 队列)
+struct AnimEventInstance {
+    std::string     name;
+    int             intParam;
+    float           floatParam;
+    std::string     stringParam;
+    AnimationHandle clip;       // 派发时所属 clip
+    float           time;       // 事件在 clip 内的时间
+};
+
+struct AnimEventQueue {
+    // 每帧由 AnimatorSystem 追加，消费者 system 处理后须 clear()。
+    // AnimatorSystem 在每次 update 开始时清空 (作为单帧事件队列)。
+    std::vector<AnimEventInstance> events;
 };
 
 // Phase 1: 播放选项

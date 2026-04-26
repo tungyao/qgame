@@ -124,6 +124,11 @@ int main(int argc, char* argv[]) {
 		pushFrame(32.f, 0.f,  0.10f);
 		pushFrame(32.f, 32.f, 0.10f);
 		pushFrame(0.f,  32.f, 0.10f);
+		// Phase 2: 帧事件 — 攻击的 hit window + sfx
+		clip.events.push_back({ 0.05f, "sfx",         0, 0.f, "swing" });
+		clip.events.push_back({ 0.10f, "hitbox_on",   0, 0.f, "" });
+		clip.events.push_back({ 0.30f, "hitbox_off",  0, 0.f, "" });
+		clip.events.push_back({ 0.39f, "vfx",         0, 0.f, "spark" });
 		attackAnim = api.assetManager().registerAnimation("attack_test", clip);
 	}
 
@@ -444,6 +449,14 @@ int main(int argc, char* argv[]) {
 		if (api.isKeyJustPressed(SDLK_U)) {
 			anim.unlock();
 			printf("[Phase1] U: unlocked\n");
+		}
+
+		// Phase 2: 消费帧事件队列 (AnimatorSystem 在每帧 update 起始清空)
+		if (auto* eq = ctx.world.try_get<engine::AnimEventQueue>(player)) {
+			for (auto& ev : eq->events) {
+				printf("[Phase2] event '%s' @ t=%.3f (int=%d float=%.2f str='%s')\n",
+				       ev.name.c_str(), ev.time, ev.intParam, ev.floatParam, ev.stringParam.c_str());
+			}
 		}
 
 		auto& statusSpr = api.getComponent<engine::Sprite>(statusText);
