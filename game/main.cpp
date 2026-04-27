@@ -6,6 +6,7 @@
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/AnimatorComponent.h>
 #include <engine/components/TextComponent.h>
+#include <engine/components/UIComponents.h>
 #include <engine/systems/RenderSystem.h>
 #include <SDL3/SDL.h>
 #include <vector>
@@ -881,6 +882,161 @@ int main(int argc, char* argv[]) {
 		api.addComponent(rayHitMarker, sp);
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// UI System 测试
+	// ═══════════════════════════════════════════════════════════════════════════
+	printf("\n");
+	printf("╔════════════════════════════════════════════════════════════════╗\n");
+	printf("║                    UI System Test                              ║\n");
+	printf("╠════════════════════════════════════════════════════════════════╣\n");
+	printf("║  - Click buttons to trigger callbacks                          ║\n");
+	printf("║  - Drag the slider to adjust volume                            ║\n");
+	printf("║  - Toggle the checkbox to enable/disable                       ║\n");
+	printf("║  - Watch the progress bar animate                              ║\n");
+	printf("║  - Drag the red square anywhere                                ║\n");
+	printf("╚════════════════════════════════════════════════════════════════╝\n\n");
+
+	// ── 创建 Canvas ─────────────────────────────────────────────────────────────
+	auto canvas = api.createCanvas(1280, 720);
+	printf("[UI] Created Canvas (1280x720)\n");
+
+	// ── UI 状态变量 ─────────────────────────────────────────────────────────────
+	static int clickCount = 0;
+	static float volume = 0.5f;
+	static bool soundEnabled = true;
+	static float progressValue = 0.f;
+
+	// ── 创建按钮 ─────────────────────────────────────────────────────────────────
+	entt::entity testButton;
+	{
+		testButton = api.createButton(200.f, 50.f, [&]() {
+			clickCount++;
+			printf("[UI] Button clicked! Count: %d\n", clickCount);
+		});
+		api.setUIAnchor(testButton, 1.f, 0.f, 1.f, 0.f);  // 右上角
+		api.setUIOffset(testButton, -220.f, 20.f, 0.f, 0.f);
+		api.setButtonColors(testButton, 
+			{ 80, 120, 180, 255 },   // normal - blue
+			{ 100, 150, 210, 255 },  // hover
+			{ 60, 90, 140, 255 }     // pressed
+		);
+		printf("[UI] Created Button (top-right)\n");
+	}
+
+	// ── 按钮文本 ─────────────────────────────────────────────────────────────────
+	{
+		auto btnText = api.createUIText(200.f, 50.f, "Click Me!");
+		api.setUIAnchor(btnText, 1.f, 0.f, 1.f, 0.f);
+		api.setUIOffset(btnText, -220.f, 20.f, 0.f, 0.f);
+		api.setUITextFont(btnText, font, 20.f);
+		api.setUITextColor(btnText, { 255, 255, 255, 255 });
+		api.setUISortOrder(btnText, 10);
+	}
+
+	// ── 创建滑动条 ─────────────────────────────────────────────────────────────────
+	entt::entity volumeSlider;
+	{
+		volumeSlider = api.createSlider(200.f, 30.f, 0.f, 100.f, [](float v) {
+			volume = v / 100.f;
+			printf("[UI] Slider value: %.1f (volume: %.2f)\n", v, volume);
+		});
+		api.setUIAnchor(volumeSlider, 1.f, 0.f, 1.f, 0.f);
+		api.setUIOffset(volumeSlider, -220.f, 90.f, 0.f, 0.f);
+		api.setSliderValue(volumeSlider, 50.f);
+		printf("[UI] Created Slider (top-right, below button)\n");
+	}
+
+	// ── 滑动条标签 ─────────────────────────────────────────────────────────────────
+	{
+		auto sliderLabel = api.createUIText(200.f, 25.f, "Volume: 50%");
+		api.setUIAnchor(sliderLabel, 1.f, 0.f, 1.f, 0.f);
+		api.setUIOffset(sliderLabel, -220.f, 125.f, 0.f, 0.f);
+		api.setUITextFont(sliderLabel, font, 14.f);
+		api.setUITextColor(sliderLabel, { 200, 200, 200, 255 });
+	}
+
+	// ── 创建开关 ─────────────────────────────────────────────────────────────────
+	entt::entity soundToggle;
+	{
+		soundToggle = api.createToggle(40.f, 40.f, [](bool on) {
+			soundEnabled = on;
+			printf("[UI] Sound %s\n", on ? "enabled" : "disabled");
+		});
+		api.setUIAnchor(soundToggle, 1.f, 0.f, 1.f, 0.f);
+		api.setUIOffset(soundToggle, -220.f, 160.f, 0.f, 0.f);
+		api.setToggleValue(soundToggle, true);
+		printf("[UI] Created Toggle (top-right)\n");
+	}
+
+	// ── 开关标签 ─────────────────────────────────────────────────────────────────
+	{
+		auto toggleLabel = api.createUIText(150.f, 40.f, "Sound: ON");
+		api.setUIAnchor(toggleLabel, 1.f, 0.f, 1.f, 0.f);
+		api.setUIOffset(toggleLabel, -170.f, 160.f, 0.f, 0.f);
+		api.setUITextFont(toggleLabel, font, 16.f);
+		api.setUITextColor(toggleLabel, { 200, 200, 200, 255 });
+	}
+
+	// ── 创建进度条 ─────────────────────────────────────────────────────────────────
+	entt::entity progressBar;
+	{
+		progressBar = api.createProgressBar(200.f, 25.f);
+		api.setUIAnchor(progressBar, 0.5f, 0.5f, 0.5f, 0.5f);  // 居中
+		api.setUIOffset(progressBar, -100.f, 50.f, 0.f, 0.f);
+		api.setProgressColors(progressBar, { 50, 50, 50, 255 }, { 100, 200, 100, 255 });
+		printf("[UI] Created ProgressBar (center)\n");
+	}
+
+	// ── 进度条标签 ─────────────────────────────────────────────────────────────────
+	{
+		auto progressLabel = api.createUIText(200.f, 25.f, "Loading...");
+		api.setUIAnchor(progressLabel, 0.5f, 0.5f, 0.5f, 0.5f);
+		api.setUIOffset(progressLabel, -100.f, 25.f, 0.f, 0.f);
+		api.setUITextFont(progressLabel, font, 14.f);
+		api.setUITextColor(progressLabel, { 200, 200, 200, 255 });
+	}
+
+	// ── 创建 UI 图像 (可拖拽) ─────────────────────────────────────────────────────
+	entt::entity draggableImage;
+	{
+		draggableImage = api.createUIImage(80.f, 80.f);
+		api.setUIAnchor(draggableImage, 0.f, 0.5f, 0.f, 0.5f);  // 左侧居中
+		api.setUIOffset(draggableImage, 50.f, -40.f, 0.f, 0.f);
+		api.setUIImageColor(draggableImage, { 200, 80, 80, 255 });
+		api.makeDraggable(draggableImage, [](float x, float y) {
+			printf("[UI] Dragging to (%.0f, %.0f)\n", x, y);
+		});
+		api.setDragBounds(draggableImage, 0.f, 0.f, 1200.f, 640.f);
+		printf("[UI] Created Draggable Image (left side, red square)\n");
+	}
+
+	// ── 拖拽提示文本 ───────────────────────────────────────────────────────────────
+	{
+		auto dragHint = api.createUIText(80.f, 20.f, "Drag me!");
+		api.setUIAnchor(dragHint, 0.f, 0.5f, 0.f, 0.5f);
+		api.setUIOffset(dragHint, 50.f, -70.f, 0.f, 0.f);
+		api.setUITextFont(dragHint, font, 12.f);
+		api.setUITextColor(dragHint, { 200, 200, 200, 255 });
+	}
+
+	// ── 创建居中标题 ─────────────────────────────────────────────────────────────
+	{
+		auto title = api.createUIText(400.f, 50.f, "UI System Demo");
+		api.setUIAnchor(title, 0.5f, 0.f, 0.5f, 0.f);  // 顶部居中
+		api.setUIOffset(title, -200.f, 100.f, 0.f, 0.f);
+		api.setUITextFont(title, font, 32.f);
+		api.setUITextColor(title, { 255, 220, 100, 255 });
+	}
+
+	// ── 底部提示 ─────────────────────────────────────────────────────────────────
+	{
+		auto hint = api.createUIText(400.f, 30.f, "Click buttons, drag slider, toggle checkbox, drag red square");
+		api.setUIAnchor(hint, 0.5f, 1.f, 0.5f, 1.f);  // 底部居中
+		api.setUIOffset(hint, -200.f, 0.f, 0.f, -20.f);
+		api.setUITextFont(hint, font, 14.f);
+		api.setUITextColor(hint, { 150, 150, 150, 255 });
+	}
+
 	// ── 主循环 ────────────────────────────────────────────────────────────────
 	constexpr float kSpeed = 200.f;
 	bool gpuDrivenEnabled = false;
@@ -1197,6 +1353,46 @@ int main(int argc, char* argv[]) {
 			printf("  - Enemy: layer=ENEMY, mask=ALL\n");
 			printf("  - PickupZone: layer=PICKUP, mask=PLAYER (isTrigger=true)\n");
 			printf("  Expected: Bullet passes through ground, stops at enemy\n");
+		}
+
+		// ═════════════════════════════════════════════════════════════════════
+		// UI System 更新测试
+		// ═════════════════════════════════════════════════════════════════════
+		{
+			// 动画化进度条 (循环)
+			progressValue += dt * 0.3f;
+			if (progressValue > 1.f) progressValue = 0.f;
+			api.setProgressValue(progressBar, progressValue);
+
+			// 查询 UI 状态
+			auto hoveredUI = api.getHoveredUI();
+			auto pressedUI = api.getPressedUI();
+			
+			// 更新滑动条标签
+			{
+				static char sliderBuf[64];
+				float sliderVal = api.getSliderValue(volumeSlider);
+				snprintf(sliderBuf, sizeof(sliderBuf), "Volume: %.0f%%", sliderVal);
+				// 注意：由于 createUIText 返回的实体可能没有保存标签，这里用临时查询
+				// 实际项目中应该保存标签实体的引用
+			}
+
+			// 更新开关标签
+			{
+				bool toggleVal = api.getToggleValue(soundToggle);
+				// 同上，需要保存标签实体引用才能更新
+			}
+
+			// 检测 UI 悬停状态变化
+			static entt::entity lastHovered = entt::null;
+			if (hoveredUI != lastHovered && hoveredUI != entt::null) {
+				if (api.hasComponent<engine::UIElement>(hoveredUI)) {
+					float x, y, w, h;
+					api.getUIComputedRect(hoveredUI, &x, &y, &w, &h);
+					printf("[UI] Hovered element at (%.0f, %.0f) size (%.0f x %.0f)\n", x, y, w, h);
+				}
+			}
+			lastHovered = hoveredUI;
 		}
 
 		if (api.isKeyJustPressed(SDLK_ESCAPE)) { api.quit(); break; }

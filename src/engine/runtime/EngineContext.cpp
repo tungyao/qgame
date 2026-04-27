@@ -20,6 +20,7 @@
 #include "../systems/InputSystem.h"
 #include "../systems/AnimatorSystem.h"
 #include "../systems/TweenSystem.h"
+#include "../systems/UISystem.h"
 #include "../input/SDLInputProvider.h"
 #include "../../backend/audio/sdl_mixer/SDLMixerAudioDevice.h"
 
@@ -92,6 +93,7 @@ void EngineContext::init(const EngineConfig& cfg) {
     systems.registerSystem<PhysicsSystem>(world, dispatcher);
     systems.registerSystem<AnimatorSystem>(*this);
     systems.registerSystem<TweenSystem>(*this);
+    systems.registerSystem<UISystem>(*this);
 
     systems.initAll();
 

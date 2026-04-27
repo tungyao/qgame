@@ -10,6 +10,7 @@ add_library(engine SHARED
     systems/InputSystem.cpp
     systems/AnimatorSystem.cpp
     systems/TweenSystem.cpp
+    systems/UISystem.cpp
     input/SDLInputProvider.cpp
     assets/AssetManager.cpp
     assets/FontLoader.cpp
