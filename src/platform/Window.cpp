@@ -123,6 +123,19 @@ void Window::pollEvents(const EventCallback& cb) {
             break;
         }
     }
+
+    // SDL 的 MOUSE_MOTION 仅在鼠标实际移动时触发，导致 UI hover 在窗口刚出现、
+    // 缩放或失焦回归后会停留在过期坐标上。每帧主动同步一次当前位置。
+    if (impl_->width > 0 && impl_->height > 0) {
+        float mx = 0.f, my = 0.f;
+        SDL_GetMouseState(&mx, &my);
+        InputRawEvent sync{};
+        sync.type      = InputRawEvent::Type::POINTER_MOVE;
+        sync.pointerId = 0;
+        sync.x = mx / static_cast<float>(impl_->width);
+        sync.y = my / static_cast<float>(impl_->height);
+        cb(sync);
+    }
 }
 
 void* Window::sdlWindow() const {

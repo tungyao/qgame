@@ -8,7 +8,7 @@ namespace engine {
 // 高层输入状态 — 按帧管理 just* 状态，供 InputSystem / GameAPI 查询
 class InputState {
 public:
-    static constexpr int MAX_POINTERS = 10;
+    static constexpr int MAX_POINTERS = 30;
 
     // IInputProvider::poll() 开头调用：清除上帧的 just* 状态和事件列表
     void beginFrame() {

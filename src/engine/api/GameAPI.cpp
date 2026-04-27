@@ -307,6 +307,7 @@ entt::entity GameAPI::createButton(float width, float height,
     setUISize(e, width, height);
     auto& btn = ctx_.world.emplace<UIButton>(e);
     btn.onClick = std::move(onClick);
+    
     renameEntity(ctx_.world, e, "button");
     return e;
 }

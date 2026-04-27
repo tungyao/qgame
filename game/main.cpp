@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
 	cfg.debug = true;
-	if (0) {
+	if (useOpenGL) {
 		cfg.renderBackend = engine::RenderBackend::OpenGL;
 	}
 	engine::EngineContext ctx;
@@ -728,7 +728,7 @@ int main(int argc, char* argv[]) {
 		gpuStatusText = api.spawnEntity();
 		api.addComponent(gpuStatusText, engine::Transform{ 20.f, 100.f });
 		engine::TextComponent txt{};
-		txt.text = "[CPU Mode] Press G to enable GPU-driven rendering";
+		txt.text = (cfg.renderBackend == engine::RenderBackend::OpenGL ? "[Render Mode] CPU" : "[Render Mode] GPU");
 		txt.font = font;
 		txt.fontSize = 18.f;
 		txt.color = { 255, 200, 100, 255 };

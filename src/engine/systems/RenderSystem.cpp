@@ -128,19 +128,11 @@ void RenderSystem::update(float /*dt*/) {
     spriteBuffer_.advanceFrame();
     spriteBuffer_.uploadDirty();
     
-    if (gpuDrivenEnabled_ && gpuRenderer_.isInitialized() && gpuRenderer_.hasCullingPipeline()) {
+    if (gpuRenderer_.isInitialized() && gpuRenderer_.hasCullingPipeline()) {
         static bool logged = false;
         if (!logged) { core::logInfo("[GPU-driven] using GPU-driven path"); logged = true; }
         buildCommandBufferGPUDriven();
     } else {
-        if (gpuDrivenEnabled_) {
-            static bool warned = false;
-            if (!warned) {
-                core::logError("[GPU-driven] enabled but falling back: initialized=%d hasCulling=%d",
-                               gpuRenderer_.isInitialized(), gpuRenderer_.hasCullingPipeline());
-                warned = true;
-            }
-        }
         buildCommandBuffer();
     }
 }

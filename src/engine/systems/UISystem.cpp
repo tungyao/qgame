@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace engine {
 
@@ -169,25 +171,39 @@ inline bool pointInRect(float px, float py, const UINode& n) {
 void UISystem::runInteraction(InputState& input) {
     auto& world = ctx_.world;
 
-    const float px = input.pointerX(0);
-    const float py = input.pointerY(0);
+    const float px = input.pointerX(0) * screenW_;
+    const float py = input.pointerY(0) * screenH_;
     const bool  down         = input.pointerDown(0);
     const bool  justPressed  =  down && !prevPointerDown_;
     const bool  justReleased = !down &&  prevPointerDown_;
     prevPointerDown_ = down;
-
-    // ── 1. 命中测试（取 sortOrder 最大的可交互节点）─────────────────────────
+    // ── 1. 命中测试（取最上层可交互节点：sortOrder 最大，相等时按 buildCommands
+    //     的稳定迭代顺序——后绘制者在上）。tiebreaker 必须与渲染一致，否则
+    //     重叠的同序节点 hover 会和视觉对不上。
     entt::entity bestHit = entt::null;
     int          bestOrder = std::numeric_limits<int>::min();
+    uint32_t     bestSeq   = 0;
     {
         auto nv = world.view<UINode>();
+        uint32_t seq = 0;
         for (auto [e, n] : nv.each()) {
             n.hovered = false;
+            const uint32_t mySeq = seq++;
             if (!n.visible || !n.interactable) continue;
             if (!pointInRect(px, py, n)) continue;
-            if (n.sortOrder >= bestOrder) {
+            // 只把真正的交互组件视作命中目标。否则贴在按钮上的 UILabel
+                      // (interactable 默认 true) 会盖住父按钮、屏幕角落的提示文字会
+                          // 偷走拖拽块附近的点击 —— 表现为"按钮命中错位"和"拖几次后无法
+                         // 再拖"。如果业务确实想让背景/标签接受 raycast，自行加上
+                         // UIButton 或调用 setUIInteractable(false) 由用户显式控制。
+               const bool hasInteractor = world.any_of<UIButton, UIToggle,UISlider, UIDraggable>(e);
+            if (!hasInteractor) continue;
+
+            if (bestHit == entt::null ||n.sortOrder > bestOrder || (n.sortOrder == bestOrder && mySeq >= bestSeq)) {
                 bestOrder = n.sortOrder;
+                bestSeq   = mySeq;
                 bestHit   = e;
+                break;
             }
         }
     }
@@ -235,6 +251,8 @@ void UISystem::runInteraction(InputState& input) {
     }
 
     // ── 4. 拖拽元素跟随：直接改写 offsetX/Y（按工厂约定，此时 anchor=topLeft, pivot=0,0）
+    //     offset 必须相对父节点原点存储，否则下一帧 layoutNode 会再叠一次
+    //     parent 的 safeArea/screen 偏移，导致命中区相对视觉漂移。
     if (down) {
         auto dv = world.view<UINode, UIDraggable>();
         for (auto [e, n, d] : dv.each()) {
@@ -245,8 +263,19 @@ void UISystem::runInteraction(InputState& input) {
                 nx = std::clamp(nx, d.minX, std::max(d.minX, d.maxX - n.screenW));
                 ny = std::clamp(ny, d.minY, std::max(d.minY, d.maxY - n.screenH));
             }
-            n.offsetX = nx;
-            n.offsetY = ny;
+
+            float parentX = 0.f, parentY = 0.f;
+            if (n.parent != entt::null) {
+                if (auto* pc = world.try_get<UICanvas>(n.parent)) {
+                    parentX = pc->safeAreaLeft;
+                    parentY = pc->safeAreaTop;
+                } else if (auto* pn = world.try_get<UINode>(n.parent)) {
+                    parentX = pn->screenX;
+                    parentY = pn->screenY;
+                }
+            }
+            n.offsetX = nx - parentX;
+            n.offsetY = ny - parentY;
             n.screenX = nx;
             n.screenY = ny;
             if (d.onDrag) d.onDrag(nx, ny);
@@ -305,13 +334,15 @@ void UISystem::emitRect(float x, float y, float w, float h,
         c.texture = whiteTexture_;
         src = core::Rect{0.f, 0.f, 1.f, 1.f};
     }
-
+      // CPU 后端 (SDL_GPU / GL) 把 (cmd.x, cmd.y) 当 quad 中心硬编码绘制，
+           // 完全忽略 pivot；GPU-driven 后端则按 pivot 走矩阵。统一传中心坐标 +
+          // pivot=0.5 即可让两条路径都把矩形左上角落在调用方指定的 (x, y)。
     float cx, cy;
     screenToCamera(x, y, cx, cy);
-    c.x        = cx;
-    c.y        = cy;
-    c.pivotX   = 0.f;
-    c.pivotY   = 0.f;
+    c.x        = cx + w * 0.5f;
+    c.y        = cy + h * 0.5f;
+    c.pivotX   = 0.5f;
+    c.pivotY   = 0.5f;
     c.rotation = 0.f;
     c.scaleX   = w / src.w;
     c.scaleY   = h / src.h;
