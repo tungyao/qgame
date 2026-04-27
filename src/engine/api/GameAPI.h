@@ -150,268 +150,102 @@ public:
      */
     void setTimeScale(float scale);
 
-    // ── UI System ─────────────────────────────────────────────────────────────
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Canvas - UI 根容器
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建 Canvas (UI 根容器)
-     * @param referenceW 设计分辨率宽度 (默认 1920)
-     * @param referenceH 设计分辨率高度 (默认 1080)
-     * @return Canvas 实体
-     */
+    // ── UI System v2 ──────────────────────────────────────────────────────────
+    //
+    // 节点模型：每个 UI 实体含一个 UINode（布局/状态）+ 任意视觉/功能组件
+    // (UIBackground/UIButton/UIToggle/UISlider/UIProgressBar/UIImage/UILabel/
+    //  UIDraggable)。父子关系通过 UINode.parent 表示，根节点的 parent 指向
+    // UICanvas 实体。
+    //
+    // 渲染：UISystem 每帧产出 DrawSpriteCmd/DrawTextCmd（pass=Screen），
+    // RenderSystem 自动注入到 CPU 与 GPU-driven 两条路径。
+    //
+    // 世界空间 UI：调用 attachToWorld(node, targetEntity, ...) 让 UI 跟随某个
+    // 含 Transform 的世界实体投影到屏幕，仍以屏幕像素尺寸渲染。
+
+    // ── Canvas ───────────────────────────────────────────────────────────────
     entt::entity createCanvas(int referenceW = 1920, int referenceH = 1080);
-    
-    /**
-     * 设置 Canvas 缩放模式
-     * @param canvas Canvas 实体
-     * @param scaleWithScreen true=随屏幕缩放, false=固定像素
-     */
     void setCanvasScaleMode(entt::entity canvas, bool scaleWithScreen);
-    
-    /**
-     * 设置 Canvas 安全区域 (刘海屏适配)
-     */
-    void setCanvasSafeArea(entt::entity canvas, float left, float top, float right, float bottom);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // UI Element 创建
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建 UI 元素
-     * @param parent 父节点 (entt::null 表示根节点)
-     * @return UI 元素实体
-     */
+    void setCanvasSafeArea(entt::entity canvas, float left, float top,
+                           float right, float bottom);
+
+    // ── 通用节点 ─────────────────────────────────────────────────────────────
     entt::entity createUIElement(entt::entity parent = entt::null);
-    
-    /**
-     * 设置 UI 元素尺寸
-     */
+    void setUIParent(entt::entity e, entt::entity parent);
     void setUISize(entt::entity e, float width, float height);
-    
-    /**
-     * 设置 UI 元素锚点
-     * @param minX, minY 左上角锚点 (0-1)
-     * @param maxX, maxY 右下角锚点 (0-1)
-     */
+    // (minX,minY) = 左上锚点；(maxX,maxY) = 右下锚点；min==max 表示固定锚点
     void setUIAnchor(entt::entity e, float minX, float minY, float maxX, float maxY);
-    
-    /**
-     * 设置 UI 元素锚点偏移 (像素)
-     */
-    void setUIOffset(entt::entity e, float left, float top, float right, float bottom);
-    
-    /**
-     * 设置 UI 元素中心点
-     */
+    // 锚点中心相对偏移（像素，y-down）
+    void setUIOffset(entt::entity e, float x, float y);
     void setUIPivot(entt::entity e, float x, float y);
-    
-    /**
-     * 设置 UI 元素可交互性
-     */
     void setUIInteractable(entt::entity e, bool interactable);
-    
-    /**
-     * 设置 UI 元素排序
-     */
+    void setUIVisible(entt::entity e, bool visible);
     void setUISortOrder(entt::entity e, int order);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Button - 按钮
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建按钮
-     * @param width, height 按钮尺寸
-     * @param onClick 点击回调
-     * @return 按钮实体
-     */
-    entt::entity createButton(float width, float height, std::function<void()> onClick = nullptr);
-    
-    /**
-     * 设置按钮点击回调
-     */
+    // 让 UI 跟随世界实体（需要 target 含 Transform）。offset 为世界空间偏移。
+    void attachToWorld(entt::entity e, entt::entity target,
+                       float offsetX = 0.f, float offsetY = 0.f);
+    void detachFromWorld(entt::entity e);
+    // 直接给节点叠加纯色/纹理背景
+    void setUIBackground(entt::entity e, const core::Color& color,
+                         TextureHandle texture = {});
+
+    // ── Button ───────────────────────────────────────────────────────────────
+    entt::entity createButton(float width, float height,
+                              std::function<void()> onClick = nullptr);
     void setButtonCallback(entt::entity e, std::function<void()> onClick);
-    
-    /**
-     * 设置按钮颜色状态
-     */
-    void setButtonColors(entt::entity e, 
+    void setButtonColors(entt::entity e,
                          const core::Color& normal,
                          const core::Color& hover,
                          const core::Color& pressed);
-    
-    /**
-     * 设置按钮禁用状态
-     */
     void setButtonEnabled(entt::entity e, bool enabled);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Toggle - 开关
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建开关
-     */
-    entt::entity createToggle(float width, float height, 
-                              std::function<void(bool)> onValueChanged = nullptr);
-    
-    /**
-     * 设置开关状态
-     */
+
+    // ── Toggle ───────────────────────────────────────────────────────────────
+    entt::entity createToggle(float width, float height,
+                              std::function<void(bool)> onChanged = nullptr);
     void setToggleValue(entt::entity e, bool isOn);
-    
-    /**
-     * 获取开关状态
-     */
     bool getToggleValue(entt::entity e) const;
-    
-    /**
-     * 设置开关回调
-     */
-    void setToggleCallback(entt::entity e, std::function<void(bool)> onValueChanged);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Slider - 滑动条
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建滑动条
-     */
+    void setToggleCallback(entt::entity e, std::function<void(bool)> onChanged);
+
+    // ── Slider ───────────────────────────────────────────────────────────────
     entt::entity createSlider(float width, float height,
                               float min = 0.f, float max = 1.f,
-                              std::function<void(float)> onValueChanged = nullptr);
-    
-    /**
-     * 设置滑动条值
-     */
+                              std::function<void(float)> onChanged = nullptr);
     void setSliderValue(entt::entity e, float value);
-    
-    /**
-     * 获取滑动条值
-     */
     float getSliderValue(entt::entity e) const;
-    
-    /**
-     * 设置滑动条范围
-     */
     void setSliderRange(entt::entity e, float min, float max);
-    
-    /**
-     * 设置滑动条回调
-     */
-    void setSliderCallback(entt::entity e, std::function<void(float)> onValueChanged);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // ProgressBar - 进度条
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建进度条
-     */
+    void setSliderCallback(entt::entity e, std::function<void(float)> onChanged);
+
+    // ── Progress Bar ─────────────────────────────────────────────────────────
     entt::entity createProgressBar(float width, float height);
-    
-    /**
-     * 设置进度条值 (0-1)
-     */
-    void setProgressValue(entt::entity e, float value);
-    
-    /**
-     * 设置进度条颜色
-     */
-    void setProgressColors(entt::entity e, 
+    void setProgressValue(entt::entity e, float value);   // 0..1
+    void setProgressColors(entt::entity e,
                            const core::Color& background,
                            const core::Color& fill);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Image - UI 图像
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建 UI 图像
-     */
+
+    // ── Image ────────────────────────────────────────────────────────────────
     entt::entity createUIImage(float width, float height, TextureHandle texture = {});
-    
-    /**
-     * 设置 UI 图像纹理
-     */
     void setUIImageTexture(entt::entity e, TextureHandle texture);
-    
-    /**
-     * 设置 UI 图像颜色
-     */
     void setUIImageColor(entt::entity e, const core::Color& color);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Text - UI 文本
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 创建 UI 文本
-     */
+
+    // ── Label / Text ─────────────────────────────────────────────────────────
     entt::entity createUIText(float width, float height, const char* text = "");
-    
-    /**
-     * 设置 UI 文本内容
-     */
     void setUIText(entt::entity e, const char* text);
-    
-    /**
-     * 设置 UI 文本字体
-     */
     void setUITextFont(entt::entity e, FontHandle font, float fontSize);
-    
-    /**
-     * 设置 UI 文本颜色
-     */
     void setUITextColor(entt::entity e, const core::Color& color);
-    
-    /**
-     * 设置 UI 文本对齐方式
-     */
-    void setUITextAlignment(entt::entity e, int alignment);  // 0=Left, 1=Center, 2=Right
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Drag - 拖拽
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 使元素可拖拽
-     */
-    void makeDraggable(entt::entity e, 
+    void setUITextAlignment(entt::entity e, int halign);  // 0=Left, 1=Center, 2=Right
+
+    // ── Draggable ────────────────────────────────────────────────────────────
+    // 调用后强制 anchor=topLeft, pivot=(0,0)，offset 直接当作屏幕坐标。
+    void makeDraggable(entt::entity e,
                        std::function<void(float x, float y)> onDrag = nullptr);
-    
-    /**
-     * 设置拖拽范围限制
-     */
-    void setDragBounds(entt::entity e, float minX, float minY, float maxX, float maxY);
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // UI State Query
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * 检测指针是否在元素上
-     */
+    void setDragBounds(entt::entity e, float minX, float minY,
+                       float maxX, float maxY);
+
+    // ── 状态查询 ─────────────────────────────────────────────────────────────
     bool isPointerOverUI(entt::entity e) const;
-    
-    /**
-     * 获取当前悬停的 UI 元素
-     */
     entt::entity getHoveredUI() const;
-    
-    /**
-     * 获取当前按下的 UI 元素
-     */
     entt::entity getPressedUI() const;
-    
-    /**
-     * 获取 UI 元素的计算位置 (屏幕坐标)
-     */
-    void getUIComputedRect(entt::entity e, float* outX, float* outY, 
+    void getUIComputedRect(entt::entity e, float* outX, float* outY,
                            float* outW, float* outH) const;
 
     // ── Engine control ────────────────────────────────────────────────────

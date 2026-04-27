@@ -88,12 +88,14 @@ void EngineContext::init(const EngineConfig& cfg) {
         inputState,
         std::make_unique<SDLInputProvider>(*window)
     );
-    systems.registerSystem<RenderSystem>(*this);
     systems.registerSystem<AudioSystem>(*this);
     systems.registerSystem<PhysicsSystem>(world, dispatcher);
     systems.registerSystem<AnimatorSystem>(*this);
     systems.registerSystem<TweenSystem>(*this);
+    // UISystem 必须先于 RenderSystem 更新：UI 的本帧布局/命令在 RenderSystem
+    // 构建场景命令时被读取。
     systems.registerSystem<UISystem>(*this);
+    systems.registerSystem<RenderSystem>(*this);
 
     systems.initAll();
 

@@ -1,4 +1,5 @@
 #include "RenderSystem.h"
+#include "UISystem.h"
 #include "../runtime/EngineContext.h"
 #include "../components/RenderComponents.h"
 #include "../components/TextComponent.h"
@@ -383,6 +384,11 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         }
     }
 
+    // UI 命令直接附加到 cb 末尾（pass=Screen，按 layerMask 过滤到 UI 相机）。
+    if (ctx.systems.has<UISystem>()) {
+        ctx.systems.get<UISystem>().emitDrawCommands(cb);
+    }
+
     cb.end();
 }
 
@@ -703,7 +709,18 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                     textCommands.push_back(cmd);
                 }
             }
-            
+
+            // 注入 UI 命令（pass=Screen，按本相机 layerMask 过滤）
+            if (ctx_.systems.has<UISystem>()) {
+                std::vector<const backend::RenderCmd*> uiPtrs;
+                ctx_.systems.get<UISystem>().appendDrawCommandPtrs(uiPtrs);
+                for (const backend::RenderCmd* p : uiPtrs) {
+                    const RenderPass pp = cmdPass(*p);
+                    if ((cam.layerMask & renderPassBit(pp)) == 0) continue;
+                    textCommands.push_back(*p);
+                }
+            }
+
             if (!textCommands.empty()) {
                 // 创建指针数组
                 static std::vector<const backend::RenderCmd*> cmdPtrs;

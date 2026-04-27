@@ -1,381 +1,482 @@
 #include "UISystem.h"
+
 #include "../runtime/EngineContext.h"
 #include "../input/InputState.h"
 #include "../components/RenderComponents.h"
+#include "../../backend/renderer/IRenderDevice.h"
+#include "../../core/Logger.h"
+
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 
 namespace engine {
 
-UISystem::UISystem(EngineContext& ctx)
-    : ctx_(ctx)
-{
+UISystem::UISystem(EngineContext& ctx) : ctx_(ctx) {}
+UISystem::~UISystem() = default;
+
+void UISystem::init() {
+    // 注：renderDevice 在 EngineContext::init 之后才可用，此处不主动建白纹理。
+    // 第一次 update() 里再 ensureWhiteTexture()。
 }
 
-void UISystem::update(float dt) {
-    auto& world = ctx_.world;
-    auto& input = ctx_.inputState;
-    
-    // ── Step 1: 更新屏幕尺寸 ────────────────────────────────────────────────────
+void UISystem::shutdown() {
+    if (whiteTexture_.valid()) {
+        ctx_.renderDevice().destroyTexture(whiteTexture_);
+        whiteTexture_ = TextureHandle{};
+    }
+}
+
+void UISystem::ensureWhiteTexture() {
+    if (whiteTexture_.valid()) return;
+    backend::TextureDesc desc{};
+    desc.width  = 1;
+    desc.height = 1;
+    desc.channels = 4;
+    static const uint8_t kWhite[4] = {255, 255, 255, 255};
+    desc.data = kWhite;
+    whiteTexture_ = ctx_.renderDevice().createTexture(desc);
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+
+void UISystem::update(float /*dt*/) {
+    ensureWhiteTexture();
+
     if (ctx_.window) {
         screenW_ = static_cast<float>(ctx_.window->width());
         screenH_ = static_cast<float>(ctx_.window->height());
     }
-    
-    // ── Step 2: 更新 Canvas 缩放 ────────────────────────────────────────────────
-    auto canvasView = world.view<Canvas>();
-    for (auto [e, canvas] : canvasView.each()) {
-        updateCanvasScale(e, canvas);
-    }
-    
-    // ── Step 3: 计算布局 ────────────────────────────────────────────────────────
-    refreshLayout();
-    
-    // ── Step 4: 处理指针事件 ────────────────────────────────────────────────────
-    processPointerEvents(world, input);
-    
-    // ── Step 5: 更新按钮视觉状态 ────────────────────────────────────────────────
-    auto buttonView = world.view<Button, UIElement>();
-    for (auto [e, btn, elem] : buttonView.each()) {
-        handleButton(e, btn, elem);
-    }
-    
-    // ── Step 6: 处理拖拽 ────────────────────────────────────────────────────────
-    auto dragView = world.view<DragHandler, UIElement>();
-    for (auto [e, drag, elem] : dragView.each()) {
-        handleDrag(e, drag, elem, input);
-    }
+
+    updateCanvases();
+    runLayout();
+    runInteraction(ctx_.inputState);
+    buildCommands();
 }
 
-void UISystem::refreshLayout() {
-    auto& world = ctx_.world;
-    
-    // 获取所有 Canvas (根节点)
-    auto canvasView = world.view<Canvas>();
-    
-    for (auto [canvasEntity, canvas] : canvasView.each()) {
-        // Canvas 的世界坐标从屏幕左上角 (0, 0) 开始
-        // 考虑 safeArea 偏移
-        float canvasX = canvas.safeAreaLeft;
-        float canvasY = canvas.safeAreaTop;
-        float canvasW = screenW_ - canvas.safeAreaLeft - canvas.safeAreaRight;
-        float canvasH = screenH_ - canvas.safeAreaTop - canvas.safeAreaBottom;
-        
-        // 遍历 Canvas 下的所有 UI 元素
-        auto elemView = world.view<UIElement>();
-        for (auto [e, elem] : elemView.each()) {
-            // 检查是否属于该 Canvas (通过 UIParent 或直接判断)
-            if (world.all_of<UIParent>(e)) {
-                continue;  // 有父节点，由递归处理
-            }
-            computeWorldPosition(e, world, canvasX, canvasY, canvasW, canvasH);
-        }
-    }
-}
-
-void UISystem::updateCanvasScale(entt::entity canvasEntity, Canvas& canvas) {
-    if (canvas.scaleMode == Canvas::ScaleMode::ScaleWithScreenSize) {
-        // 计算保持宽高比的缩放因子
-        float scaleX = screenW_ / static_cast<float>(canvas.referenceWidth);
-        float scaleY = screenH_ / static_cast<float>(canvas.referenceHeight);
-        canvas.scaleFactor = std::min(scaleX, scaleY);
-    } else {
-        canvas.scaleFactor = 1.f;
-    }
-}
-
-void UISystem::computeWorldPosition(entt::entity e, entt::registry& world,
-                                    float parentX, float parentY,
-                                    float parentW, float parentH) {
-    if (!world.all_of<UIElement>(e)) return;
-    
-    auto& elem = world.get<UIElement>(e);
-    
-    // ── 计算锚点位置 ────────────────────────────────────────────────────────────
-    // 锚点定义了元素相对于父容器的参考点
-    float anchorX = parentX + elem.anchor.minX * parentW;
-    float anchorY = parentY + elem.anchor.minY * parentH;
-    float anchorMaxX = parentX + elem.anchor.maxX * parentW;
-    float anchorMaxY = parentY + elem.anchor.maxY * parentH;
-    
-    // ── 计算元素尺寸 ────────────────────────────────────────────────────────────
-    if (elem.anchor.minX != elem.anchor.maxX) {
-        // 水平拉伸模式：宽度由锚点决定
-        elem.computedW = (anchorMaxX - anchorX) - elem.offsetLeft - elem.offsetRight;
-    } else {
-        // 固定宽度模式
-        elem.computedW = elem.width;
-    }
-    
-    if (elem.anchor.minY != elem.anchor.maxY) {
-        // 垂直拉伸模式：高度由锚点决定
-        elem.computedH = (anchorMaxY - anchorY) - elem.offsetTop - elem.offsetBottom;
-    } else {
-        // 固定高度模式
-        elem.computedH = elem.height;
-    }
-    
-    // ── 计算元素位置 ────────────────────────────────────────────────────────────
-    // 位置 = 锚点 + 偏移 - 中心点偏移
-    elem.computedX = anchorX + elem.offsetLeft - elem.pivotX * elem.computedW;
-    elem.computedY = anchorY + elem.offsetTop - elem.pivotY * elem.computedH;
-    
-    // 同步到 Transform (如果有)
-    if (world.all_of<Transform>(e)) {
-        auto& tf = world.get<Transform>(e);
-        tf.x = elem.computedX;
-        tf.y = elem.computedY;
-    }
-    
-    // ── 递归处理子节点 ──────────────────────────────────────────────────────────
-    if (world.all_of<UIChildren>(e)) {
-        auto& children = world.get<UIChildren>(e);
-        for (auto child : children.children) {
-            computeWorldPosition(child, world,
-                                 elem.computedX, elem.computedY,
-                                 elem.computedW, elem.computedH);
-        }
-    }
-}
-
-void UISystem::processPointerEvents(entt::registry& world, InputState& input) {
-    // 获取指针位置 (屏幕坐标)
-    float px = input.pointerX(0);
-    float py = input.pointerY(0);
-    bool pointerDown = input.pointerDown(0);
-    bool pointerJustPressed = pointerDown && !prevPointerDown_;  // 本帧刚按下
-    prevPointerDown_ = pointerDown;  // 记录当前状态
-    
-    // ── 清除上一帧状态 ──────────────────────────────────────────────────────────
-    if (!pointerDown) {
-        hoveredEntity_ = entt::null;
-    }
-    
-    // ── 遍历所有可交互元素 ──────────────────────────────────────────────────────
-    auto elemView = world.view<UIElement>();
-    
-    // 按 sortOrder 降序排序 (优先处理上层元素)
-    std::vector<entt::entity> sortedEntities;
-    for (auto [e, elem] : elemView.each()) {
-        if (elem.interactable && elem.raycastTarget) {
-            sortedEntities.push_back(e);
-        }
-    }
-    
-    std::sort(sortedEntities.begin(), sortedEntities.end(),
-              [&world](entt::entity a, entt::entity b) {
-                  return world.get<UIElement>(a).sortOrder > 
-                         world.get<UIElement>(b).sortOrder;
-              });
-    
-    // ── 检测悬停 ────────────────────────────────────────────────────────────────
-    hoveredEntity_ = entt::null;
-    for (auto e : sortedEntities) {
-        auto& elem = world.get<UIElement>(e);
-        if (isPointInElement(px, py, e)) {
-            hoveredEntity_ = e;
-            elem.hovered = true;
-            break;  // 只处理最上层
+void UISystem::updateCanvases() {
+    auto view = ctx_.world.view<UICanvas>();
+    for (auto [e, c] : view.each()) {
+        if (c.scaleMode == UICanvas::ScaleMode::ScaleWithScreen && c.referenceWidth > 0 && c.referenceHeight > 0) {
+            const float sx = screenW_ / static_cast<float>(c.referenceWidth);
+            const float sy = screenH_ / static_cast<float>(c.referenceHeight);
+            c.scaleFactor = std::min(sx, sy);
         } else {
-            elem.hovered = false;
+            c.scaleFactor = 1.f;
         }
-    }
-    
-    // ── 处理按下 ────────────────────────────────────────────────────────────────
-    if (pointerJustPressed && hoveredEntity_ != entt::null) {
-        pressedEntity_ = hoveredEntity_;
-        auto& elem = world.get<UIElement>(pressedEntity_);
-        elem.pressed = true;
-        
-        // 触发 Button.onDown
-        if (world.all_of<Button>(pressedEntity_)) {
-            auto& btn = world.get<Button>(pressedEntity_);
-            if (!btn.disabled && btn.onDown) {
-                btn.onDown();
-            }
-        }
-    }
-    
-    // ── 处理松开 ────────────────────────────────────────────────────────────────
-    if (!pointerDown && pressedEntity_ != entt::null) {
-        auto& elem = world.get<UIElement>(pressedEntity_);
-        elem.pressed = false;
-        
-        // 触发 Button.onUp 和 onClick
-        if (world.all_of<Button>(pressedEntity_)) {
-            auto& btn = world.get<Button>(pressedEntity_);
-            if (!btn.disabled) {
-                if (btn.onUp) btn.onUp();
-                // 只有在元素上松开才算点击
-                if (hoveredEntity_ == pressedEntity_ && btn.onClick) {
-                    btn.onClick();
-                }
-            }
-        }
-        
-        // 触发 Toggle
-        if (world.all_of<Toggle>(pressedEntity_) && hoveredEntity_ == pressedEntity_) {
-            auto& toggle = world.get<Toggle>(pressedEntity_);
-            toggle.isOn = !toggle.isOn;
-            if (toggle.onValueChanged) {
-                toggle.onValueChanged(toggle.isOn);
-            }
-        }
-        
-        pressedEntity_ = entt::null;
-    }
-    
-    // ── 重置非悬停元素的 hovered 状态 ────────────────────────────────────────────
-    for (auto [e, elem] : elemView.each()) {
-        if (e != hoveredEntity_) {
-            elem.hovered = false;
-        }
-    }
-    
-    // ── 处理 Slider ─────────────────────────────────────────────────────────────
-    auto sliderView = world.view<Slider, UIElement>();
-    for (auto [e, slider, elem] : sliderView.each()) {
-        handleSlider(e, slider, elem, input);
     }
 }
 
-bool UISystem::isPointInElement(float px, float py, entt::entity e) const {
+// ───────────────────────────────────────────────────────────────────────────────
+
+void UISystem::getWorldCamera(float& camX, float& camY, float& zoom) const {
+    camX = 0.f; camY = 0.f; zoom = 1.f;
+    auto view = ctx_.world.view<Transform, Camera>();
+    for (auto [e, tf, cam] : view.each()) {
+        if (!cam.primary) continue;
+        if ((cam.layerMask & renderPassBit(RenderPass::World)) == 0) continue;
+        camX = tf.x; camY = tf.y;
+        zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+        return;
+    }
+}
+
+void UISystem::screenToCamera(float sx, float sy, float& cx, float& cy) const {
+    // UI/Screen 相机假设位于 (0,0)、zoom=1。屏幕像素 (sx,sy)（y-down，左上角原点）
+    // 在该相机的 world 空间中即 (sx - vpW/2, sy - vpH/2)。
+    cx = sx - screenW_ * 0.5f;
+    cy = sy - screenH_ * 0.5f;
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+
+void UISystem::runLayout() {
     auto& world = ctx_.world;
-    if (!world.all_of<UIElement>(e)) return false;
-    
-    const auto& elem = world.get<UIElement>(e);
-    
-    // 简单的 AABB 检测
-    return px >= elem.computedX &&
-           px <= elem.computedX + elem.computedW &&
-           py >= elem.computedY &&
-           py <= elem.computedY + elem.computedH;
-}
 
-void UISystem::handleButton(entt::entity e, Button& btn, UIElement& elem) {
-    // 更新 Sprite 颜色 (如果有)
-    if (ctx_.world.all_of<Sprite>(e)) {
-        auto& sprite = ctx_.world.get<Sprite>(e);
-        
-        if (btn.disabled) {
-            sprite.tint = btn.disabledColor;
-        } else if (elem.pressed) {
-            sprite.tint = btn.pressedColor;
-        } else if (elem.hovered) {
-            sprite.tint = btn.hoverColor;
-        } else {
-            sprite.tint = btn.normalColor;
+    auto canvasView = world.view<UICanvas>();
+    for (auto [canvasE, c] : canvasView.each()) {
+        const float cx = c.safeAreaLeft;
+        const float cy = c.safeAreaTop;
+        const float cw = std::max(0.f, screenW_ - c.safeAreaLeft - c.safeAreaRight);
+        const float ch = std::max(0.f, screenH_ - c.safeAreaTop - c.safeAreaBottom);
+
+        auto nv = world.view<UINode>();
+        for (auto [e, n] : nv.each()) {
+            if (n.parent != canvasE) continue;
+            layoutNode(e, cx, cy, cw, ch);
         }
     }
 }
 
-void UISystem::handleSlider(entt::entity e, Slider& slider, UIElement& elem,
-                            InputState& input) {
-    if (!elem.interactable) return;
-    
-    float px = input.pointerX(0);
-    bool pointerDown = input.pointerDown(0);
-    
-    // ── 开始拖拽 ────────────────────────────────────────────────────────────────
-    if (pointerDown && !slider.isDragging) {
-        if (isPointInElement(px, input.pointerY(0), e)) {
-            slider.isDragging = true;
+void UISystem::layoutNode(entt::entity e, float parentX, float parentY,
+                          float parentW, float parentH) {
+    auto& world = ctx_.world;
+    auto& n = world.get<UINode>(e);
+
+    bool placed = false;
+
+    // 世界锚点：把目标实体的世界坐标投影到屏幕像素，作为本节点 anchor 中心。
+    if (auto* wa = world.try_get<UIWorldAnchor>(e)) {
+        if (wa->target != entt::null && world.all_of<Transform>(wa->target)) {
+            const auto& tf = world.get<Transform>(wa->target);
+            float camX, camY, camZoom;
+            getWorldCamera(camX, camY, camZoom);
+
+            const float ax = (tf.x + wa->offsetX - camX) * camZoom + screenW_ * 0.5f;
+            const float ay = (tf.y + wa->offsetY - camY) * camZoom + screenH_ * 0.5f;
+
+            n.screenW = n.width;
+            n.screenH = n.height;
+            n.screenX = ax + n.offsetX - n.pivotX * n.screenW;
+            n.screenY = ay + n.offsetY - n.pivotY * n.screenH;
+            placed = true;
         }
     }
-    
-    // ── 拖拽中 ──────────────────────────────────────────────────────────────────
-    if (slider.isDragging && pointerDown) {
-        // 计算滑动条内的相对位置
-        float relX = px - elem.computedX;
-        float normalizedPos = relX / elem.computedW;
-        normalizedPos = std::clamp(normalizedPos, 0.f, 1.f);
-        
-        // 应用 step
-        if (slider.step > 0.f) {
-            float stepCount = std::round(normalizedPos / slider.step);
-            normalizedPos = stepCount * slider.step;
+
+    if (!placed) {
+        const float aMinX = parentX + n.anchor.minX * parentW;
+        const float aMinY = parentY + n.anchor.minY * parentH;
+        const float aMaxX = parentX + n.anchor.maxX * parentW;
+        const float aMaxY = parentY + n.anchor.maxY * parentH;
+
+        n.screenW = (n.anchor.minX != n.anchor.maxX) ? (aMaxX - aMinX) : n.width;
+        n.screenH = (n.anchor.minY != n.anchor.maxY) ? (aMaxY - aMinY) : n.height;
+
+        const float cx = (aMinX + aMaxX) * 0.5f;
+        const float cy = (aMinY + aMaxY) * 0.5f;
+        n.screenX = cx + n.offsetX - n.pivotX * n.screenW;
+        n.screenY = cy + n.offsetY - n.pivotY * n.screenH;
+    }
+
+    // 递归布局子节点
+    auto nv = world.view<UINode>();
+    for (auto [child, cn] : nv.each()) {
+        if (cn.parent == e) {
+            layoutNode(child, n.screenX, n.screenY, n.screenW, n.screenH);
         }
-        
-        // 计算实际值
-        float newValue = slider.min + normalizedPos * (slider.max - slider.min);
-        
-        if (newValue != slider.value) {
-            slider.value = newValue;
-            if (slider.onValueChanged) {
-                slider.onValueChanged(slider.value);
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+
+namespace {
+inline bool pointInRect(float px, float py, const UINode& n) {
+    return px >= n.screenX && px < n.screenX + n.screenW &&
+           py >= n.screenY && py < n.screenY + n.screenH;
+}
+} // namespace
+
+void UISystem::runInteraction(InputState& input) {
+    auto& world = ctx_.world;
+
+    const float px = input.pointerX(0);
+    const float py = input.pointerY(0);
+    const bool  down         = input.pointerDown(0);
+    const bool  justPressed  =  down && !prevPointerDown_;
+    const bool  justReleased = !down &&  prevPointerDown_;
+    prevPointerDown_ = down;
+
+    // ── 1. 命中测试（取 sortOrder 最大的可交互节点）─────────────────────────
+    entt::entity bestHit = entt::null;
+    int          bestOrder = std::numeric_limits<int>::min();
+    {
+        auto nv = world.view<UINode>();
+        for (auto [e, n] : nv.each()) {
+            n.hovered = false;
+            if (!n.visible || !n.interactable) continue;
+            if (!pointInRect(px, py, n)) continue;
+            if (n.sortOrder >= bestOrder) {
+                bestOrder = n.sortOrder;
+                bestHit   = e;
             }
         }
     }
-    
-    // ── 结束拖拽 ────────────────────────────────────────────────────────────────
-    if (!pointerDown && slider.isDragging) {
-        slider.isDragging = false;
-        if (slider.onDragEnd) {
-            slider.onDragEnd(slider.value);
+    hovered_ = bestHit;
+    if (hovered_ != entt::null) world.get<UINode>(hovered_).hovered = true;
+
+    // ── 2. 按下：抓取 pressed_，触发 onDown，开始拖拽/滑条 ───────────────────
+    if (justPressed && hovered_ != entt::null) {
+        pressed_ = hovered_;
+        auto& n = world.get<UINode>(pressed_);
+        n.pressed = true;
+
+        if (auto* btn = world.try_get<UIButton>(pressed_)) {
+            if (!btn->isDisabled && btn->onDown) btn->onDown();
+        }
+        if (auto* d = world.try_get<UIDraggable>(pressed_)) {
+            d->dragging = true;
+            d->grabOffsetX = px - n.screenX;
+            d->grabOffsetY = py - n.screenY;
+            if (d->onDragStart) d->onDragStart();
+        }
+        if (auto* s = world.try_get<UISlider>(pressed_)) {
+            s->dragging = true;
+        }
+    }
+
+    // ── 3. 滑条拖动跟随 ────────────────────────────────────────────────────
+    if (down) {
+        auto sv = world.view<UINode, UISlider>();
+        for (auto [e, n, s] : sv.each()) {
+            if (!s.dragging) continue;
+            const float w = std::max(1.f, n.screenW);
+            float t = (px - n.screenX) / w;
+            t = std::clamp(t, 0.f, 1.f);
+            if (s.step > 0.f) {
+                t = std::round(t / s.step) * s.step;
+                t = std::clamp(t, 0.f, 1.f);
+            }
+            const float v = s.min + t * (s.max - s.min);
+            if (v != s.value) {
+                s.value = v;
+                if (s.onChanged) s.onChanged(v);
+            }
+        }
+    }
+
+    // ── 4. 拖拽元素跟随：直接改写 offsetX/Y（按工厂约定，此时 anchor=topLeft, pivot=0,0）
+    if (down) {
+        auto dv = world.view<UINode, UIDraggable>();
+        for (auto [e, n, d] : dv.each()) {
+            if (!d.dragging) continue;
+            float nx = px - d.grabOffsetX;
+            float ny = py - d.grabOffsetY;
+            if (d.clamp) {
+                nx = std::clamp(nx, d.minX, std::max(d.minX, d.maxX - n.screenW));
+                ny = std::clamp(ny, d.minY, std::max(d.minY, d.maxY - n.screenH));
+            }
+            n.offsetX = nx;
+            n.offsetY = ny;
+            n.screenX = nx;
+            n.screenY = ny;
+            if (d.onDrag) d.onDrag(nx, ny);
+        }
+    }
+
+    // ── 5. 抬起：触发 onUp/onClick/onChanged，结束拖拽/滑条 ─────────────────
+    if (justReleased && pressed_ != entt::null) {
+        auto& n = world.get<UINode>(pressed_);
+        n.pressed = false;
+
+        if (auto* btn = world.try_get<UIButton>(pressed_)) {
+            if (!btn->isDisabled) {
+                if (btn->onUp) btn->onUp();
+                if (hovered_ == pressed_ && btn->onClick) btn->onClick();
+            }
+        }
+        if (auto* tog = world.try_get<UIToggle>(pressed_)) {
+            if (hovered_ == pressed_) {
+                tog->isOn = !tog->isOn;
+                if (tog->onChanged) tog->onChanged(tog->isOn);
+            }
+        }
+        if (auto* d = world.try_get<UIDraggable>(pressed_)) {
+            if (d->dragging) {
+                d->dragging = false;
+                if (d->onDragEnd) d->onDragEnd();
+            }
+        }
+        if (auto* s = world.try_get<UISlider>(pressed_)) {
+            if (s->dragging) {
+                s->dragging = false;
+                if (s->onReleased) s->onReleased(s->value);
+            }
+        }
+        pressed_ = entt::null;
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+
+void UISystem::emitRect(float x, float y, float w, float h,
+                        core::Color tint, TextureHandle tex,
+                        core::Rect src, int sortKey) {
+    if (w <= 0.f || h <= 0.f) return;
+
+    backend::DrawSpriteCmd c{};
+    if (tex.valid()) {
+        c.texture = tex;
+        if (src.w <= 0.f || src.h <= 0.f) {
+            int tw = 1, th = 1;
+            ctx_.renderDevice().getTextureDimensions(tex, tw, th);
+            src = core::Rect{0.f, 0.f, static_cast<float>(tw), static_cast<float>(th)};
+        }
+    } else {
+        c.texture = whiteTexture_;
+        src = core::Rect{0.f, 0.f, 1.f, 1.f};
+    }
+
+    float cx, cy;
+    screenToCamera(x, y, cx, cy);
+    c.x        = cx;
+    c.y        = cy;
+    c.pivotX   = 0.f;
+    c.pivotY   = 0.f;
+    c.rotation = 0.f;
+    c.scaleX   = w / src.w;
+    c.scaleY   = h / src.h;
+    c.srcRect  = src;
+    c.tint     = tint;
+    c.layer    = 0;
+    c.sortKey  = sortKey;
+    c.ySort    = false;
+    c.pass     = RenderPass::Screen;
+    uiCommands_.emplace_back(c);
+}
+
+void UISystem::emitText(const UILabel& lbl, const UINode& n, int sortKey) {
+    if (lbl.text.empty()) return;
+
+    backend::DrawTextCmd t{};
+    t.font     = lbl.font;
+    t.text     = lbl.text;
+    t.fontSize = lbl.fontSize;
+    t.color    = lbl.color;
+    t.layer    = 0;
+    t.sortKey  = sortKey;
+    t.ySort    = false;
+    t.pass     = RenderPass::Screen;
+
+    // 文字以 baseline 为锚（y 向下增长），近似估算字体度量：
+    //   ascent ≈ fontSize * 0.8, total height ≈ fontSize。
+    float ox = n.screenX, oy = n.screenY;
+    switch (lbl.halign) {
+        case UILabel::HAlign::Left:   ox = n.screenX; break;
+        case UILabel::HAlign::Center: {
+            const float approxW = static_cast<float>(lbl.text.size()) * lbl.fontSize * 0.55f;
+            ox = n.screenX + (n.screenW - approxW) * 0.5f;
+            break;
+        }
+        case UILabel::HAlign::Right: {
+            const float approxW = static_cast<float>(lbl.text.size()) * lbl.fontSize * 0.55f;
+            ox = n.screenX + n.screenW - approxW;
+            break;
+        }
+    }
+    const float ascent = lbl.fontSize * 0.8f;
+    switch (lbl.valign) {
+        case UILabel::VAlign::Top:    oy = n.screenY + ascent; break;
+        case UILabel::VAlign::Middle: oy = n.screenY + (n.screenH + ascent) * 0.5f - lbl.fontSize * 0.1f; break;
+        case UILabel::VAlign::Bottom: oy = n.screenY + n.screenH; break;
+    }
+
+    float cx, cy;
+    screenToCamera(ox, oy, cx, cy);
+    t.x = cx;
+    t.y = cy;
+    uiCommands_.emplace_back(std::move(t));
+}
+
+void UISystem::buildCommands() {
+    uiCommands_.clear();
+    auto& world = ctx_.world;
+
+    // 收集所有可见 UINode，按 sortOrder 升序绘制（同序按实体 id 稳定）
+    struct Entry { entt::entity e; int order; };
+    std::vector<Entry> ordered;
+    {
+        auto nv = world.view<UINode>();
+        for (auto [e, n] : nv.each()) {
+            if (n.visible) ordered.push_back({e, n.sortOrder});
+        }
+    }
+    std::stable_sort(ordered.begin(), ordered.end(),
+                     [](const Entry& a, const Entry& b) { return a.order < b.order; });
+
+    int seq = 0;
+    for (const Entry& it : ordered) {
+        const auto& n = world.get<UINode>(it.e);
+        const int baseSort = it.order * 16 + (seq++ & 0xFFFF);
+
+        // 背景
+        if (auto* bg = world.try_get<UIBackground>(it.e)) {
+            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                     bg->color, bg->texture, bg->srcRect, baseSort);
+        }
+
+        // 按钮（自带状态色）
+        if (auto* btn = world.try_get<UIButton>(it.e)) {
+            core::Color col = btn->normal;
+            if (btn->isDisabled) col = btn->disabled;
+            else if (n.pressed)  col = btn->pressed;
+            else if (n.hovered)  col = btn->hover;
+            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                     col, {}, {}, baseSort);
+        }
+
+        // 开关（轨道 + 圆钮）
+        if (auto* tog = world.try_get<UIToggle>(it.e)) {
+            const core::Color trackCol = tog->isOn ? tog->onColor : tog->offColor;
+            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                     trackCol, {}, {}, baseSort);
+            const float pad  = 3.f;
+            const float side = std::max(2.f, std::min(n.screenW, n.screenH) - pad * 2.f);
+            const float ky   = n.screenY + (n.screenH - side) * 0.5f;
+            const float kx   = tog->isOn ? (n.screenX + n.screenW - side - pad)
+                                         : (n.screenX + pad);
+            emitRect(kx, ky, side, side, tog->knobColor, {}, {}, baseSort + 1);
+        }
+
+        // 滑动条（轨道 + 填充 + 把手）
+        if (auto* s = world.try_get<UISlider>(it.e)) {
+            const float trackH = std::max(3.f, n.screenH * 0.35f);
+            const float trackY = n.screenY + (n.screenH - trackH) * 0.5f;
+            emitRect(n.screenX, trackY, n.screenW, trackH,
+                     s->trackColor, {}, {}, baseSort);
+
+            float t = (s->max > s->min) ? (s->value - s->min) / (s->max - s->min) : 0.f;
+            t = std::clamp(t, 0.f, 1.f);
+            emitRect(n.screenX, trackY, n.screenW * t, trackH,
+                     s->fillColor, {}, {}, baseSort + 1);
+
+            const float hw = s->handleW;
+            const float hx = n.screenX + n.screenW * t - hw * 0.5f;
+            emitRect(hx, n.screenY, hw, n.screenH,
+                     s->handleColor, {}, {}, baseSort + 2);
+        }
+
+        // 进度条
+        if (auto* pb = world.try_get<UIProgressBar>(it.e)) {
+            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                     pb->bgColor, {}, {}, baseSort);
+            const float t = std::clamp(pb->value, 0.f, 1.f);
+            float fx = n.screenX, fy = n.screenY, fw = n.screenW, fh = n.screenH;
+            switch (pb->direction) {
+                case UIProgressBar::Direction::LeftToRight:
+                    fw = n.screenW * t; break;
+                case UIProgressBar::Direction::RightToLeft:
+                    fw = n.screenW * t; fx = n.screenX + n.screenW - fw; break;
+                case UIProgressBar::Direction::TopToBottom:
+                    fh = n.screenH * t; break;
+                case UIProgressBar::Direction::BottomToTop:
+                    fh = n.screenH * t; fy = n.screenY + n.screenH - fh; break;
+            }
+            emitRect(fx, fy, fw, fh, pb->fillColor, {}, {}, baseSort + 1);
+        }
+
+        // 图像
+        if (auto* img = world.try_get<UIImage>(it.e)) {
+            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                     img->tint, img->texture, img->srcRect, baseSort);
+        }
+
+        // 文本（最上层）
+        if (auto* lbl = world.try_get<UILabel>(it.e)) {
+            emitText(*lbl, n, baseSort + 8);
         }
     }
 }
 
-void UISystem::handleDrag(entt::entity e, DragHandler& drag, UIElement& elem,
-                          InputState& input) {
-    if (!drag.draggable || !elem.interactable) return;
-    
-    // ── 开始拖拽 ────────────────────────────────────────────────────────────────
-    if (input.pointerDown(0) && !drag.isDragging) {
-        if (elem.hovered) {
-            drag.isDragging = true;
-            draggingEntity_ = e;
-            if (drag.onDragStart) {
-                drag.onDragStart();
-            }
-        }
+void UISystem::emitDrawCommands(backend::CommandBuffer& cb) const {
+    for (const auto& cmd : uiCommands_) {
+        if (auto* s = std::get_if<backend::DrawSpriteCmd>(&cmd))      cb.drawSprite(*s);
+        else if (auto* t = std::get_if<backend::DrawTextCmd>(&cmd))   cb.drawText(*t);
     }
-    
-    // ── 拖拽中 ──────────────────────────────────────────────────────────────────
-    if (drag.isDragging && input.pointerDown(0)) {
-        float newX = input.pointerX(0) - elem.computedW * elem.pivotX;
-        float newY = input.pointerY(0) - elem.computedH * elem.pivotY;
-        
-        // 应用范围限制
-        if (drag.minX != drag.maxX) {
-            newX = std::clamp(newX, drag.minX, drag.maxX - elem.computedW);
-        }
-        if (drag.minY != drag.maxY) {
-            newY = std::clamp(newY, drag.minY, drag.maxY - elem.computedH);
-        }
-        
-        // 限制在父容器内
-        if (drag.constrainToParent) {
-            // TODO: 获取父容器边界
-        }
-        
-        // 更新位置
-        elem.computedX = newX;
-        elem.computedY = newY;
-        elem.offsetLeft = newX;
-        elem.offsetTop = newY;
-        
-        // 同步到 Transform
-        if (ctx_.world.all_of<Transform>(e)) {
-            auto& tf = ctx_.world.get<Transform>(e);
-            tf.x = newX;
-            tf.y = newY;
-        }
-        
-        if (drag.onDrag) {
-            drag.onDrag(newX, newY);
-        }
-    }
-    
-    // ── 结束拖拽 ────────────────────────────────────────────────────────────────
-    if (!input.pointerDown(0) && drag.isDragging) {
-        drag.isDragging = false;
-        if (draggingEntity_ == e) {
-            draggingEntity_ = entt::null;
-        }
-        if (drag.onDragEnd) {
-            drag.onDragEnd();
-        }
-    }
+}
+
+void UISystem::appendDrawCommandPtrs(std::vector<const backend::RenderCmd*>& out) const {
+    out.reserve(out.size() + uiCommands_.size());
+    for (const auto& cmd : uiCommands_) out.push_back(&cmd);
 }
 
 } // namespace engine

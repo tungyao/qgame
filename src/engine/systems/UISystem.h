@@ -2,93 +2,85 @@
 
 #include "ISystem.h"
 #include "../components/UIComponents.h"
+#include "../../backend/shared/ResourceHandle.h"
+#include "../../backend/renderer/CommandBuffer.h"
 #include <entt/entt.hpp>
+#include <vector>
 
 namespace engine {
 
-class InputState;
 class EngineContext;
+class InputState;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// UISystem - UI 交互处理系统
+// UISystem v2
 // ───────────────────────────────────────────────────────────────────────────────
-// 负责：
-// 1. 计算 UI 元素布局 (锚点、偏移)
-// 2. 处理交互事件 (点击、拖拽)
-// 3. 更新交互状态 (hovered、pressed)
-// 4. 触发回调函数
+// 每帧 update() 做：
+//   1. 更新 Canvas 缩放
+//   2. 自顶向下计算每个 UINode 的屏幕矩形（含世界锚点投影）
+//   3. 处理指针事件、拖拽、滑动条、开关、按钮回调
+//   4. 准备本帧的 UI 绘制命令缓存（DrawSpriteCmd / DrawTextCmd）
+//
+// RenderSystem 负责消费这些命令——既支持 CPU 路径（直接附加到 cb）也支持 GPU-driven
+// 路径（作为非精灵 drawable 注入）。
 // ═══════════════════════════════════════════════════════════════════════════════
 
-class UISystem : public ISystem {
+class UISystem final : public ISystem {
 public:
     explicit UISystem(EngineContext& ctx);
-    ~UISystem() override = default;
-    
-    // ── ISystem 接口 ────────────────────────────────────────────────────────────
+    ~UISystem() override;
+
+    void init() override;
     void update(float dt) override;
-    
-    // ── 公共接口 ────────────────────────────────────────────────────────────────
-    
-    // 获取当前悬停的 UI 元素
-    entt::entity getHoveredElement() const { return hoveredEntity_; }
-    
-    // 获取当前按下的 UI 元素
-    entt::entity getPressedElement() const { return pressedEntity_; }
-    
-    // 获取当前焦点的 UI 元素 (键盘导航用)
-    entt::entity getFocusedElement() const { return focusedEntity_; }
-    void setFocusedElement(entt::entity e) { focusedEntity_ = e; }
-    
-    // 强制刷新布局 (修改锚点后调用)
-    void refreshLayout();
-    
-    // 检测点是否在元素内
-    bool isPointInElement(float px, float py, entt::entity e) const;
-    
+    void shutdown() override;
+
+    // 把本帧的 UI 命令直接 append 到 CommandBuffer 末尾（CPU 路径）。
+    void emitDrawCommands(backend::CommandBuffer& cb) const;
+
+    // GPU-driven 路径用：把本帧 UI 命令以指针形式追加到外部容器。
+    void appendDrawCommandPtrs(std::vector<const backend::RenderCmd*>& out) const;
+
+    // 状态查询
+    entt::entity hovered() const { return hovered_; }
+    entt::entity pressed() const { return pressed_; }
+
+    // 把屏幕像素坐标转成 Screen 相机的 world 坐标（左上角对齐）。
+    // 暴露给外部以便测试/调试。
+    void screenToCamera(float sx, float sy, float& cx, float& cy) const;
+
+    // 1×1 白色纹理（纯色矩形用）。
+    TextureHandle whiteTexture() const { return whiteTexture_; }
+
 private:
-    // ── 内部方法 ────────────────────────────────────────────────────────────────
-    
-    // 计算单个元素的布局
-    void computeElementLayout(entt::entity e, entt::registry& world);
-    
-    // 计算元素的世界坐标 (考虑父节点)
-    void computeWorldPosition(entt::entity e, entt::registry& world,
-                              float parentX, float parentY,
-                              float parentW, float parentH);
-    
-    // 更新 Canvas 缩放因子
-    void updateCanvasScale(entt::entity canvasEntity, Canvas& canvas);
-    
-    // 处理指针事件
-    void processPointerEvents(entt::registry& world, InputState& input);
-    
-    // 处理按钮点击
-    void handleButton(entt::entity e, Button& btn, UIElement& elem);
-    
-    // 处理开关切换
-    void handleToggle(entt::entity e, Toggle& toggle, UIElement& elem);
-    
-    // 处理滑动条
-    void handleSlider(entt::entity e, Slider& slider, UIElement& elem, InputState& input);
-    
-    // 处理拖拽
-    void handleDrag(entt::entity e, DragHandler& drag, UIElement& elem, InputState& input);
-    
-    // 按 sortOrder 排序 UI 元素
-    void sortUIElements(entt::registry& world);
-    
-    // ── 成员变量 ────────────────────────────────────────────────────────────────
+    void ensureWhiteTexture();
+    void updateCanvases();
+    void runLayout();
+    void layoutNode(entt::entity e, float parentX, float parentY,
+                    float parentW, float parentH);
+    void runInteraction(InputState& input);
+
+    // 命令缓存构建
+    void buildCommands();
+    void emitRect(float x, float y, float w, float h,
+                  core::Color tint, TextureHandle tex,
+                  core::Rect src, int sortKey);
+    void emitText(const UILabel& label, const UINode& node, int sortKey);
+
+    // 世界相机参数（取第一个含 World layer 的相机）
+    void getWorldCamera(float& camX, float& camY, float& zoom) const;
+
     EngineContext& ctx_;
-    
-    entt::entity hoveredEntity_  = entt::null;  // 当前悬停元素
-    entt::entity pressedEntity_  = entt::null;  // 当前按下元素
-    entt::entity focusedEntity_  = entt::null;  // 当前焦点元素
-    entt::entity draggingEntity_ = entt::null;  // 当前拖拽元素
-    
-    float screenW_ = 1920.f;  // 当前屏幕宽度
-    float screenH_ = 1080.f;  // 当前屏幕高度
-    
-    bool prevPointerDown_ = false;  // 上一帧指针状态 (用于检测 justPressed)
+
+    TextureHandle whiteTexture_{};
+
+    entt::entity hovered_ = entt::null;
+    entt::entity pressed_ = entt::null;
+    bool prevPointerDown_ = false;
+
+    float screenW_ = 1920.f, screenH_ = 1080.f;
+
+    // 本帧命令缓存
+    mutable std::vector<backend::RenderCmd> uiCommands_;
 };
 
 } // namespace engine
