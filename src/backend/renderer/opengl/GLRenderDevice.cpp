@@ -606,11 +606,24 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     uint32_t      batchIdxStart  = 0;
     int32_t       batchVertStart = 0;
 
+    struct ScissorRect { int x, y, w, h; };
+    std::vector<ScissorRect> scissorStack;
+    bool currentHasScissor = false;
+    ScissorRect currentScissor{};
+
     auto flush = [&]() {
         if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-            batches.push_back({ currentTex, batchIdxStart,
-                                static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                                batchVertStart, currentIsFont, currentPxRange });
+            BatchSegment seg{ currentTex, batchIdxStart,
+                              static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
+                              batchVertStart, currentIsFont, currentPxRange };
+            seg.hasScissor = currentHasScissor;
+            if (currentHasScissor) {
+                seg.scissorX = currentScissor.x;
+                seg.scissorY = currentScissor.y;
+                seg.scissorW = currentScissor.w;
+                seg.scissorH = currentScissor.h;
+            }
+            batches.push_back(seg);
             batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
             batchVertStart = static_cast<int32_t>(batchVerts_.size());
         }
@@ -694,10 +707,45 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
             pushQuad(px,py, px1,py, px1,py1, px,py1, u0,v0, u1,v1,
                      core::Color{255,255,255,255});
         }
+        else if (auto* ps = std::get_if<PushScissorCmd>(cmd)) {
+            ScissorRect r{
+                static_cast<int>(ps->rect.x),
+                static_cast<int>(ps->rect.y),
+                static_cast<int>(ps->rect.w),
+                static_cast<int>(ps->rect.h)
+            };
+            if (!scissorStack.empty()) {
+                const ScissorRect& top = scissorStack.back();
+                const int x0 = std::max(r.x, top.x);
+                const int y0 = std::max(r.y, top.y);
+                const int x1 = std::min(r.x + r.w, top.x + top.w);
+                const int y1 = std::min(r.y + r.h, top.y + top.h);
+                r.x = x0; r.y = y0;
+                r.w = std::max(0, x1 - x0);
+                r.h = std::max(0, y1 - y0);
+            }
+            scissorStack.push_back(r);
+            flush();
+            currentHasScissor = true;
+            currentScissor    = r;
+            continue;
+        }
+        else if (auto* /*pp*/ pp = std::get_if<PopScissorCmd>(cmd)) {
+            (void)pp;
+            if (!scissorStack.empty()) scissorStack.pop_back();
+            flush();
+            if (scissorStack.empty()) {
+                currentHasScissor = false;
+            } else {
+                currentHasScissor = true;
+                currentScissor    = scissorStack.back();
+            }
+            continue;
+        }
         else if (auto* text = std::get_if<DrawTextCmd>(cmd)) {
             const engine::FontData* font = getFont(text->font);
             if (!font || !textures_.valid(font->texture)) continue;
-            
+
             const float scale = text->fontSize / font->fontSize;
             const float camZoom = (camera.zoom > 0.f) ? camera.zoom : 1.f;
             const float screenPxRange = font->pxRange * scale * camZoom;
@@ -800,6 +848,7 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     glUniform1i(uTexLoc_, 0);
     glActiveTexture(GL_TEXTURE0);
 
+    bool scissorEnabled = false;
     for (const BatchSegment& seg : batches) {
         if (seg.isFont) {
             glUseProgram(msdfShaderProgram_);
@@ -811,7 +860,23 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
             glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
             glUniform1i(uTexLoc_, 0);
         }
-        
+
+        if (seg.hasScissor) {
+            // GL scissor 原点在左下角，引擎屏幕坐标 y 向下，所以要翻转 y。
+            const int x0 = std::max(0, seg.scissorX);
+            const int y0 = std::max(0, seg.scissorY);
+            const int x1 = std::min(width,  seg.scissorX + seg.scissorW);
+            const int y1 = std::min(height, seg.scissorY + seg.scissorH);
+            const int sw = std::max(0, x1 - x0);
+            const int sh = std::max(0, y1 - y0);
+            const int glY = height - y1;
+            if (!scissorEnabled) { glEnable(GL_SCISSOR_TEST); scissorEnabled = true; }
+            glScissor(x0, glY, sw, sh);
+        } else if (scissorEnabled) {
+            glDisable(GL_SCISSOR_TEST);
+            scissorEnabled = false;
+        }
+
         if (textures_.valid(seg.tex)) {
             glBindTexture(GL_TEXTURE_2D, textures_.get(seg.tex).glTex);
         }
@@ -823,6 +888,7 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
             seg.vertOffset
         );
     }
+    if (scissorEnabled) glDisable(GL_SCISSOR_TEST);
 
     glBindVertexArray(0);
     glUseProgram(0);

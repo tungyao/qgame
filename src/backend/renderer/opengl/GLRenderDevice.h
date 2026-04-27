@@ -87,6 +87,8 @@ private:
         int32_t       vertOffset;
         bool          isFont = false;
         float         pxRange = 4.0f;
+        bool          hasScissor = false;
+        int           scissorX = 0, scissorY = 0, scissorW = 0, scissorH = 0;
     };
 
     static constexpr int MAX_SPRITES_PER_BATCH = 2048;

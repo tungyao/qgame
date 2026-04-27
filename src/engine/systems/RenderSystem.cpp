@@ -63,6 +63,8 @@ RenderPass cmdPass(const backend::RenderCmd& cmd) {
     if (auto* s = std::get_if<backend::DrawSpriteCmd>(&cmd)) return s->pass;
     if (auto* t = std::get_if<backend::DrawTileCmd>(&cmd))   return t->pass;
     if (auto* x = std::get_if<backend::DrawTextCmd>(&cmd))   return x->pass;
+    if (auto* p = std::get_if<backend::PushScissorCmd>(&cmd)) return p->pass;
+    if (auto* q = std::get_if<backend::PopScissorCmd>(&cmd))  return q->pass;
     return RenderPass::World;
 }
 

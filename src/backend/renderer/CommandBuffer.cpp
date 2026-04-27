@@ -45,6 +45,16 @@ void CommandBuffer::drawText(const DrawTextCmd& cmd) {
     cmds_.emplace_back(cmd);
 }
 
+void CommandBuffer::pushScissor(const PushScissorCmd& cmd) {
+    ASSERT_MSG(recording_, "CommandBuffer not recording");
+    cmds_.emplace_back(cmd);
+}
+
+void CommandBuffer::popScissor(const PopScissorCmd& cmd) {
+    ASSERT_MSG(recording_, "CommandBuffer not recording");
+    cmds_.emplace_back(cmd);
+}
+
 void CommandBuffer::dispatch(const DispatchCmd& cmd) {
     ASSERT_MSG(recording_, "CommandBuffer not recording");
     cmds_.emplace_back(cmd);

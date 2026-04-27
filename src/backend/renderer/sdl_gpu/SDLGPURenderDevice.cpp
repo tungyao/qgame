@@ -863,11 +863,26 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     uint32_t      batchIdxStart  = 0;
     int32_t       batchVertStart = 0;
 
+    // Scissor 栈 (屏幕像素 / framebuffer 坐标，整数化)。每次 push 取与栈顶交集；
+    // pop 回退到上一层。栈空时 hasScissor=false，绘制时不调用 SetGPUScissor。
+    struct ScissorRect { int x, y, w, h; };
+    std::vector<ScissorRect> scissorStack;
+    bool currentHasScissor = false;
+    ScissorRect currentScissor{};
+
     auto flush = [&]() {
         if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-            batches.push_back({ currentTex, batchIdxStart,
-                                static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                                batchVertStart, currentIsFont, currentPxRange });
+            BatchSegment seg{ currentTex, batchIdxStart,
+                              static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
+                              batchVertStart, currentIsFont, currentPxRange };
+            seg.hasScissor = currentHasScissor;
+            if (currentHasScissor) {
+                seg.scissorX = currentScissor.x;
+                seg.scissorY = currentScissor.y;
+                seg.scissorW = currentScissor.w;
+                seg.scissorH = currentScissor.h;
+            }
+            batches.push_back(seg);
             batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
             batchVertStart = static_cast<int32_t>(batchVerts_.size());
         }
@@ -948,6 +963,41 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             const float py1 = py + ts;
             pushQuad(px,py, px1,py, px1,py1, px,py1, u0,v0, u1,v1,
                      core::Color{255,255,255,255});
+        }
+        else if (auto* ps = std::get_if<PushScissorCmd>(cmd)) {
+            ScissorRect r{
+                static_cast<int>(ps->rect.x),
+                static_cast<int>(ps->rect.y),
+                static_cast<int>(ps->rect.w),
+                static_cast<int>(ps->rect.h)
+            };
+            if (!scissorStack.empty()) {
+                const ScissorRect& top = scissorStack.back();
+                const int x0 = std::max(r.x, top.x);
+                const int y0 = std::max(r.y, top.y);
+                const int x1 = std::min(r.x + r.w, top.x + top.w);
+                const int y1 = std::min(r.y + r.h, top.y + top.h);
+                r.x = x0; r.y = y0;
+                r.w = std::max(0, x1 - x0);
+                r.h = std::max(0, y1 - y0);
+            }
+            scissorStack.push_back(r);
+            flush();
+            currentHasScissor = true;
+            currentScissor    = r;
+            continue;
+        }
+        else if (auto* /*pp*/ pp = std::get_if<PopScissorCmd>(cmd)) {
+            (void)pp;
+            if (!scissorStack.empty()) scissorStack.pop_back();
+            flush();
+            if (scissorStack.empty()) {
+                currentHasScissor = false;
+            } else {
+                currentHasScissor = true;
+                currentScissor    = scissorStack.back();
+            }
+            continue;
         }
         else if (auto* text = std::get_if<DrawTextCmd>(cmd)) {
             const engine::FontData* font = getFont(text->font);
@@ -1070,22 +1120,37 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
         SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
         for (const BatchSegment& segment : batches) {
-            SDL_GPUGraphicsPipeline* segPipeline = segment.isFont ? 
+            SDL_GPUGraphicsPipeline* segPipeline = segment.isFont ?
                 (pipeline == offscreenPipeline_ ? msdfOffscreenPipeline_ : msdfPipeline_) :
                 pipeline;
             SDL_BindGPUGraphicsPipeline(pass, segPipeline);
-            
+
             if (textures_.valid(segment.tex)) {
                 TextureEntry& entry = textures_.get(segment.tex);
                 SDL_GPUTextureSamplerBinding binding{ entry.gpuTex, entry.sampler };
                 SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
             }
-            
+
             if (segment.isFont) {
                 float pxRange = segment.pxRange;
                 SDL_PushGPUFragmentUniformData(cmdBuf, 0, &pxRange, sizeof(pxRange));
             }
-            
+
+            if (segment.hasScissor) {
+                // 与 framebuffer 取交集，避免越界 (SDL 要求 scissor 在 target 内)。
+                const int fbW = static_cast<int>(targetWidth);
+                const int fbH = static_cast<int>(targetHeight);
+                const int x0 = std::max(0, segment.scissorX);
+                const int y0 = std::max(0, segment.scissorY);
+                const int x1 = std::min(fbW, segment.scissorX + segment.scissorW);
+                const int y1 = std::min(fbH, segment.scissorY + segment.scissorH);
+                SDL_Rect scRect{ x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0) };
+                SDL_SetGPUScissor(pass, &scRect);
+            } else {
+                SDL_Rect full{ 0, 0, static_cast<int>(targetWidth), static_cast<int>(targetHeight) };
+                SDL_SetGPUScissor(pass, &full);
+            }
+
             SDL_DrawGPUIndexedPrimitives(pass, segment.idxCount, 1, segment.idxOffset, segment.vertOffset, 0);
         }
     }

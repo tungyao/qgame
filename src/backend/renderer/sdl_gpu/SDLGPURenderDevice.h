@@ -104,6 +104,9 @@ private:
         int32_t       vertOffset;
         bool          isFont = false;
         float         pxRange = 4.0f;
+        // 该 batch 绘制时生效的 scissor (屏幕像素，左上原点)；w<=0 表示无裁剪。
+        bool          hasScissor = false;
+        int           scissorX = 0, scissorY = 0, scissorW = 0, scissorH = 0;
     };
     // 将像素空间 (0,0)-(w,h) 映射到 NDC 的正交投影矩阵（列主序）
     void buildOrthoMatrix(float w, float h, float out[16]);

@@ -170,6 +170,8 @@ void RenderPipeline::execute(CommandBuffer& cb, IRenderDevice& device) {
         if (auto* s = std::get_if<DrawSpriteCmd>(&cmd))      pass = s->pass;
         else if (auto* t = std::get_if<DrawTileCmd>(&cmd))   pass = t->pass;
         else if (auto* tx = std::get_if<DrawTextCmd>(&cmd))  pass = tx->pass;
+        else if (auto* ps = std::get_if<PushScissorCmd>(&cmd)) pass = ps->pass;
+        else if (auto* pp = std::get_if<PopScissorCmd>(&cmd))  pass = pp->pass;
         else continue; // ClearCmd/SetCameraCmd：swapchain 路径由 PassState 覆盖
         auto it = buckets.find(pass);
         if (it != buckets.end()) it->second.push_back(&cmd);

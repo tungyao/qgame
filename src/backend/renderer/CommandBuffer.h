@@ -115,7 +115,20 @@ struct BarrierCmd {
     TextureHandle texture;
 };
 
-using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, DrawTextCmd, SetCameraCmd, ClearCmd, DispatchCmd, BarrierCmd>;
+// 矩形裁剪：rect 单位为屏幕像素 (左上角原点，y 向下)。
+// 嵌套 push 时各后端取栈顶交集；rect 的 w/h <= 0 视为空区域 (全裁掉)。
+struct PushScissorCmd {
+    core::Rect         rect;
+    int                sortKey = 0;
+    engine::RenderPass pass    = engine::RenderPass::Screen;
+};
+
+struct PopScissorCmd {
+    int                sortKey = 0;
+    engine::RenderPass pass    = engine::RenderPass::Screen;
+};
+
+using RenderCmd = std::variant<DrawSpriteCmd, DrawTileCmd, DrawTextCmd, SetCameraCmd, ClearCmd, DispatchCmd, BarrierCmd, PushScissorCmd, PopScissorCmd>;
 
 class CommandBuffer {
 public:
@@ -127,6 +140,8 @@ public:
     void drawSprite(const DrawSpriteCmd& cmd);
     void drawTile(const DrawTileCmd& cmd);
     void drawText(const DrawTextCmd& cmd);
+    void pushScissor(const PushScissorCmd& cmd);
+    void popScissor(const PopScissorCmd& cmd);
     void dispatch(const DispatchCmd& cmd);
     void barrier(BarrierCmd::Type type, BufferHandle buf = {}, TextureHandle tex = {});
 
