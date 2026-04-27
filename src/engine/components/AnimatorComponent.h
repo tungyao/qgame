@@ -187,7 +187,7 @@ struct AnimatorOutput {
     float       rotationOffset = 0.f;
     float       scaleMulX      = 1.f;
     float       scaleMulY      = 1.f;
-    core::Color tintMul        = core::Color::White; // R/G/B/A 各通道 0..255 倍率分母 = 255
+    core::Color tintMul        = core::Color{0,0,0,0}; // additive offset: default = no change
 };
 
 struct AnimatorComponent {

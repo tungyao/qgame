@@ -1,3 +1,41 @@
+/**
+ * @file SDLGPURenderDevice.cpp
+ * @brief SDL3 GPU API 渲染后端实现 — 仅保留 GPU 渲染方式
+ *
+ * 支持后端: Vulkan (Linux/Windows), Metal (macOS/iOS), D3D12 (Windows)
+ * 着色器格式: SPIRV (跨平台), DXIL (Windows only, 按需编译)
+ *
+ * 架构概览:
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  提交入口                                                           ║
+ * ║  ┌─ submitCommandBuffer(CommandBuffer)                              ║
+ * ║  │   ↓ 提取 ClearCmd/SetCameraCmd, 转为 RenderCmd* 数组              ║
+ * ║  │   ↓ renderCommandBufferToTarget()                                ║
+ * ║  ├─ submitPass(PassSubmitInfo, vector<RenderCmd*>)                   ║
+ * ║  │   ↓ renderCmdsToTarget()  ← 核心渲染函数                          ║
+ * ║  ├─ submitGPUDrivenPass(PassSubmitInfo, GPURenderParams)             ║
+ * ║  │   ↓ GPU 直接从 storage buffer 读取 sprite 数据并单 pass 绘制       ║
+ * ║  └─ renderToTexture / renderToTextureOffscreen                      ║
+ * ║      ↓ 渲染到纹理离屏目标 (editor 预览 / GPU fence 同步)              ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
+ * Pipeline 类型:
+ *  (1) pipeline_            — Sprite/Tile 渲染 (swapchain 格式)
+ *  (2) offscreenPipeline_   — Sprite/Tile 渲染 (R8G8B8A8_UNORM, 离屏)
+ *  (3) msdfPipeline_        — MSDF 文字渲染 (swapchain)
+ *  (4) msdfOffscreenPipeline_ — MSDF 文字渲染 (离屏)
+ *  (5) gpuDrivenPipeline_   — GPU-driven sprite (直接读 storage buffer)
+ *
+ * 渲染管线层次 (每帧):
+ *  beginFrame() → [submit* calls] → present()
+ *       ↓
+ *  SDL_AcquireGPUCommandBuffer → SDL_WaitAndAcquireGPUSwapchainTexture
+ *       ↓
+ *  每个 submit 调用录制 GPU 命令到同一个 gpuCmdBuf_
+ *       ↓
+ *  present() → SDL_SubmitGPUCommandBuffer → 提交到 GPU 队列
+ */
+
 #include "SDLGPURenderDevice.h"
 
 #include <algorithm>
@@ -10,21 +48,28 @@
 #include "../../../core/Assert.h"
 #include "../../../core/Logger.h"
 
-#include "sprite_vert_spv.h"
-#include "sprite_frag_spv.h"
-#include "msdf_frag_spv.h"
-#include "sprite_gpu_vert_spv.h"
-#include "sprite_gpu_frag_spv.h"
+// 预编译 SPIRV 着色器二进制 (CMake 通过 glslc 编译 .glsl → .spv)
+#include "sprite_vert_spv.h"          // 标准 sprite 顶点着色器: pos+uv+color → clip space
+#include "sprite_frag_spv.h"          // 标准 sprite 片段着色器: 纹理采样 × 顶点颜色
+#include "msdf_frag_spv.h"            // MSDF 字体片段着色器: median() 抗锯齿
+#include "sprite_gpu_vert_spv.h"      // GPU-driven 顶点着色器: 从 storage buffer 读 sprite 数据
+#include "sprite_gpu_frag_spv.h"      // GPU-driven 片段着色器
 #ifdef QGAME_HAS_DXIL_SHADERS
-#include "sprite_vert_dxil.h"
+#include "sprite_vert_dxil.h"         // DXIL 版本的着色器 (Windows D3D12 后端)
 #include "sprite_frag_dxil.h"
 #include "msdf_frag_dxil.h"
 #endif
 
 namespace backend {
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 构造 / 析构
+// ═══════════════════════════════════════════════════════════════════════════════
+
 SDLGPURenderDevice::SDLGPURenderDevice(SDL_Window* window,bool debug)
     : window_(window), debug_(debug) {
+    // 预分配 CPU 侧 batch 缓冲区 (最大 batch 大小的 sprite 数量)
+    // 每个 sprite: 4 顶点 + 6 索引 (两个三角形组成一个矩形)
     batchVerts_.reserve(MAX_SPRITES_PER_BATCH * 4);
     batchIdx_.reserve(MAX_SPRITES_PER_BATCH * 6);
 }
@@ -33,18 +78,25 @@ SDLGPURenderDevice::~SDLGPURenderDevice() {
     shutdown();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 初始化 — 创建设备、缓冲区、Pipeline
+// ═══════════════════════════════════════════════════════════════════════════════
+
 void SDLGPURenderDevice::init() {
+    // 1. 创建 GPU 设备 — 请求 Vulkan 后端，支持 SPIRV (+ DXIL)
     SDL_GPUShaderFormat formats = SDL_GPU_SHADERFORMAT_SPIRV;
 #ifdef QGAME_HAS_DXIL_SHADERS
     formats |= SDL_GPU_SHADERFORMAT_DXIL;
 #endif
 
+    // 第三个参数 "vulkan" 是 hint: 优先 Vulkan，不可用时自动 fallback
     device_ = SDL_CreateGPUDevice(formats,debug_ , "vulkan");
     if (!device_) {
         core::logError("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         return;
     }
 
+    // 2. 将 SDL 窗口关联到 GPU 设备 (建立 swapchain)
     if (!SDL_ClaimWindowForGPUDevice(device_, window_)) {
         core::logError("SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
         SDL_DestroyGPUDevice(device_);
@@ -52,6 +104,7 @@ void SDLGPURenderDevice::init() {
         return;
     }
 
+    // 3. 查询实际使用的着色器格式 (SPIRV 或 DXIL)
     const SDL_GPUShaderFormat supported = SDL_GetGPUShaderFormats(device_);
     const char* backend = SDL_GetGPUDeviceDriver(device_);
     core::logInfo("GPU backend: %s  shader formats: 0x%x", backend, static_cast<int>(supported));
@@ -70,16 +123,21 @@ void SDLGPURenderDevice::init() {
         return;
     }
 
+    // 4. 分配 GPU 资源
+    // 顶点缓冲区: 每帧动态上传 batch 的 sprite 顶点数据
     SDL_GPUBufferCreateInfo vbInfo{};
     vbInfo.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
     vbInfo.size = MAX_SPRITES_PER_BATCH * 4 * sizeof(SpriteVertex);
     vertexBuf_ = SDL_CreateGPUBuffer(device_, &vbInfo);
 
+    // 索引缓冲区: 每帧动态上传 batch 的索引数据
     SDL_GPUBufferCreateInfo ibInfo{};
     ibInfo.usage = SDL_GPU_BUFFERUSAGE_INDEX;
     ibInfo.size = MAX_SPRITES_PER_BATCH * 6 * sizeof(uint16_t);
     indexBuf_ = SDL_CreateGPUBuffer(device_, &ibInfo);
 
+    // 传输缓冲区: CPU→GPU 中转 (vertex + index 共用，顺序排列)
+    // 大小 = vbInfo.size + ibInfo.size (因为 vertex 和 index 放在同一块里)
     SDL_GPUTransferBufferCreateInfo tbInfo{};
     tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     tbInfo.size = vbInfo.size + ibInfo.size;
@@ -90,21 +148,29 @@ void SDLGPURenderDevice::init() {
         return;
     }
 
+    // 5. 创建所有渲染管线 (sprite, MSDF, GPU-driven)
     createPipeline();
     core::logInfo("SDLGPURenderDevice initialized");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 帧生命周期
+// ═══════════════════════════════════════════════════════════════════════════════
 
 void SDLGPURenderDevice::beginFrame() {
     if (!device_) {
         return;
     }
 
+    // 从 GPU 设备获取一个新的 command buffer (本帧所有 GPU 命令都录制到这里)
     gpuCmdBuf_ = SDL_AcquireGPUCommandBuffer(device_);
     ASSERT_MSG(gpuCmdBuf_, "SDL_AcquireGPUCommandBuffer failed");
 
+    // 获取 swapchain 的下一帧纹理 (等待上一帧渲染完成)
     SDL_GPUTexture* tex = nullptr;
     const bool ok = SDL_WaitAndAcquireGPUSwapchainTexture(gpuCmdBuf_, window_, &tex, &swapW_, &swapH_);
     if (!ok || !tex) {
+        // swapchain 不可用 (窗口最小化、resize 中等)，取消本帧
         SDL_CancelGPUCommandBuffer(gpuCmdBuf_);
         gpuCmdBuf_ = nullptr;
         swapchainTex_ = nullptr;
@@ -115,6 +181,8 @@ void SDLGPURenderDevice::beginFrame() {
 }
 
 void SDLGPURenderDevice::endFrame() {
+    // 当前实现中 rendering 在每个 submit 调用里即时录制到 gpuCmdBuf_
+    // endFrame 仅在 present() 真正提交到 GPU 后才需要清理
 }
 
 void SDLGPURenderDevice::shutdown() {
@@ -122,8 +190,10 @@ void SDLGPURenderDevice::shutdown() {
         return;
     }
 
+    // 等待所有 GPU 操作完成，避免释放正在使用的资源
     SDL_WaitForGPUIdle(device_);
 
+    // 释放离屏渲染目标 (editor + offscreen)
     if (textures_.valid(editorRenderTarget_)) {
         destroyTexture(editorRenderTarget_);
         editorRenderTarget_ = {};
@@ -134,16 +204,20 @@ void SDLGPURenderDevice::shutdown() {
         offscreenRenderTarget_ = {};
     }
 
+    // 释放 graphics pipelines
     if (pipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, pipeline_); pipeline_ = nullptr; }
     if (offscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, offscreenPipeline_); offscreenPipeline_ = nullptr; }
     if (msdfPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfPipeline_); msdfPipeline_ = nullptr; }
     if (msdfOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfOffscreenPipeline_); msdfOffscreenPipeline_ = nullptr; }
     if (gpuDrivenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenPipeline_); gpuDrivenPipeline_ = nullptr; }
     if (gpuDrivenQuadIndexBuf_) { SDL_ReleaseGPUBuffer(device_, gpuDrivenQuadIndexBuf_); gpuDrivenQuadIndexBuf_ = nullptr; }
+
+    // 释放批处理缓冲 (vertex + index + transfer)
     if (vertexBuf_) { SDL_ReleaseGPUBuffer(device_, vertexBuf_); vertexBuf_ = nullptr; }
     if (indexBuf_) { SDL_ReleaseGPUBuffer(device_, indexBuf_); indexBuf_ = nullptr; }
     if (transferBuf_) { SDL_ReleaseGPUTransferBuffer(device_, transferBuf_); transferBuf_ = nullptr; }
 
+    // 清理所有 compute pipeline (通过 HandleMap 遍历)
     while (computePipelines_.valid(ComputePipelineHandle{1, 1})) {
         ComputePipelineHandle h{1, 1};
         if (computePipelines_.tryGet(h)) {
@@ -153,6 +227,7 @@ void SDLGPURenderDevice::shutdown() {
         }
     }
 
+    // 清理所有自定义 buffer
     while (buffers_.valid(BufferHandle{1, 1})) {
         BufferHandle h{1, 1};
         if (buffers_.tryGet(h)) {
@@ -162,11 +237,16 @@ void SDLGPURenderDevice::shutdown() {
         }
     }
 
+    // 解绑窗口并销毁 GPU 设备
     SDL_ReleaseWindowFromGPUDevice(device_, window_);
     SDL_DestroyGPUDevice(device_);
     device_ = nullptr;
     core::logInfo("SDLGPURenderDevice shutdown");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 纹理管理
+// ═══════════════════════════════════════════════════════════════════════════════
 
 TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
     ASSERT(desc.data && desc.width > 0 && desc.height > 0);
@@ -175,6 +255,7 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
         return {};
     }
 
+    // 1. 创建 GPU 纹理对象 — 2D, R8G8B8A8_UNORM, 仅采样使用
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -182,7 +263,7 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
     info.width = static_cast<uint32_t>(desc.width);
     info.height = static_cast<uint32_t>(desc.height);
     info.layer_count_or_depth = 1;
-    info.num_levels = 1;
+    info.num_levels = 1;                    // 无 mipmap
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
 
     SDL_GPUTexture* gpuTex = SDL_CreateGPUTexture(device_, &info);
@@ -191,16 +272,20 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
         return {};
     }
 
+    // 2. 通过 transfer buffer 将像素数据上传到 GPU 纹理
+    //    流程: CPU data → transfer buffer (map/memcpy/unmap)
+    //          → copy pass (UploadToGPUTexture) → submit
     const size_t dataSize = static_cast<size_t>(desc.width) * static_cast<size_t>(desc.height) * 4u;
     SDL_GPUTransferBufferCreateInfo tbInfo{};
     tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     tbInfo.size = static_cast<uint32_t>(dataSize);
     SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tbInfo);
 
-    void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
+    void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);  // false = 不循环
     memcpy(mapped, desc.data, dataSize);
     SDL_UnmapGPUTransferBuffer(device_, tb);
 
+    // 独立 command buffer 执行上传 (不占用主渲染 command buffer)
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmd);
 
@@ -213,11 +298,12 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
     dst.h = info.height;
     dst.d = 1;
 
-    SDL_UploadToGPUTexture(copyPass, &src, &dst, false);
+    SDL_UploadToGPUTexture(copyPass, &src, &dst, false);  // false = 不循环
     SDL_EndGPUCopyPass(copyPass);
     SDL_SubmitGPUCommandBuffer(cmd);
     SDL_ReleaseGPUTransferBuffer(device_, tb);
 
+    // 3. 创建采样器 — 与纹理绑定到同一 TextureEntry 中
     const SDL_GPUFilter filter = (desc.filter == TextureFilter::Linear)
         ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
     SDL_GPUSamplerCreateInfo samplerInfo{};
@@ -233,6 +319,8 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
 }
 
 TextureHandle SDLGPURenderDevice::createRenderTargetTexture(int width, int height) {
+    // 与 createTexture 类似，但 usage 增加 COLOR_TARGET 标志
+    // 既可作为渲染目标 (COLOR_TARGET) 也可作为纹理采样 (SAMPLER)
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -249,6 +337,7 @@ TextureHandle SDLGPURenderDevice::createRenderTargetTexture(int width, int heigh
         return {};
     }
 
+    // 离屏纹理通常用于 editor 预览，使用线性过滤
     SDL_GPUSamplerCreateInfo samplerInfo{};
     samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
     samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
@@ -267,11 +356,16 @@ void SDLGPURenderDevice::destroyTexture(TextureHandle h) {
     }
 
     TextureEntry& entry = textures_.get(h);
+    // 等待 GPU 完成所有操作后再释放 (纹理可能正在被使用)
     SDL_WaitForGPUIdle(device_);
     if (entry.sampler) SDL_ReleaseGPUSampler(device_, entry.sampler);
     if (entry.gpuTex) SDL_ReleaseGPUTexture(device_, entry.gpuTex);
     textures_.remove(h);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Shader 管理 (stub — SDL GPU 后端不使用外部 ShaderHandle)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 ShaderHandle SDLGPURenderDevice::createShader(const ShaderDesc&) {
     return {};
@@ -279,6 +373,10 @@ ShaderHandle SDLGPURenderDevice::createShader(const ShaderDesc&) {
 
 void SDLGPURenderDevice::destroyShader(ShaderHandle) {
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 字体管理 — FontData 只存储元数据和 glyph 映射，纹理由 createTexture 管理
+// ═══════════════════════════════════════════════════════════════════════════════
 
 engine::FontHandle SDLGPURenderDevice::createFont(const engine::FontData& fontData) {
     engine::FontData data = fontData;
@@ -295,12 +393,27 @@ const engine::FontData* SDLGPURenderDevice::getFont(engine::FontHandle h) const 
     return fonts_.valid(h) ? &fonts_.get(h) : nullptr;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Buffer 管理 — GPU 原生 buffer 的创建/销毁/读写
+//
+// 每个 SDL 端 Buffer 由两部分组成:
+//  (1) gpuBuffer   — SDL_GPUBuffer (存储数据，在 GPU 显存中)
+//  (2) transfer    — SDL_GPUTransferBuffer (CPU↔GPU 中转，用于 upload/download)
+//
+// 上传流程:  CPU data → transfer (map/memcpy/unmap)
+//            → copy pass (UploadToGPUBuffer) → gpuBuffer
+// 下载流程:  gpuBuffer → copy pass (DownloadFromGPUBuffer) → transfer
+//            → map/memcpy → CPU data
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 将引擎 BufferUsage 标志映射到 SDL GPU buffer usage 标志
 BufferHandle SDLGPURenderDevice::createBuffer(const BufferDesc& desc) {
     if (!device_ || desc.size == 0) {
         core::logError("createBuffer: invalid params device=%p size=%zu", device_, desc.size);
         return {};
     }
 
+    // 1. 映射用法标志
     SDL_GPUBufferUsageFlags gpuUsage = 0;
     if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Vertex)) {
         gpuUsage |= SDL_GPU_BUFFERUSAGE_VERTEX;
@@ -309,6 +422,8 @@ BufferHandle SDLGPURenderDevice::createBuffer(const BufferDesc& desc) {
         gpuUsage |= SDL_GPU_BUFFERUSAGE_INDEX;
     }
     if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
+        // Storage buffer 需要 compute 写入 + graphics 读取
+        // (用于 GPU-driven 渲染: compute culling/sorting → graphics indirect draw)
         gpuUsage |= SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE
                   | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ
                   | SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
@@ -322,13 +437,15 @@ BufferHandle SDLGPURenderDevice::createBuffer(const BufferDesc& desc) {
     bufInfo.size = static_cast<uint32_t>(desc.size);
 
     core::logInfo("createBuffer: creating GPU buffer size=%zu usage=0x%x", desc.size, gpuUsage);
-    
+
+    // 2. 创建 GPU 原生 buffer
     SDL_GPUBuffer* gpuBuf = SDL_CreateGPUBuffer(device_, &bufInfo);
     if (!gpuBuf) {
         core::logError("createBuffer: SDL_CreateGPUBuffer failed: %s", SDL_GetError());
         return {};
     }
 
+    // 3. 创建配套的 transfer buffer (用于 CPU↔GPU 数据传输)
     SDL_GPUTransferBufferCreateInfo transferInfo{};
     transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     transferInfo.size = static_cast<uint32_t>(desc.size);
@@ -343,6 +460,7 @@ BufferHandle SDLGPURenderDevice::createBuffer(const BufferDesc& desc) {
     core::logInfo("createBuffer: inserting into HandleMap");
     BufferHandle handle = buffers_.insert(BufferEntry{ gpuBuf, transfer, desc.size, desc.usage });
 
+    // 4. 如果有初始数据，立即上传
     if (desc.initialData) {
         uploadToBuffer(handle, desc.initialData, desc.size, 0);
     }
@@ -360,6 +478,7 @@ void SDLGPURenderDevice::destroyBuffer(BufferHandle h) {
     buffers_.remove(h);
 }
 
+// mapBuffer: 映射 transfer buffer 供 CPU 写入 (false = 写入模式)
 void* SDLGPURenderDevice::mapBuffer(BufferHandle h) {
     if (!buffers_.valid(h)) return nullptr;
     BufferEntry& entry = buffers_.get(h);
@@ -372,6 +491,7 @@ void SDLGPURenderDevice::unmapBuffer(BufferHandle h) {
     SDL_UnmapGPUTransferBuffer(device_, entry.transfer);
 }
 
+// uploadToBuffer: CPU → transfer (map/memcpy/unmap) → GPU (copy pass)
 void SDLGPURenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t size, size_t offset) {
     if (!buffers_.valid(h) || !data || size == 0) return;
     BufferEntry& entry = buffers_.get(h);
@@ -380,6 +500,7 @@ void SDLGPURenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t
         return;
     }
 
+    // Step 1: 映射 transfer buffer，CPU 写入数据
     void* mapped = SDL_MapGPUTransferBuffer(device_, entry.transfer, false);
     if (!mapped) {
         core::logError("uploadToBuffer: map failed: %s", SDL_GetError());
@@ -388,6 +509,7 @@ void SDLGPURenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t
     memcpy(static_cast<uint8_t*>(mapped) + offset, data, size);
     SDL_UnmapGPUTransferBuffer(device_, entry.transfer);
 
+    // Step 2: 独立的 copy pass 将 transfer buffer 数据拷贝到 GPU buffer
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmd);
 
@@ -405,6 +527,7 @@ void SDLGPURenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t
     SDL_SubmitGPUCommandBuffer(cmd);
 }
 
+// downloadFromBuffer: GPU buffer → transfer (copy pass + download) → CPU (map/memcpy)
 void SDLGPURenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t size, size_t offset) {
     if (!buffers_.valid(h) || !data || size == 0) return;
     BufferEntry& entry = buffers_.get(h);
@@ -413,6 +536,7 @@ void SDLGPURenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t s
         return;
     }
 
+    // Step 1: 创建专门用于下载的 transfer buffer
     SDL_GPUTransferBufferCreateInfo downloadInfo{};
     downloadInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
     downloadInfo.size = static_cast<uint32_t>(size);
@@ -422,6 +546,7 @@ void SDLGPURenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t s
         return;
     }
 
+    // Step 2: copy pass 将 GPU buffer 数据下载到 transfer buffer
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmd);
 
@@ -438,6 +563,7 @@ void SDLGPURenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t s
     SDL_EndGPUCopyPass(copyPass);
     SDL_SubmitGPUCommandBuffer(cmd);
 
+    // Step 3: 映射 transfer buffer，读取数据到 CPU 侧 (true = 读取模式)
     void* mapped = SDL_MapGPUTransferBuffer(device_, downloadBuf, true);
     if (mapped) {
         memcpy(data, mapped, size);
@@ -447,33 +573,42 @@ void SDLGPURenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t s
     SDL_ReleaseGPUTransferBuffer(device_, downloadBuf);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Compute Pipeline 管理 — 从 ComputePipelineDesc 创建原生 GPU compute pipeline
+//
+// 着色器代码来源优先级:
+//  (1) desc.spirvCode/spirvSize — SPIRV 格式 (Vulkan/Metal 后端)
+//  (2) desc.dxilCode/dxilSize   — DXIL 格式 (D3D12 后端)
+//  (3) desc.code/desc.codeSize   — 通用备选 (OpenGL 用 GLSL, SDL GPU 不推荐)
+// ═══════════════════════════════════════════════════════════════════════════════
+
 ComputePipelineHandle SDLGPURenderDevice::createComputePipeline(const ComputePipelineDesc& desc) {
     if (!device_) return {};
-   
-         const void* blob = nullptr;
+
+    // 根据当前设备的着色器格式选择合适的二进制代码
+    const void* blob = nullptr;
     size_t blobSize = 0;
- if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV && desc.spirvCode && desc.spirvSize) {
-     blob = desc.spirvCode;
-     blobSize = desc.spirvSize;
-    
+    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV && desc.spirvCode && desc.spirvSize) {
+        blob = desc.spirvCode;
+        blobSize = desc.spirvSize;
     }
     else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL && desc.dxilCode && desc.dxilSize) {
-     blob = desc.dxilCode;
-     blobSize = desc.dxilSize;
-  
+        blob = desc.dxilCode;
+        blobSize = desc.dxilSize;
     }
     else if (desc.code && desc.codeSize) {
-   blob = desc.code;
-     blobSize = desc.codeSize;
-     
+        // 通用备选 (GLSL 等，不推荐在 SDL GPU 后端使用)
+        blob = desc.code;
+        blobSize = desc.codeSize;
     }
     else {
-      core::logError("createComputePipeline: no shader blob matches device format 0x%x", shaderFormat_);
-                 return {};
-       
+        core::logError("createComputePipeline: no shader blob matches device format 0x%x", shaderFormat_);
+        return {};
     }
     core::logInfo("createComputePipeline: format=0x%x blobSize=%zu (spirv=%zu dxil=%zu)",
      shaderFormat_, blobSize, desc.spirvSize, desc.dxilSize);
+
+    // 填充 compute pipeline 创建信息
     SDL_GPUComputePipelineCreateInfo info{};
     info.code_size = blobSize;
     info.code = static_cast<const Uint8*>(blob);
@@ -507,6 +642,11 @@ void SDLGPURenderDevice::destroyComputePipeline(ComputePipelineHandle h) {
     computePipelines_.remove(h);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 帧提交接口 — 各上层入口最终汇聚到 renderCmdsToTarget
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// submitCommandBuffer: 从 CommandBuffer 提取命令并渲染到 swapchain
 void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     if (!gpuCmdBuf_ || !swapchainTex_) {
         return;
@@ -514,6 +654,7 @@ void SDLGPURenderDevice::submitCommandBuffer(const CommandBuffer& cb) {
     renderCommandBufferToTarget(gpuCmdBuf_, pipeline_, cb, swapchainTex_, swapW_, swapH_, true);
 }
 
+// submitPass: pipeline-driven 路径 — 直接接受 RenderCmd* 数组
 void SDLGPURenderDevice::submitPass(const PassSubmitInfo& info,
                                      const std::vector<const RenderCmd*>& cmds) {
     if (!gpuCmdBuf_ || !swapchainTex_) return;
@@ -525,6 +666,7 @@ void SDLGPURenderDevice::submitPass(const PassSubmitInfo& info,
                        swapchainTex_, swapW_, swapH_);
 }
 
+// 获取底层 SDL_GPUTexture 指针 (供外部需要原生纹理句柄的场景使用)
 SDL_GPUTexture* SDLGPURenderDevice::getSDLTexture(TextureHandle handle) const {
     const TextureEntry* entry = textures_.valid(handle) ? &textures_.get(handle) : nullptr;
     return entry ? entry->gpuTex : nullptr;
@@ -541,6 +683,17 @@ bool SDLGPURenderDevice::getTextureDimensions(TextureHandle handle, int& outW, i
     outH = e.height;
     return true;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// renderCommandBufferToTarget — 从 CommandBuffer 提取命令并渲染到指定目标
+//
+// 这是 submitCommandBuffer 和离屏渲染的共同底层。
+// 流程:
+//   1. 遍历 CommandBuffer 中的所有 cmd，区分 ClearCmd/SetCameraCmd/其他渲染命令
+//   2. 提取 clearColor 和 camera 并转换 camera 坐标
+//   3. 将剩余的渲染命令转为 RenderCmd* 指针数组
+//   4. 调用 renderCmdsToTarget 执行实际渲染
+// ═══════════════════════════════════════════════════════════════════════════════
 
 void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBuf, SDL_GPUGraphicsPipeline* pipeline, const CommandBuffer& cb, SDL_GPUTexture* target, uint32_t targetWidth, uint32_t targetHeight, bool clearTarget) {
     if (!cmdBuf || !target || !pipeline) {
@@ -567,6 +720,33 @@ void SDLGPURenderDevice::renderCommandBufferToTarget(SDL_GPUCommandBuffer* cmdBu
                        target, targetWidth, targetHeight);
 }
 
+// renderCmdsToTarget — 核心渲染函数
+//
+// 此函数是 SDL GPU 后端的渲染中枢，处理四类命令:
+//
+//   [Phase 1] DispatchCmd  — GPU compute 派发 (culling/sorting/generation)
+//      ↓ SDL_BeginGPUComputePass → SDL_BindGPUComputePipeline
+//      ↓ bind storage buffers/textures → SDL_DispatchGPUCompute
+//      ↓ (BarrierCmd 在 SDL GPU 后端被忽略 — 驱动自动插入 barrier)
+//
+//   [Phase 2] 几何构建 (CPU 侧)
+//      ↓ 遍历 DrawSpriteCmd/DrawTileCmd/DrawTextCmd
+//      ↓ 在 CPU 侧构建顶点/索引数据 (batchVerts_ / batchIdx_)
+//      ↓ 自动按纹理/font/pxRange 分 batch
+//
+//   [Phase 3] 数据上传 (CPU → GPU)
+//      ↓ 将 batchVerts_/batchIdx_ 通过 transferBuf_ 上传到 vertexBuf_/indexBuf_
+//
+//   [Phase 4] GPU 绘制
+//      ↓ SDL_BeginGPURenderPass → bind pipeline → bind textures
+//      ↓ push mvp uniform → SDL_DrawGPUIndexedPrimitives
+//
+// Batch 切换规则:
+//   - 纹理变化 (tex != currentTex): 必须 flush
+//   - 字体 vs 精灵 (isFont != currentIsFont): 必须 flush (不同 pipeline)
+//   - 字体 pxRange 变化: 必须 flush (需要 push 不同的 fragment uniform)
+//   - batch 顶点数达到上限 (MAX_SPRITES_PER_BATCH * 4): 必须 flush
+// ═══════════════════════════════════════════════════════════════════════════════
 void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
                                              SDL_GPUGraphicsPipeline* pipeline,
                                              const std::vector<const RenderCmd*>& cmds,
@@ -584,6 +764,7 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     if (camera.viewportW == 0) camera.viewportW = static_cast<int>(targetWidth);
     if (camera.viewportH == 0) camera.viewportH = static_cast<int>(targetHeight);
 
+    // ── Phase 1: Compute 命令派发 ─────────────────────────────────────────
     for (const RenderCmd* cmd : cmds) {
         if (auto* d = std::get_if<DispatchCmd>(cmd)) {
             if (!computePipelines_.valid(d->pipeline)) continue;
@@ -665,10 +846,12 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             SDL_EndGPUComputePass(computePass);
         }
         else if (auto* b = std::get_if<BarrierCmd>(cmd)) {
+            // SDL GPU 后端由驱动自动插入 barrier，忽略显式 BarrierCmd
             (void)b;
         }
     }
 
+    // ── Phase 2: CPU 侧几何构建 + Batch 分组 ─────────────────────────────
     batchVerts_.clear();
     batchIdx_.clear();
     std::vector<BatchSegment> batches;
@@ -824,8 +1007,9 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             }
         }
     }
-    flush();
+    flush();  // flush 最后一个 batch
 
+    // ── Phase 3: CPU → GPU 数据传输 ──────────────────────────────────────
     if (!batchVerts_.empty()) {
         const size_t vSize = batchVerts_.size() * sizeof(SpriteVertex);
         const size_t iSize = batchIdx_.size() * sizeof(uint16_t);
@@ -846,6 +1030,8 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
         SDL_EndGPUCopyPass(copyPass);
     }
 
+    // ── Phase 4: GPU 绘制 ────────────────────────────────────────────────
+    // 构建 MVP 矩阵 (列主序: mvp = proj * view)
     float proj[16];
     float view[16];
     const float zoom = (camera.zoom > 0.f) ? camera.zoom : 1.f;
@@ -907,14 +1093,31 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     SDL_EndGPURenderPass(pass);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// present — 提交帧到 GPU 队列并呈现
+// ═══════════════════════════════════════════════════════════════════════════════
+
 void SDLGPURenderDevice::present() {
     if (!gpuCmdBuf_) {
         return;
     }
+    // 提交本帧录制的所有 GPU 命令，触发异步执行
     SDL_SubmitGPUCommandBuffer(gpuCmdBuf_);
     gpuCmdBuf_ = nullptr;
     swapchainTex_ = nullptr;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 离屏渲染 — 渲染到纹理 (editor 预览 / offscreen compositing)
+//
+// renderToTexture: 渲染到 editor 预览纹理 (复用 swapchain 的 cmd buffer)
+//   — 画布尺寸变化时重新创建纹理
+//   — 每帧直接向当前 gpuCmdBuf_ 录制命令
+//
+// renderToTextureOffscreen: 独立离屏渲染
+//   — 创建独立的 command buffer + fence 等待
+//   — 确保读取前渲染已完成 (同步点)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 TextureHandle SDLGPURenderDevice::renderToTexture(const CommandBuffer& cb, int width, int height) {
     if (!gpuCmdBuf_ || width <= 0 || height <= 0) {
@@ -986,6 +1189,16 @@ TextureHandle SDLGPURenderDevice::renderToTextureOffscreen(const CommandBuffer& 
     return offscreenRenderTarget_;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Shader 加载工具 — 从预编译字节码创建 SDL_GPUShader
+//
+// 参数:
+//   code/codeSize: 预编译着色器二进制 (SPIRV 或 DXIL)
+//   stage:         着色器阶段 (VERTEX / FRAGMENT)
+//   numSamplers:   片段着色器需要的纹理采样器数量
+//   numUBOs:       需要的 uniform buffer 数量
+//   fmt:           着色器格式 (SPIRV / DXIL)
+// ═══════════════════════════════════════════════════════════════════════════════
 SDL_GPUShader* SDLGPURenderDevice::loadShader(const uint8_t* code, size_t size, SDL_GPUShaderStage stage, int numSamplers, int numUBOs, SDL_GPUShaderFormat fmt) {
     SDL_GPUShaderCreateInfo info{};
     info.code = code;
@@ -998,6 +1211,18 @@ SDL_GPUShader* SDLGPURenderDevice::loadShader(const uint8_t* code, size_t size, 
     return SDL_CreateGPUShader(device_, &info);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// createPipeline — 创建所有渲染管线
+//
+// 共创建 5 条管线:
+//  (1) pipeline_             — 标准 sprite/tile 管线 (swapchain 格式)
+//  (2) offscreenPipeline_    — 标准 sprite/tile 管线 (R8G8B8A8_UNORM, 离屏)
+//  (3) msdfPipeline_         — MSDF 文字管线 (swapchain)
+//  (4) msdfOffscreenPipeline_ — MSDF 文字管线 (离屏)
+//  (5) gpuDrivenPipeline_    — GPU-driven sprite 管线 (仅 SPIRV 后端)
+//
+// swapchain 格式是运行时查询的 (不同 GPU/平台可能不同), offscreen 固定为 R8G8B8A8
+// ═══════════════════════════════════════════════════════════════════════════════
 void SDLGPURenderDevice::createPipeline() {
     if (!device_) {
         return;
@@ -1009,10 +1234,10 @@ void SDLGPURenderDevice::createPipeline() {
 
     offscreenPipeline_ = createPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
     ASSERT_MSG(offscreenPipeline_, "Failed to create offscreen pipeline");
-    
+
     msdfPipeline_ = createMSDFPipelineForFormat(swapchainFormat);
     ASSERT_MSG(msdfPipeline_, "Failed to create MSDF swapchain pipeline");
-    
+
     msdfOffscreenPipeline_ = createMSDFPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
     ASSERT_MSG(msdfOffscreenPipeline_, "Failed to create MSDF offscreen pipeline");
 
@@ -1031,6 +1256,9 @@ void SDLGPURenderDevice::createPipeline() {
                   gpuDrivenPipeline_ ? "yes" : "no");
 }
 
+// 创建标准 sprite/tile 渲染管线 (给定颜色目标格式)
+// 顶点布局: pos(2f) | uv(2f) | color(4ub normalised)
+// 片元: 纹理采样 × 顶点颜色, alpha blend
 SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUTextureFormat format) {
     SDL_GPUShader* vs = nullptr;
     SDL_GPUShader* fs = nullptr;
@@ -1090,6 +1318,11 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUText
     return pipeline;
 }
 
+// 创建 MSDF 字体渲染管线
+// 与标准管线使用相同的顶点着色器，但片段着色器是 MSDF special:
+//   - 采样 MSDF 图集纹理 → median(r,g,b) 计算有符号距离
+//   - sigDist * pxRange → 抗锯齿 alpha
+//   - 额外的 fragment uniform: float pxRange (通过 push constant 传入)
 SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createMSDFPipelineForFormat(SDL_GPUTextureFormat format) {
     SDL_GPUShader* vs = nullptr;
     SDL_GPUShader* fs = nullptr;
@@ -1149,6 +1382,10 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createMSDFPipelineForFormat(SDL_GPU
     return pipeline;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 矩阵构建工具
+// ═══════════════════════════════════════════════════════════════════════════════
+
 void SDLGPURenderDevice::buildOrthoMatrix(float w, float h, float out[16]) {
     buildOrthoProjectionMatrix(w, h, out);
 }
@@ -1204,6 +1441,21 @@ void SDLGPURenderDevice::buildOrthoMatrixCamera(float w, float h,
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU-driven 渲染 — 顶点着色器直接从 storage buffer 读取 sprite 数据
+//
+// 与标准管线不同，GPU-driven 顶点着色器:
+//   - 没有 vertex buffer 输入
+//   - 从 2 个 storage buffer 读取数据:
+//       set=0, b=0 → spriteBuffer (GPUSprite 数组，含 transform/uv/color/textureIndex)
+//       set=0, b=1 → visibleIndices (经过 compute culling/sorting 后的可见索引)
+//   - set=1, b=0 → viewProj uniform
+//   - gl_VertexIndex: 6 个 index/instance → 4 个 quad 顶点
+//   - gl_InstanceIndex: 当前 sprite 在 visibleIndices 中的序号
+//
+// 每个 sprite 作为 1 个 instance 绘制 (instanceCount = visibleCount)
+// 每批绑定不同纹理 (按 GPUDrawBatch 分组)
+// ═══════════════════════════════════════════════════════════════════════════════
 SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createGPUDrivenPipelineForFormat(SDL_GPUTextureFormat format) {
     // GPU-driven 顶点着色器通过 storage buffer 读取 sprite/index 数据，
     // 因此既不需要 vertex buffer，也不需要 vertex attribute。
@@ -1294,6 +1546,10 @@ void SDLGPURenderDevice::createGPUDrivenIndexBuffer() {
     SDL_ReleaseGPUTransferBuffer(device_, tb);
 }
 
+// GPU-driven 方式提交一帧 sprite 渲染
+// 与 renderCmdsToTarget 不同: 此函数不构建 CPU 侧几何体，而是将 sprite 数据
+// 和可见索引直接绑定为 storage buffer，由 GPU 顶点着色器自行读取。
+// 按 params.batches 分组，每组绑定不同的纹理并 instanced draw。
 void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
                                              const GPURenderParams& params) {
     if (!gpuCmdBuf_ || !swapchainTex_) return;

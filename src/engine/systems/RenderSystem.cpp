@@ -2,6 +2,7 @@
 #include "../runtime/EngineContext.h"
 #include "../components/RenderComponents.h"
 #include "../components/TextComponent.h"
+#include "../components/AnimatorComponent.h"
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../core/Logger.h"
@@ -309,29 +310,41 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
 
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
+        const AnimatorOutput* aout = ctx.world.try_get<AnimatorOutput>(ent);
+
         Drawable d{};
         d.pass    = sprite.pass;
         d.layer   = sprite.layer;
         d.ySort   = sprite.ySort;
-        d.y       = tf.y;
+        d.y       = tf.y + (aout ? aout->offsetY : 0.f);
         d.sortKey = sprite.sortOrder;
         d.seq     = seq++;
         d.kind    = DrawKind::Sprite;
         auto& s = d.sprite;
         s.texture  = sprite.texture;
-        s.x        = tf.x;
-        s.y        = tf.y;
-        s.rotation = tf.rotation;
-        s.scaleX   = tf.scaleX;
-        s.scaleY   = tf.scaleY;
+        s.x        = tf.x + (aout ? aout->offsetX : 0.f);
+        s.y        = tf.y + (aout ? aout->offsetY : 0.f);
+        s.rotation = tf.rotation + (aout ? aout->rotationOffset : 0.f);
+        s.scaleX   = tf.scaleX * (aout ? aout->scaleMulX : 1.f);
+        s.scaleY   = tf.scaleY * (aout ? aout->scaleMulY : 1.f);
         s.pivotX   = sprite.pivotX;
         s.pivotY   = sprite.pivotY;
         s.srcRect  = sprite.srcRect;
         s.layer    = sprite.layer;
         s.sortKey  = sprite.sortOrder;
         s.ySort    = sprite.ySort;
-        s.tint     = sprite.tint;
         s.pass     = sprite.pass;
+
+        if (aout) {
+            int r = sprite.tint.r + aout->tintMul.r;
+            if (r > 255) r = 255;
+            s.tint.r = static_cast<uint8_t>(r);
+            s.tint.g = sprite.tint.g;
+            s.tint.b = sprite.tint.b;
+            s.tint.a = sprite.tint.a;
+        } else {
+            s.tint = sprite.tint;
+        }
         drawables.push_back(d);
     }
 
