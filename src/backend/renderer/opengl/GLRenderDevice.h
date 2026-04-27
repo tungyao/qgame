@@ -72,9 +72,7 @@ private:
         BufferUsage  usage    = BufferUsage::Vertex;
     };
 
-    struct ComputePipelineEntry {
-        unsigned int program = 0;
-    };
+
 
     struct SpriteVertex {
         float   x, y;
@@ -107,14 +105,8 @@ private:
                             core::Color clearColor,
                             unsigned int fbo,
                             int width, int height);
-    void buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds,
-                             std::vector<BatchSegment>& batches);
-    void buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
-                           std::vector<BatchSegment>& batches);
-    void buildOrthoMatrix(float w, float h, float out[16]);
     void buildOrthoProjectionMatrix(float w, float h, float out[16]);
     void buildViewMatrix(float camX, float camY, float zoom, float rotation, float out[16]);
-    void buildOrthoMatrixCamera(float w, float h, float camX, float camY, float zoom, float rotation, float out[16]);
 
     // FBO 管理
     bool ensureFbo(FboEntry& fbo, TextureHandle& colorHandle, int w, int h);
@@ -143,7 +135,7 @@ private:
     core::HandleMap<TextureHandle, TextureEntry> textures_;
     core::HandleMap<engine::FontHandle, engine::FontData> fonts_;
     core::HandleMap<BufferHandle, BufferEntry> buffers_;
-    core::HandleMap<ComputePipelineHandle, ComputePipelineEntry> computePipelines_;
+    
 
     // renderToTexture (swapchain-paired, 复用 FBO)
     FboEntry      screenFbo_{};

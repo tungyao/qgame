@@ -105,11 +105,6 @@ private:
         bool          isFont = false;
         float         pxRange = 4.0f;
     };
-    void buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds,
-                             std::vector<BatchSegment>& batches);
-    void buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
-                           std::vector<BatchSegment>& batches);
-
     // 将像素空间 (0,0)-(w,h) 映射到 NDC 的正交投影矩阵（列主序）
     void buildOrthoMatrix(float w, float h, float out[16]);
     void buildOrthoProjectionMatrix(float w, float h, float out[16]);

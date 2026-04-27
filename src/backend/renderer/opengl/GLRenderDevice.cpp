@@ -56,19 +56,6 @@ static PFNGLFENCESYNCPROC                   s_glFenceSync               = nullpt
 static PFNGLCLIENTWAITSYNCPROC              s_glClientWaitSync          = nullptr;
 static PFNGLDELETESYNCPROC                  s_glDeleteSync              = nullptr;
 
-// GL 4.3+ Compute shader
-static PFNGLDISPATCHCOMPUTEPROC             s_glDispatchCompute         = nullptr;
-static PFNGLMEMORYBARRIERPROC               s_glMemoryBarrier           = nullptr;
-static PFNGLBINDBUFFERBASEPROC              s_glBindBufferBase          = nullptr;
-static PFNGLBINDBUFFERRANGEPROC             s_glBindBufferRange         = nullptr;
-static PFNGLMAPBUFFERRANGEPROC              s_glMapBufferRange          = nullptr;
-static PFNGLUNMAPBUFFERPROC                 s_glUnmapBuffer             = nullptr;
-static PFNGLBUFFERSUBDATAPROC               s_glBufferSubData           = nullptr;
-static void (*s_glGetIntegerv)(GLenum, GLint*) = nullptr;
-
-// GL compute capability flag
-static bool s_hasCompute = false;
-
 // ── Macro redirection ─────────────────────────────────────────────────────────
 // Redefine each GL name to its function pointer — valid only inside this TU.
 #define glActiveTexture           s_glActiveTexture
@@ -107,14 +94,6 @@ static bool s_hasCompute = false;
 #define glFenceSync               s_glFenceSync
 #define glClientWaitSync          s_glClientWaitSync
 #define glDeleteSync              s_glDeleteSync
-#define glDispatchCompute         s_glDispatchCompute
-#define glMemoryBarrier           s_glMemoryBarrier
-#define glBindBufferBase          s_glBindBufferBase
-#define glBindBufferRange         s_glBindBufferRange
-#define glMapBufferRange          s_glMapBufferRange
-#define glUnmapBuffer             s_glUnmapBuffer
-#define glBufferSubData           s_glBufferSubData
-#define glGetIntegerv             s_glGetIntegerv
 
 
 #include "../CommandBuffer.h"
@@ -159,28 +138,6 @@ static bool loadGLFunctions() {
     QGAME_GL_LOAD(FenceSync)               QGAME_GL_LOAD(ClientWaitSync)
     QGAME_GL_LOAD(DeleteSync)
     #undef QGAME_GL_LOAD
-
-    // GL 4.3+ compute shader functions (optional)
-    QGAME_GL_LOAD_OPTIONAL(DispatchCompute)
-    QGAME_GL_LOAD_OPTIONAL(MemoryBarrier)
-    QGAME_GL_LOAD_OPTIONAL(BindBufferBase)
-    QGAME_GL_LOAD_OPTIONAL(BindBufferRange)
-    QGAME_GL_LOAD_OPTIONAL(MapBufferRange)
-    QGAME_GL_LOAD_OPTIONAL(UnmapBuffer)
-    QGAME_GL_LOAD_OPTIONAL(BufferSubData)
-    QGAME_GL_LOAD_OPTIONAL(GetIntegerv)
-    #undef QGAME_GL_LOAD_OPTIONAL
-
-    // Check for GL 4.3+ compute support
-    s_hasCompute = s_glDispatchCompute && s_glMemoryBarrier && s_glBindBufferBase;
-    if (s_hasCompute) {
-        int major = 0, minor = 0;
-        s_glGetIntegerv(0x821B /*GL_MAJOR_VERSION*/, &major);
-        s_glGetIntegerv(0x821C /*GL_MINOR_VERSION*/, &minor);
-        core::logInfo("GL compute shader support: GL %d.%d", major, minor);
-    } else {
-        core::logInfo("GL compute shader not available (requires GL 4.3+)");
-    }
 
     return ok;
 }
@@ -361,12 +318,8 @@ BufferHandle GLRenderDevice::createBuffer(const BufferDesc& desc) {
     GLenum target = GL_ARRAY_BUFFER;
     if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Index)) {
         target = GL_ELEMENT_ARRAY_BUFFER;
-    } else if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
-        target = 0x90F2; // GL_SHADER_STORAGE_BUFFER
     } else if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Indirect)) {
         target = 0x8F3F; // GL_DRAW_INDIRECT_BUFFER
-    } else if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(BufferUsage::Uniform)) {
-        target = 0x8A11; // GL_UNIFORM_BUFFER
     }
 
     unsigned int glBuf = 0;
@@ -394,132 +347,24 @@ void GLRenderDevice::destroyBuffer(BufferHandle h) {
     buffers_.remove(h);
 }
 
-void* GLRenderDevice::mapBuffer(BufferHandle h) {
-    if (!buffers_.valid(h) || !s_glMapBufferRange) return nullptr;
-    BufferEntry& entry = buffers_.get(h);
-
-    GLenum target = GL_ARRAY_BUFFER;
-    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
-        target = 0x90F2; // GL_SHADER_STORAGE_BUFFER
-    }
-
-    glBindBuffer(target, entry.glBuffer);
-    void* ptr = glMapBufferRange(target, 0, static_cast<GLsizeiptr>(entry.size),
-                                  GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
-    return ptr;
+void* GLRenderDevice::mapBuffer(BufferHandle) {
+    return nullptr;
 }
 
-void GLRenderDevice::unmapBuffer(BufferHandle h) {
-    if (!buffers_.valid(h) || !s_glUnmapBuffer) return;
-    BufferEntry& entry = buffers_.get(h);
-
-    GLenum target = GL_ARRAY_BUFFER;
-    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
-        target = 0x90F2;
-    }
-
-    glBindBuffer(target, entry.glBuffer);
-    glUnmapBuffer(target);
-    glBindBuffer(target, 0);
+void GLRenderDevice::unmapBuffer(BufferHandle) {
 }
 
-void GLRenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t size, size_t offset) {
-    if (!buffers_.valid(h) || !data || size == 0) return;
-    BufferEntry& entry = buffers_.get(h);
-    if (offset + size > entry.size) return;
-
-    GLenum target = GL_ARRAY_BUFFER;
-    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
-        target = 0x90F2;
-    }
-
-    glBindBuffer(target, entry.glBuffer);
-    if (s_glMapBufferRange) {
-        void* ptr = glMapBufferRange(target, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(size),
-                                      GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
-        if (ptr) {
-            memcpy(ptr, data, size);
-            glUnmapBuffer(target);
-        }
-    } else {
-        // Fallback: orphan and re-upload
-        glBufferData(target, static_cast<GLsizeiptr>(entry.size), nullptr, GL_DYNAMIC_DRAW);
-        glBufferSubData(target, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(size), data);
-    }
-    glBindBuffer(target, 0);
+void GLRenderDevice::uploadToBuffer(BufferHandle, const void*, size_t, size_t) {
 }
 
-void GLRenderDevice::downloadFromBuffer(BufferHandle h, void* data, size_t size, size_t offset) {
-    if (!buffers_.valid(h) || !data || size == 0) return;
-    BufferEntry& entry = buffers_.get(h);
-    if (offset + size > entry.size) return;
-
-    GLenum target = GL_ARRAY_BUFFER;
-    if (static_cast<uint32_t>(entry.usage) & static_cast<uint32_t>(BufferUsage::Storage)) {
-        target = 0x90F2;
-    }
-
-    glBindBuffer(target, entry.glBuffer);
-    if (s_glMapBufferRange) {
-        void* ptr = glMapBufferRange(target, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(size),
-                                      GL_MAP_READ_BIT);
-        if (ptr) {
-            memcpy(data, ptr, size);
-            glUnmapBuffer(target);
-        }
-    }
-    glBindBuffer(target, 0);
+void GLRenderDevice::downloadFromBuffer(BufferHandle, void*, size_t, size_t) {
 }
 
-// ── Compute Pipeline 管理 ──────────────────────────────────────────────────────
-
-ComputePipelineHandle GLRenderDevice::createComputePipeline(const ComputePipelineDesc& desc) {
-    if (!s_hasCompute || !desc.code || desc.codeSize == 0) {
-        core::logError("createComputePipeline: compute not supported or invalid desc");
-        return {};
-    }
-
-    const char* src = static_cast<const char*>(desc.code);
-    unsigned int cs = glCreateShader(0x91B9); // GL_COMPUTE_SHADER
-    glShaderSource(cs, 1, &src, nullptr);
-    glCompileShader(cs);
-
-    int compiled = 0;
-    glGetShaderiv(cs, 0x8B81 /*GL_COMPILE_STATUS*/, &compiled);
-    if (!compiled) {
-        char log[512];
-        glGetShaderInfoLog(cs, sizeof(log), nullptr, log);
-        core::logError("Compute shader compile error: %s", log);
-        glDeleteShader(cs);
-        return {};
-    }
-
-    unsigned int program = glCreateProgram();
-    glAttachShader(program, cs);
-    glLinkProgram(program);
-
-    int linked = 0;
-    glGetProgramiv(program, 0x8B82 /*GL_LINK_STATUS*/, &linked);
-    if (!linked) {
-        char log[512];
-        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-        core::logError("Compute program link error: %s", log);
-        glDeleteShader(cs);
-        glDeleteProgram(program);
-        return {};
-    }
-
-    glDeleteShader(cs);
-    return computePipelines_.insert(ComputePipelineEntry{ program });
+ComputePipelineHandle GLRenderDevice::createComputePipeline(const ComputePipelineDesc&) {
+    return {};
 }
 
-void GLRenderDevice::destroyComputePipeline(ComputePipelineHandle h) {
-    if (!computePipelines_.valid(h)) return;
-    ComputePipelineEntry& entry = computePipelines_.get(h);
-    if (entry.program) {
-        glDeleteProgram(entry.program);
-    }
-    computePipelines_.remove(h);
+void GLRenderDevice::destroyComputePipeline(ComputePipelineHandle) {
 }
 
 // ── 帧控制 ────────────────────────────────────────────────────────────────────
@@ -749,62 +594,6 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     CameraData camera = cameraIn;
     if (camera.viewportW == 0) camera.viewportW = width;
     if (camera.viewportH == 0) camera.viewportH = height;
-
-    // Process compute commands first
-    for (const RenderCmd* cmd : cmds) {
-        if (auto* d = std::get_if<DispatchCmd>(cmd)) {
-            if (!s_hasCompute || !computePipelines_.valid(d->pipeline)) continue;
-            ComputePipelineEntry& pe = computePipelines_.get(d->pipeline);
-
-            glUseProgram(pe.program);
-
-            uint32_t bindingIndex = 0;
-
-            // Bind readonly storage buffers
-            for (uint32_t i = 0; i < d->bindings.readonlyStorageBufferCount && i < 8; ++i) {
-                if (buffers_.valid(d->bindings.readonlyStorageBuffers[i])) {
-                    glBindBufferBase(0x90F2, bindingIndex,
-                                     buffers_.get(d->bindings.readonlyStorageBuffers[i]).glBuffer);
-                    ++bindingIndex;
-                }
-            }
-
-            // Bind readwrite storage buffers
-            for (uint32_t i = 0; i < d->bindings.readwriteStorageBufferCount && i < 8; ++i) {
-                if (buffers_.valid(d->bindings.readwriteStorageBuffers[i])) {
-                    glBindBufferBase(0x90F2, bindingIndex,
-                                     buffers_.get(d->bindings.readwriteStorageBuffers[i]).glBuffer);
-                    ++bindingIndex;
-                }
-            }
-
-            // Bind sampled textures
-            for (uint32_t i = 0; i < d->bindings.sampledTextureCount && i < 8; ++i) {
-                if (textures_.valid(d->bindings.sampledTextures[i])) {
-                    glActiveTexture(GL_TEXTURE0 + i);
-                    glBindTexture(GL_TEXTURE_2D, textures_.get(d->bindings.sampledTextures[i]).glTex);
-                }
-            }
-
-            glDispatchCompute(d->groupCountX, d->groupCountY, d->groupCountZ);
-        }
-        else if (auto* b = std::get_if<BarrierCmd>(cmd)) {
-            if (!s_hasCompute) continue;
-            GLbitfield barriers = 0;
-            switch (b->type) {
-                case BarrierCmd::Type::Memory:
-                    barriers = GL_ALL_BARRIER_BITS;
-                    break;
-                case BarrierCmd::Type::StorageBuffer:
-                    barriers = 0x2000; // GL_SHADER_STORAGE_BARRIER_BIT
-                    break;
-                case BarrierCmd::Type::Texture:
-                    barriers = 0x0800; // GL_TEXTURE_UPDATE_BARRIER_BIT
-                    break;
-            }
-            glMemoryBarrier(barriers);
-        }
-    }
 
     batchVerts_.clear();
     batchIdx_.clear();
@@ -1040,142 +829,7 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// ── 内部：几何构建（与 SDLGPURenderDevice 逻辑完全相同）───────────────────────
-
-void GLRenderDevice::buildSpriteGeometry(const std::vector<DrawSpriteCmd>& cmds,
-                                          std::vector<BatchSegment>& batches) {
-    if (cmds.empty()) return;
-
-    TextureHandle currentTex{};
-    uint32_t batchIdxStart  = 0;
-    int32_t  batchVertStart = 0;
-
-    for (const DrawSpriteCmd& cmd : cmds) {
-        const bool needFlush =
-            (cmd.texture != currentTex) ||
-            (batchVerts_.size() - static_cast<size_t>(batchVertStart) >= MAX_SPRITES_PER_BATCH * 4);
-
-        if (needFlush && !batchVerts_.empty() &&
-            static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-            batches.push_back({ currentTex, batchIdxStart,
-                                static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                                batchVertStart });
-            batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
-            batchVertStart = static_cast<int32_t>(batchVerts_.size());
-        }
-        currentTex = cmd.texture;
-
-        const float hw = cmd.srcRect.w * cmd.scaleX * 0.5f;
-        const float hh = cmd.srcRect.h * cmd.scaleY * 0.5f;
-        const float cosR = cosf(cmd.rotation);
-        const float sinR = sinf(cmd.rotation);
-        const float lx[4] = { -hw,  hw,  hw, -hw };
-        const float ly[4] = { -hh, -hh,  hh,  hh };
-
-        const TextureEntry* entry = textures_.tryGet(currentTex);
-        const float tw = entry ? static_cast<float>(entry->width)  : 1.f;
-        const float th = entry ? static_cast<float>(entry->height) : 1.f;
-        const float u0 =  cmd.srcRect.x              / tw;
-        const float v0 =  cmd.srcRect.y              / th;
-        const float u1 = (cmd.srcRect.x + cmd.srcRect.w) / tw;
-        const float v1 = (cmd.srcRect.y + cmd.srcRect.h) / th;
-        const float us[4] = { u0, u1, u1, u0 };
-        const float vs[4] = { v0, v0, v1, v1 };
-
-        const auto base = static_cast<uint16_t>(batchVerts_.size() - static_cast<size_t>(batchVertStart));
-        for (int i = 0; i < 4; ++i) {
-            batchVerts_.push_back({
-                cmd.x + lx[i] * cosR - ly[i] * sinR,
-                cmd.y + lx[i] * sinR + ly[i] * cosR,
-                us[i], vs[i],
-                cmd.tint.r, cmd.tint.g, cmd.tint.b, cmd.tint.a
-            });
-        }
-        batchIdx_.insert(batchIdx_.end(), {
-            base,
-            static_cast<uint16_t>(base + 1),
-            static_cast<uint16_t>(base + 2),
-            base,
-            static_cast<uint16_t>(base + 2),
-            static_cast<uint16_t>(base + 3)
-        });
-    }
-
-    if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-        batches.push_back({ currentTex, batchIdxStart,
-                            static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                            batchVertStart });
-    }
-}
-
-void GLRenderDevice::buildTileGeometry(const std::vector<DrawTileCmd>& cmds,
-                                        std::vector<BatchSegment>& batches) {
-    if (cmds.empty()) return;
-
-    TextureHandle currentTex{};
-    uint32_t batchIdxStart  = 0;
-    int32_t  batchVertStart = 0;
-
-    for (const DrawTileCmd& cmd : cmds) {
-        const bool needFlush =
-            (cmd.tileset != currentTex) ||
-            (batchVerts_.size() - static_cast<size_t>(batchVertStart) >= MAX_SPRITES_PER_BATCH * 4);
-
-        if (needFlush && !batchVerts_.empty() &&
-            static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-            batches.push_back({ currentTex, batchIdxStart,
-                                static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                                batchVertStart });
-            batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
-            batchVertStart = static_cast<int32_t>(batchVerts_.size());
-        }
-        currentTex = cmd.tileset;
-
-        const TextureEntry* entry = textures_.tryGet(currentTex);
-        const float tw = entry ? static_cast<float>(entry->width)  : 1.f;
-        const float th = entry ? static_cast<float>(entry->height) : 1.f;
-        const int   ts = cmd.tileSize > 0 ? cmd.tileSize : 16;
-
-        int tilesetCols = static_cast<int>(tw) / ts;
-        if (tilesetCols < 1) tilesetCols = 1;
-        const int col = cmd.tileId % tilesetCols;
-        const int row = cmd.tileId / tilesetCols;
-
-        const float u0 = (col * ts) / tw;
-        const float v0 = (row * ts) / th;
-        const float u1 = u0 + ts / tw;
-        const float v1 = v0 + ts / th;
-
-        const float px  = static_cast<float>(cmd.gridX * ts);
-        const float py  = static_cast<float>(cmd.gridY * ts);
-        const float px1 = px + ts;
-        const float py1 = py + ts;
-
-        const auto base = static_cast<uint16_t>(batchVerts_.size() - static_cast<size_t>(batchVertStart));
-        batchVerts_.push_back({ px,  py,  u0, v0, 255, 255, 255, 255 });
-        batchVerts_.push_back({ px1, py,  u1, v0, 255, 255, 255, 255 });
-        batchVerts_.push_back({ px1, py1, u1, v1, 255, 255, 255, 255 });
-        batchVerts_.push_back({ px,  py1, u0, v1, 255, 255, 255, 255 });
-        batchIdx_.insert(batchIdx_.end(), {
-            base,
-            static_cast<uint16_t>(base + 1),
-            static_cast<uint16_t>(base + 2),
-            base,
-            static_cast<uint16_t>(base + 2),
-            static_cast<uint16_t>(base + 3)
-        });
-    }
-
-    if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-        batches.push_back({ currentTex, batchIdxStart,
-                            static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                            batchVertStart });
-    }
-}
-
-void GLRenderDevice::buildOrthoMatrix(float w, float h, float out[16]) {
-    buildOrthoProjectionMatrix(w, h, out);
-}
+// ── 内部：矩阵运算 ──────────────────────────────────────────────────────────
 
 void GLRenderDevice::buildOrthoProjectionMatrix(float w, float h, float out[16]) {
     const float left   = -w * 0.5f;
@@ -1193,7 +847,6 @@ void GLRenderDevice::buildOrthoProjectionMatrix(float w, float h, float out[16])
 }
 
 void GLRenderDevice::buildViewMatrix(float camX, float camY, float zoom, float rotation, float out[16]) {
-    // 标准 2D view：eye = R * zoom * (world - cam)，列主序
     const float c = cosf(rotation);
     const float s = sinf(rotation);
 
@@ -1208,183 +861,9 @@ void GLRenderDevice::buildViewMatrix(float camX, float camY, float zoom, float r
     out[15] = 1.f;
 }
 
-void GLRenderDevice::buildOrthoMatrixCamera(float w, float h,
-                                             float camX, float camY, float zoom,
-                                             float rotation,
-                                             float out[16]) {
-    float proj[16];
-    float view[16];
-    buildOrthoProjectionMatrix(w, h, proj);
-    buildViewMatrix(camX, camY, zoom, rotation, view);
-
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            out[i * 4 + j] = 0.f;
-            for (int k = 0; k < 4; ++k) {
-                out[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
-            }
-        }
-    }
-}
-
-void GLRenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
-                                         const GPURenderParams& params) {
-    int w = 0, h = 0;
-    SDL_GetWindowSize(window_, &w, &h);
-    
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, w, h);
-    
-    if (info.clearEnabled) {
-        glClearColor(info.clearColor.r / 255.f, info.clearColor.g / 255.f,
-                     info.clearColor.b / 255.f, info.clearColor.a / 255.f);
-        glClear(GL_COLOR_BUFFER_BIT);
-    }
-    
-    if (params.visibleCount == 0) {
-        return;
-    }
-    
-    if (!buffers_.valid(params.spriteBuffer) || !buffers_.valid(params.visibleIndexBuffer)) {
-        return;
-    }
-    
-    BufferEntry& spriteBuf = buffers_.get(params.spriteBuffer);
-    BufferEntry& indexBuf = buffers_.get(params.visibleIndexBuffer);
-    
-    std::vector<uint32_t> visibleIndices(params.visibleCount);
-    glBindBuffer(GL_COPY_READ_BUFFER, indexBuf.glBuffer);
-    void* mapped = glMapBufferRange(GL_COPY_READ_BUFFER, 0, params.visibleCount * sizeof(uint32_t),
-                                     GL_MAP_READ_BIT);
-    if (mapped) {
-        memcpy(visibleIndices.data(), mapped, params.visibleCount * sizeof(uint32_t));
-        glUnmapBuffer(GL_COPY_READ_BUFFER);
-    }
-    
-    glBindBuffer(GL_COPY_READ_BUFFER, spriteBuf.glBuffer);
-    std::vector<uint8_t> spriteData(spriteBuf.size);
-    mapped = glMapBufferRange(GL_COPY_READ_BUFFER, 0, spriteBuf.size, GL_MAP_READ_BIT);
-    if (mapped) {
-        memcpy(spriteData.data(), mapped, spriteBuf.size);
-        glUnmapBuffer(GL_COPY_READ_BUFFER);
-    }
-    
-    engine::GPUSprite* sprites = reinterpret_cast<engine::GPUSprite*>(spriteData.data());
-    
-    batchVerts_.clear();
-    batchIdx_.clear();
-    std::vector<BatchSegment> batches;
-    TextureHandle currentTex{};
-    bool hasCurrent = false;
-    uint32_t batchIdxStart = 0;
-    int32_t batchVertStart = 0;
-    
-    auto flush = [&]() {
-        if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-            batches.push_back({ currentTex, batchIdxStart,
-                                static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                                batchVertStart, false, 4.0f });
-            batchIdxStart = static_cast<uint32_t>(batchIdx_.size());
-            batchVertStart = static_cast<int32_t>(batchVerts_.size());
-        }
-    };
-    
-    for (uint32_t i = 0; i < params.visibleCount; ++i) {
-        uint32_t spriteIdx = visibleIndices[i];
-        if (spriteIdx >= params.spriteCount) continue;
-        
-        engine::GPUSprite& s = sprites[spriteIdx];
-        
-        TextureHandle texHandle;
-        texHandle.index = s.textureIndex;
-        
-        if (!textures_.valid(texHandle)) continue;
-        
-        if (!hasCurrent || texHandle != currentTex) {
-            flush();
-            currentTex = texHandle;
-            hasCurrent = true;
-        }
-        
-        if (static_cast<size_t>(batchVertStart) + 4 >= MAX_SPRITES_PER_BATCH * 4) {
-            flush();
-        }
-        
-        float tx = s.transform[3];
-        float ty = s.transform[7];
-        float m00 = s.transform[0];
-        float m01 = s.transform[1];
-        float m10 = s.transform[4];
-        float m11 = s.transform[5];
-        
-        float hw = std::abs(m00) * 0.5f;
-        float hh = std::abs(m11) * 0.5f;
-        
-        float x0 = tx - hw, y0 = ty - hh;
-        float x1 = tx + hw, y1 = ty + hh;
-        
-        float u0 = s.uv[0], v0 = s.uv[1];
-        float u1 = s.uv[2], v1 = s.uv[3];
-        
-        uint8_t r = static_cast<uint8_t>(s.color[0] * 255);
-        uint8_t g = static_cast<uint8_t>(s.color[1] * 255);
-        uint8_t b = static_cast<uint8_t>(s.color[2] * 255);
-        uint8_t a = static_cast<uint8_t>(s.color[3] * 255);
-        
-        const auto base = static_cast<uint16_t>(batchVerts_.size() - static_cast<size_t>(batchVertStart));
-        batchVerts_.push_back({ x0, y0, u0, v0, r, g, b, a });
-        batchVerts_.push_back({ x1, y0, u1, v0, r, g, b, a });
-        batchVerts_.push_back({ x1, y1, u1, v1, r, g, b, a });
-        batchVerts_.push_back({ x0, y1, u0, v1, r, g, b, a });
-        batchIdx_.insert(batchIdx_.end(), {
-            base, static_cast<uint16_t>(base + 1), static_cast<uint16_t>(base + 2),
-            base, static_cast<uint16_t>(base + 2), static_cast<uint16_t>(base + 3)
-        });
-    }
-    flush();
-    
-    if (batchVerts_.empty()) return;
-    
-    glUseProgram(shaderProgram_);
-    
-    float proj[16];
-    float view[16];
-    float mvp[16];
-    const float zoom = (info.camera.zoom > 0.f) ? info.camera.zoom : 1.f;
-    buildOrthoProjectionMatrix(static_cast<float>(w), static_cast<float>(h), proj);
-    buildViewMatrix(info.camera.x, info.camera.y, zoom, info.camera.rotation, view);
-    
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            mvp[i * 4 + j] = 0.f;
-            for (int k = 0; k < 4; ++k) {
-                mvp[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
-            }
-        }
-    }
-    glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
-    
-    glBindVertexArray(vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, batchVerts_.size() * sizeof(SpriteVertex),
-                 batchVerts_.data(), GL_STREAM_DRAW);
-    
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, batchIdx_.size() * sizeof(uint16_t),
-                 batchIdx_.data(), GL_STREAM_DRAW);
-    
-    for (const auto& batch : batches) {
-        if (!textures_.valid(batch.tex)) continue;
-        
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, textures_.get(batch.tex).glTex);
-        
-        glDrawElementsBaseVertex(GL_TRIANGLES, batch.idxCount, GL_UNSIGNED_SHORT,
-                                 reinterpret_cast<void*>(batch.idxOffset * sizeof(uint16_t)),
-                                 batch.vertOffset);
-    }
-    
-    glBindVertexArray(0);
+void GLRenderDevice::submitGPUDrivenPass(const PassSubmitInfo&,
+                                         const GPURenderParams&) {
+    // GPU-driven pass not supported in CPU rendering mode
 }
 
 } // namespace backend
