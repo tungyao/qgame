@@ -597,11 +597,23 @@ int main(int argc, char* argv[]) {
 	// ── Screen 提示 ──────────────────────────────────────────────────────────
 	{
 		auto e = api.spawnEntity();
-		api.addComponent(e, engine::Transform{ 20.f, 650.f });
+		api.addComponent(e, engine::Transform{ 20.f, 620.f });
 		engine::TextComponent txt{};
-		txt.text = "WASD: move player | Arrows: move camera | G: toggle GPU/CPU | J/K/L/U: Phase1 | F: Phase3 | 1-7: Phase5 | ESC: quit";
+		txt.text = "Physics: R=Raycast T=OverlapBox Y=OverlapCircle Space=ResetBox P=PrintLayers";
 		txt.font = font;
-		txt.fontSize = 14.f;
+		txt.fontSize = 13.f;
+		txt.color = { 100, 200, 150, 255 };
+		txt.pass = engine::RenderPass::Screen;
+		txt.layer = 100;
+		api.addComponent(e, txt);
+	}
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 20.f, 640.f });
+		engine::TextComponent txt{};
+		txt.text = "WASD: move | Arrows: camera | G: GPU/CPU | J/K/L/U: Phase1 | F: Phase3 | 1-7: Phase5";
+		txt.font = font;
+		txt.fontSize = 12.f;
 		txt.color = { 150, 150, 150, 255 };
 		txt.pass = engine::RenderPass::Screen;
 		txt.layer = 100;
@@ -609,11 +621,11 @@ int main(int argc, char* argv[]) {
 	}
 	{
 		auto e = api.spawnEntity();
-		api.addComponent(e, engine::Transform{ 20.f, 670.f });
+		api.addComponent(e, engine::Transform{ 20.f, 658.f });
 		engine::TextComponent txt{};
-		txt.text = "GPU-Driven: G to toggle | Phase5: 1=HitShake 2=HurtFlash 3=BreathStr 4=Squash 5=Combo 6/7:TimeScale";
+		txt.text = "Phase5: 1=HitShake 2=HurtFlash 3=BreathStr 4=Squash 5=Combo 6/7:TimeScale | ESC: quit";
 		txt.font = font;
-		txt.fontSize = 12.f;
+		txt.fontSize = 11.f;
 		txt.color = { 120, 120, 150, 255 };
 		txt.pass = engine::RenderPass::Screen;
 		txt.layer = 100;
@@ -621,11 +633,11 @@ int main(int argc, char* argv[]) {
 	}
 	{
 		auto e = api.spawnEntity();
-		api.addComponent(e, engine::Transform{ 20.f, 690.f });
+		api.addComponent(e, engine::Transform{ 20.f, 674.f });
 		engine::TextComponent txt{};
-		txt.text = "GPU Mode: O(n) GPU culling+sorting | CPU Mode: O(n log n) CPU sort | Move camera to see culling effect";
+		txt.text = "GPU: O(n) culling+sort | CPU: O(n log n) | Orange box falls with gravity, yellow bullet passes through ground";
 		txt.font = font;
-		txt.fontSize = 11.f;
+		txt.fontSize = 10.f;
 		txt.color = { 100, 100, 130, 255 };
 		txt.pass = engine::RenderPass::Screen;
 		txt.layer = 100;
@@ -752,6 +764,121 @@ int main(int argc, char* argv[]) {
 		txt.pass = engine::RenderPass::UI;
 		txt.layer = 100;
 		api.addComponent(archText, txt);
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// 物理测试：重力 + 碰撞 + 碰撞层 + 射线检测 + 区域查询
+	// ═══════════════════════════════════════════════════════════════════════════
+	api.setGravity(0.f, 500.f);  // 向下重力
+	api.setFixedTimestep(1.f / 60.f);  // 60Hz 物理更新
+
+	// 自定义碰撞层（扩展预定义层）
+	constexpr engine::CollisionLayer COLLISION_LAYER_BULLET  = 16;  // 第5层
+	constexpr engine::CollisionLayer COLLISION_LAYER_PICKUP  = 32;  // 第6层
+
+	// 地面 (static collider, STATIC 层，只与 DEFAULT/PLAYER/ENEMY 碰撞)
+	{
+		auto e = api.spawnEntity();
+		api.addComponent(e, engine::Transform{ 0.f, 550.f });
+		engine::Sprite sp{};
+		sp.texture = tilesetTex;
+		sp.srcRect = { 0.f, 0.f, 640.f, 32.f };
+		sp.layer = 0;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 100, 100, 100, 255 };
+		api.addComponent(e, sp);
+		engine::Collider col{ 1280.f, 32.f, 0.f, 0.f, false };
+		col.layer = engine::COLLISION_LAYER_STATIC;
+		col.mask = engine::COLLISION_LAYER_DEFAULT | engine::COLLISION_LAYER_PLAYER | engine::COLLISION_LAYER_ENEMY;
+		api.addComponent(e, col);
+	}
+
+	// 下落的物理方块 (PLAYER 层)
+	entt::entity physicsBox;
+	{
+		physicsBox = api.spawnEntity();
+		api.addComponent(physicsBox, engine::Transform{ 600.f, 50.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 10;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 150, 50, 255 };
+		api.addComponent(physicsBox, sp);
+		api.addComponent(physicsBox, engine::RigidBody{ 0.f, 0.f, 1.f, false });
+		engine::Collider col{ 32.f, 32.f, 0.f, 0.f, false };
+		col.layer = engine::COLLISION_LAYER_PLAYER;
+		col.mask = engine::COLLISION_LAYER_ALL;
+		api.addComponent(physicsBox, col);
+	}
+
+	// 子弹实体 (BULLET 层，只与 ENEMY 碰撞，穿过地面和玩家)
+	entt::entity bullet;
+	{
+		bullet = api.spawnEntity();
+		api.addComponent(bullet, engine::Transform{ 700.f, 200.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 32.f, 0.f, 16.f, 16.f };
+		sp.layer = 11;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 255, 0, 255 };
+		api.addComponent(bullet, sp);
+		api.addComponent(bullet, engine::RigidBody{ 50.f, 0.f, 0.f, false });  // 向右飞
+		engine::Collider col{ 16.f, 16.f, 0.f, 0.f, false };
+		col.layer = COLLISION_LAYER_BULLET;
+		col.mask = engine::COLLISION_LAYER_ENEMY;  // 只碰敌人
+		api.addComponent(bullet, col);
+	}
+
+	// 敌人实体 (ENEMY 层)
+	entt::entity enemy;
+	{
+		enemy = api.spawnEntity();
+		api.addComponent(enemy, engine::Transform{ 900.f, 500.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		sp.layer = 10;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 50, 50, 255 };
+		api.addComponent(enemy, sp);
+		engine::Collider col{ 32.f, 32.f, 0.f, 0.f, false };
+		col.layer = engine::COLLISION_LAYER_ENEMY;
+		col.mask = engine::COLLISION_LAYER_ALL;
+		api.addComponent(enemy, col);
+	}
+
+	// Trigger 区域 (拾取物，不参与物理分离)
+	entt::entity pickupZone;
+	{
+		pickupZone = api.spawnEntity();
+		api.addComponent(pickupZone, engine::Transform{ 400.f, 480.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 0.f, 32.f, 48.f, 48.f };
+		sp.layer = 1;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 100, 255, 100, 150 };
+		api.addComponent(pickupZone, sp);
+		engine::Collider col{ 48.f, 48.f, 0.f, 0.f, true };  // isTrigger=true
+		col.layer = COLLISION_LAYER_PICKUP;
+		col.mask = engine::COLLISION_LAYER_PLAYER;
+		api.addComponent(pickupZone, col);
+	}
+
+	// 射线检测结果显示实体
+	entt::entity rayHitMarker;
+	{
+		rayHitMarker = api.spawnEntity();
+		api.addComponent(rayHitMarker, engine::Transform{ 0.f, 0.f });
+		engine::Sprite sp{};
+		sp.texture = spriteTex;
+		sp.srcRect = { 48.f, 48.f, 8.f, 8.f };
+		sp.layer = 100;
+		sp.pass = engine::RenderPass::World;
+		sp.tint = { 255, 255, 0, 255 };
+		api.addComponent(rayHitMarker, sp);
 	}
 
 	// ── 主循环 ────────────────────────────────────────────────────────────────
@@ -1006,6 +1133,70 @@ int main(int argc, char* argv[]) {
 					perfTxt.color = { 255, 100, 100, 255 };  // 红色 - 需优化
 				}
 			}
+		}
+
+		// ═════════════════════════════════════════════════════════════════════
+		// 物理系统测试：射线检测 + 区域查询
+		// ═════════════════════════════════════════════════════════════════════
+		
+		// R 键：从玩家位置向下发射射线，检测地面
+		if (api.isKeyJustPressed(SDLK_R)) {
+			auto& playerTf = api.getComponent<engine::Transform>(player);
+			auto hit = api.raycast(playerTf.x, playerTf.y, 0.f, 1.f, 1000.f, engine::COLLISION_LAYER_STATIC);
+			if (hit.hit) {
+				printf("[Physics] Raycast hit: entity at (%.1f, %.1f), dist=%.1f, normal=(%.2f, %.2f)\n",
+				       hit.hitX, hit.hitY, hit.distance, hit.normalX, hit.normalY);
+				// 显示命中点标记
+				api.patchComponent<engine::Transform>(rayHitMarker, [&](engine::Transform& tf) {
+					tf.x = hit.hitX - 4.f;
+					tf.y = hit.hitY - 4.f;
+				});
+			} else {
+				printf("[Physics] Raycast missed\n");
+			}
+		}
+
+		// T 键：以玩家为中心进行盒形区域查询
+		if (api.isKeyJustPressed(SDLK_T)) {
+			auto& playerTf = api.getComponent<engine::Transform>(player);
+			auto hits = api.overlapBox(playerTf.x, playerTf.y, 100.f, 100.f, engine::COLLISION_LAYER_ALL);
+			printf("[Physics] OverlapBox found %zu entities:\n", hits.size());
+			for (auto& h : hits) {
+				if (api.hasComponent<engine::EntityID>(h.entity)) {
+					auto& id = api.getComponent<engine::EntityID>(h.entity);
+					printf("  - %s (overlap: %.1fx%.1f)\n", id.c_str(), h.overlapX, h.overlapY);
+				}
+			}
+		}
+
+		// Y 键：以玩家为中心进行圆形区域查询
+		if (api.isKeyJustPressed(SDLK_Y)) {
+			auto& playerTf = api.getComponent<engine::Transform>(player);
+			auto hits = api.overlapCircle(playerTf.x, playerTf.y, 150.f, engine::COLLISION_LAYER_ALL);
+			printf("[Physics] OverlapCircle found %zu entities in radius 150\n", hits.size());
+		}
+
+		// Space 键：重置物理方块位置
+		if (api.isKeyJustPressed(SDLK_SPACE)) {
+			api.patchComponent<engine::Transform>(physicsBox, [&](engine::Transform& tf) {
+				tf.x = 600.f;
+				tf.y = 50.f;
+			});
+			auto& rb = api.getComponent<engine::RigidBody>(physicsBox);
+			rb.velocityX = 0.f;
+			rb.velocityY = 0.f;
+			printf("[Physics] Reset physics box to (600, 50)\n");
+		}
+
+		// P 键：打印碰撞层测试结果
+		if (api.isKeyJustPressed(SDLK_P)) {
+			printf("\n[Physics] Collision Layer Test:\n");
+			printf("  - Ground: layer=STATIC, mask=DEFAULT|PLAYER|ENEMY\n");
+			printf("  - PhysicsBox: layer=PLAYER, mask=ALL\n");
+			printf("  - Bullet: layer=BULLET, mask=ENEMY (should pass through ground)\n");
+			printf("  - Enemy: layer=ENEMY, mask=ALL\n");
+			printf("  - PickupZone: layer=PICKUP, mask=PLAYER (isTrigger=true)\n");
+			printf("  Expected: Bullet passes through ground, stops at enemy\n");
 		}
 
 		if (api.isKeyJustPressed(SDLK_ESCAPE)) { api.quit(); break; }

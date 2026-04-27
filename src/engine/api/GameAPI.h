@@ -50,9 +50,65 @@ public:
     float pointerY(int id = 0)          const;
 
     // ── Physics（Month 5 实现）────────────────────────────────────────────
+    
+    /**
+     * 设置全局重力
+     * @param x X 方向重力加速度（像素/秒²）
+     * @param y Y 方向重力加速度（像素/秒²）
+     */
     void setGravity(float x, float y);
+    
+    /**
+     * 设置物理更新的固定时间步
+     * @param step 时间步长（秒），默认 1/60
+     */
+    void setFixedTimestep(float step);
 
-    // 注册碰撞事件回调（sink 绑定，生命周期由调用方管理）
+    /**
+     * 射线检测 - 从起点发射射线，返回最近的碰撞体
+     * @param startX, startY 射线起点
+     * @param dirX, dirY 射线方向（无需归一化）
+     * @param maxDist 最大检测距离
+     * @param layerMask 只检测指定层（默认所有层）
+     * @return RaycastHit 结果（.hit 表示是否命中）
+     */
+    RaycastHit raycast(float startX, float startY, float dirX, float dirY, float maxDist,
+                       CollisionLayer layerMask = COLLISION_LAYER_ALL);
+    
+    /**
+     * 盒形区域查询 - 检测矩形区域内所有碰撞体
+     * @param centerX, centerY 查询区域中心
+     * @param halfW, halfH 查询区域半宽/半高
+     * @param layerMask 只查询指定层（默认所有层）
+     * @return 重叠的碰撞体列表
+     */
+    std::vector<OverlapResult> overlapBox(float centerX, float centerY,
+                                          float halfW, float halfH,
+                                          CollisionLayer layerMask = COLLISION_LAYER_ALL);
+    
+    /**
+     * 圆形区域查询 - 检测圆形区域内所有碰撞体
+     * @param centerX, centerY 圆心
+     * @param radius 半径
+     * @param layerMask 只查询指定层（默认所有层）
+     * @return 重叠的碰撞体列表
+     */
+    std::vector<entt::entity> overlapCircle(float centerX, float centerY, float radius,
+                                            CollisionLayer layerMask = COLLISION_LAYER_ALL);
+
+    /**
+     * 注册碰撞事件回调
+     * @param listener 监听器对象引用
+     * @param fn 成员函数指针，签名为 void(const CollisionInfo&)
+     * 
+     * 用例：
+     * class MyGame {
+     *     void onCollision(const CollisionInfo& info) {
+     *         if (info.overlapY < 0) { // landed on top }
+     *     }
+     * };
+     * api.onCollision(myGame, &MyGame::onCollision);
+     */
     template<typename Listener>
     void onCollision(Listener& listener, void(Listener::*fn)(const CollisionInfo&));
 

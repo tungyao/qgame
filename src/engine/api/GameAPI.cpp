@@ -82,6 +82,26 @@ void GameAPI::setGravity(float x, float y) {
     ctx_.systems.get<PhysicsSystem>().setGravity(x, y);
 }
 
+void GameAPI::setFixedTimestep(float step) {
+    ctx_.systems.get<PhysicsSystem>().setFixedTimestep(step);
+}
+
+RaycastHit GameAPI::raycast(float startX, float startY, float dirX, float dirY, 
+                            float maxDist, CollisionLayer layerMask) {
+    return ctx_.systems.get<PhysicsSystem>().raycast(startX, startY, dirX, dirY, maxDist, layerMask);
+}
+
+std::vector<OverlapResult> GameAPI::overlapBox(float centerX, float centerY,
+                                               float halfW, float halfH,
+                                               CollisionLayer layerMask) {
+    return ctx_.systems.get<PhysicsSystem>().overlapBox(centerX, centerY, halfW, halfH, layerMask);
+}
+
+std::vector<entt::entity> GameAPI::overlapCircle(float centerX, float centerY, float radius,
+                                                  CollisionLayer layerMask) {
+    return ctx_.systems.get<PhysicsSystem>().overlapCircle(centerX, centerY, radius, layerMask);
+}
+
 // ── Scene ────────────────────────────────────────────────────────────────────
 
 bool GameAPI::loadScene(const char* path) {
