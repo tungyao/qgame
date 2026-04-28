@@ -349,4 +349,66 @@ struct UIDropTarget {
     entt::entity hoveringEntity  = entt::null;
 };
 
+// ── 文本输入框 ───────────────────────────────────────────────────────────────
+// 单行文本输入框，支持点击聚焦、光标导航、字符插入/删除、选中高亮、占位文字、
+// 密码模式、最大长度限制、水平滚动（长文本超出输入框宽度时自动滚动到光标所在处）。
+//
+// 键盘交互：
+//   Printable ASCII     → 插入字符（选中时替换选中文本）
+//   Backspace           → 删除光标前一个字符（选中时删除选中文本）
+//   Delete              → 删除光标后一个字符（选中时删除选中文本）
+//   ← / →               → 光标左/右移动一位（Shift+方向键扩展选中范围）
+//   Home / End          → 光标跳到开头/末尾（Shift+Home/End 扩展选中范围）
+//   Enter               → 触发 onSubmitted 回调
+//   Escape              → 失焦（不触发 onBlur 回调？按 Escape 应当主动 blur）
+//   Ctrl+V              → 从系统剪贴板粘贴文本
+//   Ctrl+A              → 全选
+//
+// 渲染层（由 UISystem::emitNodeVisuals 处理）：
+//   1. 背景矩形（聚焦/失焦两种颜色）
+//   2. 边框（聚焦/失焦两种颜色）
+//   3. 文本内容（裁剪到 padding 后的内区域，水平滚动时 scrollOffsetX 偏移）
+//   4. 选中矩形（从 selectionStart 到 cursorPos）
+//   5. 光标竖线（聚焦时闪烁，间隔 0.5s）
+//   6. 占位文字（文本为空且未聚焦时显示，样式用 placeholderColor）
+struct UITextInput {
+    // ── 数据 ──
+    std::string text;                 // 当前文本（UTF-8 编码）
+    std::string placeholder;          // 空时显示的占位文字
+    size_t      cursorPos       = 0;  // 光标位置（byte 偏移，始终指向 UTF-8 字符边界）
+    size_t      selectionStart  = std::string::npos; // 选中锚点 byte 偏移，npos=无选中
+
+    // ── 视觉 ──
+    FontHandle  font;
+    float       fontSize            = 16.f;
+    core::Color textColor           = { 220, 220, 220, 255 };
+    core::Color placeholderColor    = { 120, 120, 120, 255 };
+    core::Color caretColor          = { 255, 255, 255, 255 };
+    core::Color selectionColor      = { 60, 100, 180, 140 };
+    core::Color bgColor             = { 25, 25, 30, 255 };
+    core::Color focusedBgColor      = { 30, 35, 45, 255 };
+    core::Color borderColor         = { 70, 70, 80, 255 };
+    core::Color focusedBorderColor  = { 110, 140, 210, 255 };
+    float       borderWidth         = 1.5f;
+    float       paddingX            = 6.f;
+    float       paddingY            = 3.f;
+
+    // ── 行为限制 ──
+    uint32_t    maxLength           = UINT32_MAX;
+    bool        passwordMode        = false;
+    char        passwordChar        = '*';
+    bool        readOnly            = false;
+
+    // ── 回调 ──
+    std::function<void(const std::string&)> onChanged;    // 文本变化时触发
+    std::function<void(const std::string&)> onSubmitted;  // 按 Enter 时触发
+    std::function<void()>                   onFocus;      // 获得焦点时
+    std::function<void()>                   onBlur;       // 失去焦点时
+
+    // ── 运行时（由 UISystem 维护） ──
+    bool        focused         = false;
+    float       caretTimer      = 0.f;   // 累计时间（秒），用于光标闪烁
+    float       scrollOffsetX   = 0.f;   // 文本水平滚动偏移（像素）
+};
+
 } // namespace engine

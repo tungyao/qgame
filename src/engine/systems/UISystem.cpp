@@ -6,6 +6,8 @@
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../core/Logger.h"
 
+#include <SDL3/SDL.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -53,6 +55,13 @@ void UISystem::update(float dt) {
     updateCanvases();
     runLayout();
     runInteraction(ctx_.inputState);
+    // 更新所有聚焦文本输入框的光标闪烁计时器
+    {
+        auto tiv = ctx_.world.view<UITextInput>();
+        for (auto [e, ti] : tiv.each()) {
+            if (ti.focused) ti.caretTimer += dt;
+        }
+    }
     updateTooltip(dt);
     buildCommands();
 }
@@ -365,7 +374,7 @@ void UISystem::runInteraction(InputState& input) {
                           // 偷走拖拽块附近的点击 —— 表现为"按钮命中错位"和"拖几次后无法
                          // 再拖"。如果业务确实想让背景/标签接受 raycast，自行加上
                          // UIButton 或调用 setUIInteractable(false) 由用户显式控制。
-               const bool hasInteractor = world.any_of<UIButton, UIToggle, UISlider, UIDraggable, UITooltip>(e);
+               const bool hasInteractor = world.any_of<UIButton, UIToggle, UISlider, UIDraggable, UITooltip, UITextInput>(e);
             if (!hasInteractor) continue;
 
             if (bestHit == entt::null ||n.sortOrder > bestOrder || (n.sortOrder == bestOrder && mySeq >= bestSeq)) {
@@ -463,7 +472,293 @@ void UISystem::runInteraction(InputState& input) {
         }
     }
 
-    // ── 3. 滑条拖动跟随 ────────────────────────────────────────────────────
+    // ── 3. 文本输入框焦点管理 ──────────────────────────────────────────────────
+    {
+        // 找出当前聚焦的文本输入框
+        entt::entity focusedTI = entt::null;
+        {
+            auto tiv = world.view<UITextInput>();
+            for (auto [fe, fti] : tiv.each()) {
+                if (fti.focused) { focusedTI = fe; break; }
+            }
+        }
+
+        if (justPressed) {
+            entt::entity hitTI = (pressed_ != entt::null && world.all_of<UITextInput>(pressed_))
+                                    ? pressed_ : entt::null;
+
+            if (hitTI != focusedTI) {
+                // 旧聚焦失焦
+                if (focusedTI != entt::null) {
+                    auto& fti = world.get<UITextInput>(focusedTI);
+                    fti.focused = false; fti.caretTimer = 0.f;
+                    fti.selectionStart = std::string::npos;
+                    if (fti.onBlur) fti.onBlur();
+                }
+                // 新聚焦
+                if (hitTI != entt::null) {
+                    auto& nti = world.get<UITextInput>(hitTI);
+                    nti.focused = true; nti.caretTimer = 0.f;
+                    nti.selectionStart = std::string::npos;
+                    // 根据点击位置定位光标（基于真实字形 advance）
+                    const auto& n = world.get<UINode>(hitTI);
+                    float relX = px - (n.screenX + nti.paddingX) + nti.scrollOffsetX;
+                    nti.cursorPos = textInputIndexAtX(nti, relX);
+                    if (nti.onFocus) nti.onFocus();
+                }
+            } else if (hitTI != entt::null) {
+                // 已聚焦，只挪光标
+                auto& nti = world.get<UITextInput>(hitTI);
+                nti.selectionStart = std::string::npos;
+                nti.caretTimer = 0.f;
+                const auto& n = world.get<UINode>(hitTI);
+                float relX = px - (n.screenX + nti.paddingX) + nti.scrollOffsetX;
+                nti.cursorPos = textInputIndexAtX(nti, relX);
+            }
+        }
+
+        // 点击不在任何文本输入框上 → 失焦
+        if (justPressed && focusedTI != entt::null) {
+            bool hitAnyTI = (pressed_ != entt::null && world.all_of<UITextInput>(pressed_));
+            if (!hitAnyTI) {
+                auto& fti = world.get<UITextInput>(focusedTI);
+                fti.focused = false; fti.caretTimer = 0.f;
+                fti.selectionStart = std::string::npos;
+                if (fti.onBlur) fti.onBlur();
+            }
+        }
+    }
+
+    // ── 4. 键盘输入处理（聚焦的文本输入框）────────────────────────────────────
+    {
+        entt::entity focusedTI = entt::null;
+        {
+            auto tiv = world.view<UITextInput>();
+            for (auto [fe, fti] : tiv.each()) {
+                if (fti.focused) { focusedTI = fe; break; }
+            }
+        }
+
+        if (focusedTI != entt::null) {
+            auto& ti = world.get<UITextInput>(focusedTI);
+            const auto& n = world.get<UINode>(focusedTI);
+
+            // 当前一帧内的所有原始键盘事件逐一处理
+            for (const auto& evt : input.frameEvents()) {
+                if (evt.type != platform::InputRawEvent::Type::KEY_DOWN) continue;
+                const int kc = evt.keyCode;
+
+                // 跳过单纯的修饰键
+                if (kc == SDLK_LSHIFT || kc == SDLK_RSHIFT ||
+                    kc == SDLK_LCTRL  || kc == SDLK_RCTRL  ||
+                    kc == SDLK_LALT   || kc == SDLK_RALT) continue;
+
+                const bool ctrlHeld  = input.isKeyDown(SDLK_LCTRL) || input.isKeyDown(SDLK_RCTRL);
+                const bool shiftHeld = input.isKeyDown(SDLK_LSHIFT) || input.isKeyDown(SDLK_RSHIFT);
+
+                // ── Ctrl 快捷键 ─────────────────────────────────────────────────
+                if (ctrlHeld) {
+                    if (kc == SDLK_A) { // 全选
+                        ti.selectionStart = 0;
+                        ti.cursorPos = ti.text.size();
+                        ti.caretTimer = 0.f;
+                        continue;
+                    }
+                    if (kc == SDLK_V) { // 粘贴
+                        if (ti.readOnly) continue;
+                        char* clip = SDL_GetClipboardText();
+                        if (clip && *clip) {
+                            size_t clen = SDL_strlen(clip);
+                            if (ti.selectionStart != std::string::npos && ti.selectionStart != ti.cursorPos) {
+                                size_t beg = std::min(ti.selectionStart, ti.cursorPos);
+                                size_t end = std::max(ti.selectionStart, ti.cursorPos);
+                                ti.text.erase(beg, end - beg);
+                                ti.cursorPos = beg;
+                                ti.selectionStart = std::string::npos;
+                            }
+                            size_t room = (ti.text.size() < ti.maxLength) ? ti.maxLength - ti.text.size() : 0;
+                            if (room > 0 && clen > room) clen = room;
+                            ti.text.insert(ti.cursorPos, clip, clen);
+                            ti.cursorPos += clen;
+                            ti.caretTimer = 0.f;
+                            if (ti.onChanged) ti.onChanged(ti.text);
+                        }
+                        SDL_free(clip);
+                        continue;
+                    }
+                    if (kc == SDLK_C || kc == SDLK_X) { // 复制/剪切
+                        if (!ti.text.empty() && ti.selectionStart != std::string::npos && ti.selectionStart != ti.cursorPos) {
+                            size_t beg = std::min(ti.selectionStart, ti.cursorPos);
+                            size_t end = std::max(ti.selectionStart, ti.cursorPos);
+                            std::string sel = ti.text.substr(beg, end - beg);
+                            SDL_SetClipboardText(sel.c_str());
+                            if (kc == SDLK_X && !ti.readOnly) { // 剪切
+                                ti.text.erase(beg, end - beg);
+                                ti.cursorPos = beg;
+                                ti.selectionStart = std::string::npos;
+                                ti.caretTimer = 0.f;
+                                if (ti.onChanged) ti.onChanged(ti.text);
+                            }
+                        }
+                        continue;
+                    }
+                    // 其余 Ctrl+ 按键直接忽略
+                    continue;
+                }
+
+                // ── Backspace ───────────────────────────────────────────────────
+                if (kc == SDLK_BACKSPACE) {
+                    if (ti.readOnly) continue;
+                    bool changed = false;
+                    if (ti.selectionStart != std::string::npos && ti.selectionStart != ti.cursorPos) {
+                        size_t beg = std::min(ti.selectionStart, ti.cursorPos);
+                        size_t end = std::max(ti.selectionStart, ti.cursorPos);
+                        ti.text.erase(beg, end - beg);
+                        ti.cursorPos = beg;
+                        ti.selectionStart = std::string::npos;
+                        changed = true;
+                    } else if (ti.cursorPos > 0) {
+                        ti.text.erase(ti.cursorPos - 1, 1);
+                        ti.cursorPos--;
+                        changed = true;
+                    }
+                    if (changed) { ti.caretTimer = 0.f; if (ti.onChanged) ti.onChanged(ti.text); }
+                    continue;
+                }
+
+                // ── Delete ──────────────────────────────────────────────────────
+                if (kc == SDLK_DELETE) {
+                    if (ti.readOnly) continue;
+                    bool changed = false;
+                    if (ti.selectionStart != std::string::npos && ti.selectionStart != ti.cursorPos) {
+                        size_t beg = std::min(ti.selectionStart, ti.cursorPos);
+                        size_t end = std::max(ti.selectionStart, ti.cursorPos);
+                        ti.text.erase(beg, end - beg);
+                        ti.cursorPos = beg;
+                        ti.selectionStart = std::string::npos;
+                        changed = true;
+                    } else if (ti.cursorPos < ti.text.size()) {
+                        ti.text.erase(ti.cursorPos, 1);
+                        changed = true;
+                    }
+                    if (changed) { ti.caretTimer = 0.f; if (ti.onChanged) ti.onChanged(ti.text); }
+                    continue;
+                }
+
+                // ── ← 方向键 ────────────────────────────────────────────────────
+                if (kc == SDLK_LEFT) {
+                    if (ti.cursorPos > 0) {
+                        if (shiftHeld && ti.selectionStart == std::string::npos)
+                            ti.selectionStart = ti.cursorPos;
+                        ti.cursorPos--;
+                        if (!shiftHeld) ti.selectionStart = std::string::npos;
+                        ti.caretTimer = 0.f;
+                    }
+                    continue;
+                }
+
+                // ── → 方向键 ────────────────────────────────────────────────────
+                if (kc == SDLK_RIGHT) {
+                    if (ti.cursorPos < ti.text.size()) {
+                        if (shiftHeld && ti.selectionStart == std::string::npos)
+                            ti.selectionStart = ti.cursorPos;
+                        ti.cursorPos++;
+                        if (!shiftHeld) ti.selectionStart = std::string::npos;
+                        ti.caretTimer = 0.f;
+                    }
+                    continue;
+                }
+
+                // ── Home ────────────────────────────────────────────────────────
+                if (kc == SDLK_HOME) {
+                    if (shiftHeld && ti.selectionStart == std::string::npos)
+                        ti.selectionStart = ti.cursorPos;
+                    ti.cursorPos = 0;
+                    if (!shiftHeld) ti.selectionStart = std::string::npos;
+                    ti.caretTimer = 0.f;
+                    continue;
+                }
+
+                // ── End ─────────────────────────────────────────────────────────
+                if (kc == SDLK_END) {
+                    if (shiftHeld && ti.selectionStart == std::string::npos)
+                        ti.selectionStart = ti.cursorPos;
+                    ti.cursorPos = ti.text.size();
+                    if (!shiftHeld) ti.selectionStart = std::string::npos;
+                    ti.caretTimer = 0.f;
+                    continue;
+                }
+
+                // ── Enter → 提交 ───────────────────────────────────────────────
+                if (kc == SDLK_RETURN || kc == SDLK_KP_ENTER) {
+                    if (ti.onSubmitted) ti.onSubmitted(ti.text);
+                    continue;
+                }
+
+                // ── Escape → 失焦 ──────────────────────────────────────────────
+                if (kc == SDLK_ESCAPE) {
+                    ti.focused = false; ti.caretTimer = 0.f;
+                    ti.selectionStart = std::string::npos;
+                    if (ti.onBlur) ti.onBlur();
+                    continue;
+                }
+
+                // ── Tab → 失焦（未来可扩展为切换到下一个输入框）────────────────
+                if (kc == SDLK_TAB) {
+                    ti.focused = false; ti.caretTimer = 0.f;
+                    ti.selectionStart = std::string::npos;
+                    if (ti.onBlur) ti.onBlur();
+                    continue;
+                }
+
+                // ── 可打印 ASCII 字符 ──────────────────────────────────────────
+                if (kc >= 32 && kc <= 126) {
+                    if (ti.readOnly) continue;
+                    if (ti.text.size() >= ti.maxLength) continue;
+
+                    // 有选中时先删选中
+                    if (ti.selectionStart != std::string::npos && ti.selectionStart != ti.cursorPos) {
+                        size_t beg = std::min(ti.selectionStart, ti.cursorPos);
+                        size_t end = std::max(ti.selectionStart, ti.cursorPos);
+                        ti.text.erase(beg, end - beg);
+                        ti.cursorPos = beg;
+                        ti.selectionStart = std::string::npos;
+                    }
+
+                    if (ti.text.size() < ti.maxLength) {
+                        ti.text.insert(ti.cursorPos, 1, static_cast<char>(kc));
+                        ti.cursorPos++;
+                        ti.caretTimer = 0.f;
+                        if (ti.onChanged) ti.onChanged(ti.text);
+                    }
+                    continue;
+                }
+            }
+
+            // ── 水平滚动夹紧：确保光标始终可见 ─────────────────────────────────
+            // 使用 FontData 的真实字形 advance，而非 fontSize*0.55 估算，
+            // 避免光标与 MSDF 渲染的文本末端产生累积偏差。
+            {
+                float cursorPixelX = 0.f, textPixelW = 0.f;
+                textInputMetrics(ti, textPixelW, cursorPixelX);
+                const float visibleW = std::max(1.f, n.screenW - ti.paddingX * 2.f);
+
+                // 光标在可见区域左侧：向左滚
+                if (cursorPixelX < ti.scrollOffsetX)
+                    ti.scrollOffsetX = cursorPixelX;
+                // 光标太靠右（距右缘不足 margin）：向右滚到留出 margin
+                const float margin = 4.f;
+                if (cursorPixelX - ti.scrollOffsetX + margin > visibleW)
+                    ti.scrollOffsetX = cursorPixelX - visibleW + margin;
+
+                // 文本短于可见区域时禁止滚动；否则最多滚到露出文本末尾
+                const float maxScroll = std::max(0.f, textPixelW - visibleW);
+                ti.scrollOffsetX = std::clamp(ti.scrollOffsetX, 0.f, maxScroll);
+            }
+        }
+    }
+
+    // ── 5. 滑条拖动跟随 ────────────────────────────────────────────────────
     if (down) {
         auto sv = world.view<UINode, UISlider>();
         for (auto [e, n, s] : sv.each()) {
@@ -613,6 +908,62 @@ void UISystem::runInteraction(InputState& input) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
+
+// ── TextInput 字形度量（基于 FontData::Glyph::advance）─────────────────────
+
+const engine::FontData* UISystem::getTextInputFontData(const UITextInput& ti) const {
+    if (!ti.font.valid()) return nullptr;
+    return ctx_.renderDevice().getFont(ti.font);
+}
+
+float UISystem::textInputGlyphAdvance(const engine::FontData* fd,
+                                       const UITextInput& ti, uint32_t codepoint) const {
+    if (fd) {
+        const Glyph* g = fd->getGlyph(codepoint);
+        if (g) return g->advance * (ti.fontSize / fd->fontSize);
+    }
+    return ti.fontSize * 0.55f;  // fallback 估算
+}
+
+void UISystem::textInputMetrics(const UITextInput& ti,
+                                 float& outTextPixelW, float& outCursorPixelX) const {
+    if (ti.text.empty()) { outTextPixelW = outCursorPixelX = 0.f; return; }
+    const engine::FontData* fd = getTextInputFontData(ti);
+    const size_t cursorEnd = std::min(ti.cursorPos, ti.text.size());
+    // 密码模式用统一密码字符的 advance 确保光标对齐视觉 '*'
+    const float fixedAdv = (ti.passwordMode)
+        ? textInputGlyphAdvance(fd, ti, static_cast<uint32_t>(ti.passwordChar))
+        : 0.f;
+    float x = 0.f;
+    for (size_t i = 0; i < ti.text.size(); ++i) {
+        const float adv = ti.passwordMode
+            ? fixedAdv
+            : textInputGlyphAdvance(fd, ti,
+                  static_cast<uint32_t>(static_cast<unsigned char>(ti.text[i])));
+        x += adv;
+        if (i + 1 == cursorEnd) outCursorPixelX = x;
+    }
+    outTextPixelW = x;
+    if (cursorEnd == ti.text.size()) outCursorPixelX = x;
+}
+
+size_t UISystem::textInputIndexAtX(const UITextInput& ti, float pixelX) const {
+    if (ti.text.empty() || pixelX <= 0.f) return 0;
+    const engine::FontData* fd = getTextInputFontData(ti);
+    const float fixedAdv = (ti.passwordMode)
+        ? textInputGlyphAdvance(fd, ti, static_cast<uint32_t>(ti.passwordChar))
+        : 0.f;
+    float x = 0.f;
+    for (size_t i = 0; i < ti.text.size(); ++i) {
+        const float adv = ti.passwordMode
+            ? fixedAdv
+            : textInputGlyphAdvance(fd, ti,
+                  static_cast<uint32_t>(static_cast<unsigned char>(ti.text[i])));
+        if (pixelX < x + adv * 0.5f) return i;
+        x += adv;
+    }
+    return ti.text.size();
+}
 
 void UISystem::emitRect(float x, float y, float w, float h,
                         core::Color tint, TextureHandle tex,
@@ -813,6 +1164,123 @@ void UISystem::emitNodeVisuals(entt::entity e, int baseSort) {
     }
     if (auto* lbl = world.try_get<UILabel>(e)) {
         emitText(*lbl, n, baseSort + 8);
+    }
+    if (auto* ti = world.try_get<UITextInput>(e)) {
+        // 1) 背景矩形
+        emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                 ti->focused ? ti->focusedBgColor : ti->bgColor, {}, {}, baseSort);
+
+        // 2) 四周边框（上、下、左、右四条细矩形）
+        const float bw = std::max(0.f, ti->borderWidth);
+        const core::Color bc = ti->focused ? ti->focusedBorderColor : ti->borderColor;
+        if (bw > 0.f) {
+            emitRect(n.screenX, n.screenY, n.screenW, bw, bc, {}, {}, baseSort + 1);
+            emitRect(n.screenX, n.screenY + n.screenH - bw, n.screenW, bw, bc, {}, {}, baseSort + 1);
+            emitRect(n.screenX, n.screenY + bw, bw, n.screenH - bw * 2.f, bc, {}, {}, baseSort + 1);
+            emitRect(n.screenX + n.screenW - bw, n.screenY + bw, bw, n.screenH - bw * 2.f, bc, {}, {}, baseSort + 1);
+        }
+
+        // 3) 文本内容区域（padding 后）
+        const float innerX = n.screenX + ti->paddingX;
+        const float innerY = n.screenY + ti->paddingY;
+        const float innerW = std::max(1.f, n.screenW - ti->paddingX * 2.f);
+        const float innerH = std::max(1.f, n.screenH - ti->paddingY * 2.f);
+
+        // Push scissor：后续文本/光标将被裁剪到 padding 区域
+        {
+            backend::PushScissorCmd ps{};
+            ps.rect    = core::Rect{ innerX, innerY, innerW, innerH };
+            ps.sortKey = baseSort + 2;
+            ps.pass    = RenderPass::Screen;
+            uiCommands_.emplace_back(ps);
+        }
+
+        // 用真实字形 advance 计算文本总宽和光标像素位置（密码模式统一用 '*')
+        float textPixelW = 0.f, cursorPixelX = 0.f;
+        textInputMetrics(*ti, textPixelW, cursorPixelX);
+
+        // 密码模式：一律显示为密码字符
+        const std::string& displayText = ti->passwordMode
+            ? std::string(ti->text.size(), ti->passwordChar)
+            : ti->text;
+
+        // 文本左侧 X = innerX - scrollOffsetX（scrollOffsetX >= 0 表示内容左移）
+        const float textOriginX = innerX - ti->scrollOffsetX;
+
+        // 4) 选中背景（基于真实字形 advance 计算起止像素 X）
+        if (ti->selectionStart != std::string::npos && ti->selectionStart != ti->cursorPos) {
+            size_t selBeg = std::min(ti->selectionStart, ti->cursorPos);
+            size_t selEnd = std::max(ti->selectionStart, ti->cursorPos);
+            // 用和 textInputMetrics 相同的方式计算选中区域起止光栅 X
+            const engine::FontData* sfd = getTextInputFontData(*ti);
+            const float sfa = (ti->passwordMode)
+                ? textInputGlyphAdvance(sfd, *ti, static_cast<uint32_t>(ti->passwordChar))
+                : 0.f;
+            float sx = 0.f, selLX = textOriginX, selRX = textOriginX;
+            for (size_t si = 0; si < ti->text.size(); ++si) {
+                const float sa = (ti->passwordMode)
+                    ? sfa
+                    : textInputGlyphAdvance(sfd, *ti,
+                          static_cast<uint32_t>(static_cast<unsigned char>(ti->text[si])));
+                if (si == selBeg) selLX = textOriginX + sx;
+                sx += sa;
+                if (si + 1 >= selEnd) { selRX = textOriginX + sx; break; }
+            }
+            // 若 selEnd == text.size() 且循环正常结束
+            if (selEnd >= ti->text.size()) selRX = textOriginX + sx;
+            emitRect(selLX, innerY, selRX - selLX, innerH,
+                     ti->selectionColor, {}, {}, baseSort + 3);
+        }
+
+        // 5) 文本 / 占位文字
+        if (displayText.empty() && !ti->focused && !ti->placeholder.empty()) {
+            UILabel plcLbl;
+            plcLbl.text     = ti->placeholder;
+            plcLbl.font     = ti->font;
+            plcLbl.fontSize = ti->fontSize;
+            plcLbl.color    = ti->placeholderColor;
+            plcLbl.halign   = UILabel::HAlign::Left;
+            plcLbl.valign   = UILabel::VAlign::Middle;
+            UINode plcNode{};
+            plcNode.screenX = innerX;
+            plcNode.screenY = innerY;
+            plcNode.screenW = innerW;
+            plcNode.screenH = innerH;
+            emitText(plcLbl, plcNode, baseSort + 4);
+        } else if (!displayText.empty()) {
+            UILabel txtLbl;
+            txtLbl.text     = displayText;
+            txtLbl.font     = ti->font;
+            txtLbl.fontSize = ti->fontSize;
+            txtLbl.color    = ti->textColor;
+            txtLbl.halign   = UILabel::HAlign::Left;
+            txtLbl.valign   = UILabel::VAlign::Middle;
+            UINode txtNode{};
+            txtNode.screenX = textOriginX;
+            txtNode.screenY = innerY;
+            // screenW 保证能容纳全部文本，不会被 HAlign::Left 裁切
+            txtNode.screenW = std::max(textPixelW + 4.f, innerW);
+            txtNode.screenH = innerH;
+            emitText(txtLbl, txtNode, baseSort + 4);
+        }
+
+        // 6) 光标竖线（聚焦时闪烁）
+        if (ti->focused) {
+            const float caretX = textOriginX + cursorPixelX;
+            // 50% 占空比闪烁：每 1.0s 周期内前 0.5s 可见
+            if (fmodf(ti->caretTimer, 1.0f) < 0.5f) {
+                emitRect(caretX, innerY, std::max(1.f, ti->fontSize * 0.1f), innerH,
+                         ti->caretColor, {}, {}, baseSort + 5);
+            }
+        }
+
+        // Pop scissor
+        {
+            backend::PopScissorCmd pp{};
+            pp.sortKey = baseSort + 6;
+            pp.pass    = RenderPass::Screen;
+            uiCommands_.emplace_back(pp);
+        }
     }
     // DropTarget 高亮：当拖拽中的元素悬停于本节点之上时叠一层 tint。
     // 放最后画，盖在背景/图片之上但仍在 label 之下 (label 用 +8)。

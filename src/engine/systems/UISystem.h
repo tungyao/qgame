@@ -85,6 +85,18 @@ private:
     // 世界相机参数（取第一个含 World layer 的相机）
     void getWorldCamera(float& camX, float& camY, float& zoom) const;
 
+    // ── TextInput 字形度量（用 FontData::Glyph::advance 替代 fontSize*0.55 估算）─
+    // 获取 TextInput 的 FontData，nullptr 表示不可用（调用方回退估算）
+    const engine::FontData* getTextInputFontData(const UITextInput& ti) const;
+    // 查询单个 glyph 的像素 advance；fd==nullptr 时按 fontSize*0.55f 回退
+    float textInputGlyphAdvance(const engine::FontData* fd,
+                                const UITextInput& ti, uint32_t codepoint) const;
+    // 一次性计算文本总像素宽度 & 光标像素 X 位置（O(n)，n=文本长度）
+    void textInputMetrics(const UITextInput& ti,
+                          float& outTextPixelW, float& outCursorPixelX) const;
+    // 由像素 X 反查光标字符索引（鼠标点击定位用）
+    size_t textInputIndexAtX(const UITextInput& ti, float pixelX) const;
+
     EngineContext& ctx_;
 
     TextureHandle whiteTexture_{};

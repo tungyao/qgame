@@ -1420,6 +1420,78 @@ int main(int argc, char* argv[]) {
 	// ── Tooltip 测试 ────────────────────────────────────────────────────────────
 	buildTooltipTest(api, canvas, font);
 
+	// ── TextInput 测试 ──────────────────────────────────────────────────────────
+	entt::entity textInput;
+	entt::entity inputLabel;
+	{
+		// 标题
+		auto tiTitle = api.createUIText(200.f, 24.f, "TextInput Demo");
+		api.setUIParent(tiTitle, canvas);
+		api.setUIAnchor(tiTitle, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(tiTitle, 200.f, 280.f);
+		api.setUITextFont(tiTitle, font, 18.f);
+		api.setUITextColor(tiTitle, { 200, 220, 255, 255 });
+
+		// 文本输入框
+		textInput = api.createTextInput(280.f, 36.f);
+		api.setUIParent(textInput, canvas);
+		api.setUIAnchor(textInput, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(textInput, 200.f, 310.f);
+		api.setTextInputFont(textInput, font, 20.f);
+		api.setTextInputPlaceholder(textInput, "Type here...");
+		api.setTextInputMaxLength(textInput, 30);
+		api.setTextInputCallback(textInput, [](const std::string& t) {
+			printf("[TextInput] text changed: \"%s\"\n", t.c_str());
+		});
+		api.setTextInputSubmitCallback(textInput, [](const std::string& t) {
+			printf("[TextInput] SUBMITTED: \"%s\"\n", t.c_str());
+		});
+
+		// 输入反馈标签
+		inputLabel = api.createUIText(280.f, 20.f, "");
+		api.setUIParent(inputLabel, canvas);
+		api.setUIAnchor(inputLabel, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(inputLabel, 200.f, 350.f);
+		api.setUITextFont(inputLabel, font, 14.f);
+		api.setUITextColor(inputLabel, { 150, 255, 150, 255 });
+
+		// 密码模式测试
+		auto pwTitle = api.createUIText(200.f, 24.f, "Password Mode");
+		api.setUIParent(pwTitle, canvas);
+		api.setUIAnchor(pwTitle, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(pwTitle, 200.f, 380.f);
+		api.setUITextFont(pwTitle, font, 15.f);
+		api.setUITextColor(pwTitle, { 200, 200, 255, 255 });
+
+		auto pwInput = api.createTextInput(220.f, 32.f);
+		api.setUIParent(pwInput, canvas);
+		api.setUIAnchor(pwInput, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(pwInput, 200.f, 408.f);
+		api.setTextInputFont(pwInput, font, 18.f);
+		api.setTextInputPlaceholder(pwInput, "Enter password...");
+		api.setTextInputPasswordMode(pwInput, true);
+
+		// 确认提交按钮
+		auto submitBtn = api.createButton(100.f, 32.f, []() {
+			printf("[TextInput] Submit button clicked\n");
+		});
+		api.setUIParent(submitBtn, canvas);
+		api.setUIAnchor(submitBtn, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(submitBtn, 430.f, 310.f);
+		api.setButtonColors(submitBtn,
+			{ 70, 120, 180, 255 },
+			{ 100, 150, 210, 255 },
+			{ 50, 90, 140, 255 });
+		api.setUITooltip(submitBtn, "Submit (same as Enter)", font, 12.f, 0.f);
+
+		auto submitLbl = api.createUIText(100.f, 32.f, "Submit");
+		api.setUIParent(submitLbl, submitBtn);
+		api.setUIAnchor(submitLbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(submitLbl, font, 16.f);
+		api.setUITextColor(submitLbl, { 255, 255, 255, 255 });
+		api.setUISortOrder(submitLbl, 1);
+	}
+
 	// ── 底部提示 ─────────────────────────────────────────────────────────────────
 	{
 		auto hint = api.createUIText(700.f, 24.f,
@@ -1766,13 +1838,25 @@ int main(int argc, char* argv[]) {
 			if (progressValue > 1.f) progressValue = 0.f;
 			api.setProgressValue(progressBar, progressValue);
 
-			// 实时刷新音量/开关标签
+			// 实时刷新音量/开关/输入标签
 			{
 				char buf[64];
 				snprintf(buf, sizeof(buf), "Volume: %.0f%%", api.getSliderValue(volumeSlider));
 				api.setUIText(volumeLabel, buf);
 
 				api.setUIText(soundLabel, api.getToggleValue(soundToggle) ? "Sound: ON" : "Sound: OFF");
+			}
+
+			// 实时显示 TextInput 内容
+			{
+				const char* t = api.getTextInputText(textInput);
+				if (*t) {
+					char buf[128];
+					snprintf(buf, sizeof(buf), "Current: \"%s\" (len=%zu)", t, strlen(t));
+					api.setUIText(inputLabel, buf);
+				} else {
+					api.setUIText(inputLabel, "(empty — click to type)");
+				}
 			}
 
 			// 玩家血条脉动 (1 → 0 → 1)

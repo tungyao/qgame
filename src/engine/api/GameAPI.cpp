@@ -556,6 +556,126 @@ void GameAPI::clearUITooltip(entt::entity e) {
     if (ctx_.world.all_of<UITooltip>(e)) ctx_.world.remove<UITooltip>(e);
 }
 
+// ── TextInput ───────────────────────────────────────────────────────────────
+
+entt::entity GameAPI::createTextInput(float width, float height) {
+    entt::entity e = createUIElement();
+    setUISize(e, width, height);
+    ctx_.world.emplace<UITextInput>(e);
+    // 不设置默认字体——调用方自行 setTextInputFont
+    if (auto* n = ctx_.world.try_get<UINode>(e)) n->interactable = true;
+    renameEntity(ctx_.world, e, "textinput");
+    return e;
+}
+
+void GameAPI::setTextInputText(entt::entity e, const char* text) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        if (!ti->readOnly) {
+            ti->text = text ? text : "";
+            ti->cursorPos = std::min(ti->cursorPos, ti->text.size());
+            ti->selectionStart = std::string::npos;
+        }
+    }
+}
+
+const char* GameAPI::getTextInputText(entt::entity e) const {
+    auto* ti = ctx_.world.try_get<UITextInput>(e);
+    return ti ? ti->text.c_str() : "";
+}
+
+void GameAPI::setTextInputFont(entt::entity e, FontHandle font, float fontSize) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->font     = font;
+        ti->fontSize = fontSize;
+    }
+}
+
+void GameAPI::setTextInputPlaceholder(entt::entity e, const char* text) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->placeholder = text ? text : "";
+    }
+}
+
+void GameAPI::setTextInputMaxLength(entt::entity e, uint32_t maxLen) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->maxLength = maxLen;
+        if (ti->text.size() > maxLen) {
+            ti->text.resize(maxLen);
+            ti->cursorPos = std::min(ti->cursorPos, ti->text.size());
+        }
+    }
+}
+
+void GameAPI::setTextInputPasswordMode(entt::entity e, bool enabled) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->passwordMode = enabled;
+    }
+}
+
+void GameAPI::setTextInputReadOnly(entt::entity e, bool readOnly) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->readOnly = readOnly;
+    }
+}
+
+void GameAPI::setTextInputCallback(entt::entity e, std::function<void(const std::string&)> onChanged) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->onChanged = std::move(onChanged);
+    }
+}
+
+void GameAPI::setTextInputSubmitCallback(entt::entity e, std::function<void(const std::string&)> onSubmitted) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->onSubmitted = std::move(onSubmitted);
+    }
+}
+
+void GameAPI::setTextInputFocusCallbacks(entt::entity e,
+                                          std::function<void()> onFocus,
+                                          std::function<void()> onBlur) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        ti->onFocus = std::move(onFocus);
+        ti->onBlur  = std::move(onBlur);
+    }
+}
+
+void GameAPI::focusTextInput(entt::entity e) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        if (!ti->focused) {
+            // 先让其他输入框失焦
+            auto tiv = ctx_.world.view<UITextInput>();
+            for (auto [other, oti] : tiv.each()) {
+                if (&oti != ti && oti.focused) {
+                    oti.focused = false;
+                    oti.caretTimer = 0.f;
+                    oti.selectionStart = std::string::npos;
+                    if (oti.onBlur) oti.onBlur();
+                }
+            }
+            ti->focused = true;
+            ti->caretTimer = 0.f;
+            ti->selectionStart = std::string::npos;
+            if (ti->onFocus) ti->onFocus();
+        }
+    }
+}
+
+void GameAPI::blurTextInput(entt::entity e) {
+    if (auto* ti = ctx_.world.try_get<UITextInput>(e)) {
+        if (ti->focused) {
+            ti->focused = false;
+            ti->caretTimer = 0.f;
+            ti->selectionStart = std::string::npos;
+            if (ti->onBlur) ti->onBlur();
+        }
+    }
+}
+
+bool GameAPI::isTextInputFocused(entt::entity e) const {
+    auto* ti = ctx_.world.try_get<UITextInput>(e);
+    return ti ? ti->focused : false;
+}
+
 // ── NineSlice ───────────────────────────────────────────────────────────────
 
 void GameAPI::setUINineSlice(entt::entity e, TextureHandle texture,

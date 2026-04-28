@@ -199,6 +199,22 @@ public:
                             const core::Color& bg, const core::Color& text);
     void clearUITooltip(entt::entity e);
 
+    // ── TextInput ─────────────────────────────────────────────────────────────
+    entt::entity createTextInput(float width, float height);
+    void setTextInputText(entt::entity e, const char* text);
+    const char* getTextInputText(entt::entity e) const;
+    void setTextInputFont(entt::entity e, FontHandle font, float fontSize);
+    void setTextInputPlaceholder(entt::entity e, const char* text);
+    void setTextInputMaxLength(entt::entity e, uint32_t maxLen);
+    void setTextInputPasswordMode(entt::entity e, bool enabled);
+    void setTextInputReadOnly(entt::entity e, bool readOnly);
+    void setTextInputCallback(entt::entity e, std::function<void(const std::string&)> onChanged);
+    void setTextInputSubmitCallback(entt::entity e, std::function<void(const std::string&)> onSubmitted);
+    void setTextInputFocusCallbacks(entt::entity e, std::function<void()> onFocus, std::function<void()> onBlur);
+    void focusTextInput(entt::entity e);
+    void blurTextInput(entt::entity e);
+    bool isTextInputFocused(entt::entity e) const;
+
     // ── NineSlice ────────────────────────────────────────────────────────────
     // 给一个 UINode 挂上九宫格背景：纹理被切成 3×3，节点缩放时只有边/中心拉伸，
     // 四角保持原像素尺寸。常用于对话框/面板/按钮底图。
