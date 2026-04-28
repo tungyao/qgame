@@ -1497,7 +1497,7 @@ int main(int argc, char* argv[]) {
 			// 竖滚条贴在视口内侧右边缘：x=280-8=272, y 跟视口同
 			api.setUIAnchor(sb, 0.f, 1.f, 0.f, 1.f);
 			api.setUIPivot(sb, 0.f, 1.f);
-			api.setUIOffset(sb, 40.f + 240.f - 8.f, -40.f);
+			api.setUIOffset(sb, 40.f + 240.f, -40.f);
 			api.setScrollBarColors(sb,
 				{ 20, 20, 25, 200 },     // track
 				{ 110, 130, 160, 220 },  // thumb
