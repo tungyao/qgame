@@ -70,7 +70,9 @@ private:
 
     // 命令缓存构建
     void buildCommands();
-    void buildNodeCommands(entt::entity e, int& seq, int parentBaseSort);
+    // layerBoost：进入 UIModal 子树时叠加 kModalLayerBoost，让模态整棵子树
+    // 排序键超过普通 UI；普通子树为 0。
+    void buildNodeCommands(entt::entity e, int& seq, int parentBaseSort, int layerBoost);
     void emitNodeVisuals(entt::entity e, int baseSort);
     void emitRect(float x, float y, float w, float h,
                   core::Color tint, TextureHandle tex,
@@ -81,6 +83,24 @@ private:
 
     // 命中过滤：检查 (px,py) 是否在 e 的所有祖先 ScrollView 视口内
     bool insideScissorAncestors(entt::entity e, float px, float py) const;
+
+    // ── Modal ────────────────────────────────────────────────────────────────
+    // 模态对话框系统级辅助：
+    //   - findActiveModalRoot()  : 扫所有 UIModal{enabled=true}，返回"最顶层"
+    //                              (按 layer 升序、再按 DFS 序) 的那一个；无则
+    //                              返回 entt::null。多个模态同时启用时其余被
+    //                              视为埋在该模态之下，统一禁用交互。
+    //   - isUnderModal(e, root)  : 沿 parent 链向上看 e 是否落在 root 的子树内
+    //                              (含 root 自身)。命中过滤和 buildNodeCommands
+    //                              的 layerBoost 决策共用。
+    //   - emitModalOverlayIfAny(): 若激活模态且 drawOverlay=true，在普通 UI 之
+    //                              上、模态子树之下，emit 一张全屏遮罩 rect。
+    // 排序键加 boost：(n.layer + kModalLayerBoost) << 20 不能溢出 int32，所以
+    // boost 取 1<<10 = 1024，给 layer 留 ~21 位空间，业务 layer 远不可能这么大。
+    static constexpr int kModalLayerBoost = 1 << 10;
+    entt::entity findActiveModalRoot() const;
+    bool         isUnderModal(entt::entity e, entt::entity modalRoot) const;
+    void         emitModalOverlayIfAny();
 
     // ── ScrollBar 几何 ───────────────────────────────────────────────────────
     // 把 UIScrollBar 节点的屏幕矩形与其 target ScrollView 的内容/视口/滚动量

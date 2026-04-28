@@ -289,6 +289,19 @@ public:
     // 屏幕矩形内（与 ScrollView 共用 scissor 机制）。enabled=false 可临时关闭。
     void setUIMask(entt::entity e, bool enabled = true);
 
+    // ── Modal ────────────────────────────────────────────────────────────────
+    // 把任意 UINode 标记为"模态对话框根"。enabled=true 时：
+    //   - 该节点及其子树自动渲染在所有普通 UI 之上 (业务无需调 setUILayer)
+    //   - 点击 / 滚轮 / 拖拽滚动只对模态子树内的节点生效，外部 UI 全部被屏蔽
+    //   - drawOverlay=true 会在子树之下、其他 UI 之上画一张全屏遮罩矩形
+    //   - 按下遮罩区域 (即子树之外) 触发 onClickOutside；关闭模态需在该回调
+    //     里调用 setUIModal(e, false) —— 框架不会自动关闭
+    // 多个模态同时 enabled 时只激活最顶层 (按 layer)，其余被埋在它之下。
+    void setUIModal(entt::entity e, bool enabled = true);
+    void setUIModalOverlay(entt::entity e, bool drawOverlay,
+                           const core::Color& overlayColor);
+    void setUIModalOnClickOutside(entt::entity e, std::function<void()> cb);
+
     // ── ScrollBar ────────────────────────────────────────────────────────────
     // 创建一个绑定到指定 ScrollView 的滚动条节点。它本身只是普通 UINode：
     //   - 调用方负责设置 parent / anchor / offset，决定它贴在视口的哪一侧

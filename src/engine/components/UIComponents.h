@@ -420,6 +420,35 @@ struct UIDropTarget {
     entt::entity hoveringEntity  = entt::null;
 };
 
+// ── 模态对话框 ──────────────────────────────────────────────────────────────
+// 给一个 UINode 挂上 UIModal 后，当 enabled=true：
+//   1. 该节点及其整棵子树的渲染顺序被自动抬到所有普通 UI 之上 (业务无需调
+//      node.layer)。实现方式：UISystem 在构建命令时，对模态子树叠加一个
+//      内部常量 layerBoost (kModalLayerBoost)，与 buildNodeCommands 中的
+//      `(layer << 20) + sortOrder*16 + seq` 排序键一致。
+//   2. 命中测试阶段，**不在该子树内的所有节点全部不可点击** —— 包括 button、
+//      slider、scrollbar、textinput 的 click、鼠标滚轮以及 ScrollView 的 dragToScroll，
+//      统一被屏蔽，避免"穿透到底层 UI"。
+//   3. 若 drawOverlay=true，会在模态子树之下、其他 UI 之上画一张全屏遮罩矩形
+//      (overlayColor)，常用作半透明黑底以视觉上突出对话框。
+//   4. 业务在按下遮罩区域时收到 onClickOutside 回调（点击会被吞掉）。
+//      *关闭模态* 完全由业务负责：在回调里调用 setUIModal(e, false) 即可。
+//
+// 多个 enabled=true 的 UIModal 同时存在时，UISystem 只激活"最顶层"的那一个
+// (按 layer + DFS 序选取)，其余被认为埋在它之下、同样不可交互——和系统弹窗
+// 栈语义一致。
+//
+// 注意：UIModal 不主动管理键盘 (例如 ESC 自动关闭)，业务需要自行接 InputState。
+struct UIModal {
+    bool        enabled       = true;
+    // 是否绘制全屏半透明遮罩 (位于模态子树之下、其他 UI 之上)
+    bool        drawOverlay   = true;
+    core::Color overlayColor  = { 0, 0, 0, 140 };
+    // 按下遮罩区域 (即模态子树之外) 时触发；通常在此调用 setUIModal(e,false)
+    // 来关闭对话框。回调内可以做任意操作，框架不会自动关闭模态。
+    std::function<void()> onClickOutside;
+};
+
 // ── 文本输入框 ───────────────────────────────────────────────────────────────
 // 单行文本输入框，支持点击聚焦、光标导航、字符插入/删除、选中高亮、占位文字、
 // 密码模式、最大长度限制、水平滚动（长文本超出输入框宽度时自动滚动到光标所在处）。

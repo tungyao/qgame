@@ -587,6 +587,26 @@ void GameAPI::setUIMask(entt::entity e, bool enabled) {
     ctx_.world.get_or_emplace<UIMask>(e).enabled = enabled;
 }
 
+// ── Modal ───────────────────────────────────────────────────────────────────
+
+void GameAPI::setUIModal(entt::entity e, bool enabled) {
+    if (!ctx_.world.all_of<UINode>(e)) return;
+    ctx_.world.get_or_emplace<UIModal>(e).enabled = enabled;
+}
+
+void GameAPI::setUIModalOverlay(entt::entity e, bool drawOverlay,
+                                const core::Color& overlayColor) {
+    if (!ctx_.world.all_of<UINode>(e)) return;
+    auto& m = ctx_.world.get_or_emplace<UIModal>(e);
+    m.drawOverlay  = drawOverlay;
+    m.overlayColor = overlayColor;
+}
+
+void GameAPI::setUIModalOnClickOutside(entt::entity e, std::function<void()> cb) {
+    if (!ctx_.world.all_of<UINode>(e)) return;
+    ctx_.world.get_or_emplace<UIModal>(e).onClickOutside = std::move(cb);
+}
+
 // ── Tooltip ─────────────────────────────────────────────────────────────────
 
 void GameAPI::setUITooltip(entt::entity e, const char* text,

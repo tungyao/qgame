@@ -389,6 +389,41 @@ bool UISystem::computeScrollBarMetrics(entt::entity sb, ScrollBarMetrics& out) c
     return true;
 }
 
+// ── Modal helpers ───────────────────────────────────────────────────────────
+// 选出"最顶层"的激活模态：先按 layer 大者优先，layer 相同则按 entt 内部句柄
+// (DFS 序的近似稳定 tiebreak 已经在 buildCommands 里另行处理；这里挑根节点只
+// 需要一个确定性的 fallback)。无则返回 entt::null。
+entt::entity UISystem::findActiveModalRoot() const {
+    const auto& world = ctx_.world;
+    entt::entity best = entt::null;
+    int          bestLayer = std::numeric_limits<int>::min();
+    auto view = world.view<const UIModal, const UINode>();
+    for (auto [e, m, n] : view.each()) {
+        if (!m.enabled || !n.visible) continue;
+        if (best == entt::null || n.layer > bestLayer ||
+            (n.layer == bestLayer && static_cast<uint32_t>(e) > static_cast<uint32_t>(best))) {
+            best      = e;
+            bestLayer = n.layer;
+        }
+    }
+    return best;
+}
+
+// 沿 parent 链上溯检查 e 是否落在 modalRoot 的子树内 (含 modalRoot 自身)。
+// modalRoot==null 时永远返回 true (无激活模态 = 全部可命中)。
+bool UISystem::isUnderModal(entt::entity e, entt::entity modalRoot) const {
+    if (modalRoot == entt::null) return true;
+    auto& world = ctx_.world;
+    entt::entity cur = e;
+    while (cur != entt::null && world.valid(cur)) {
+        if (cur == modalRoot) return true;
+        auto* n = world.try_get<UINode>(cur);
+        if (!n) return false;
+        cur = n->parent;
+    }
+    return false;
+}
+
 bool UISystem::insideScissorAncestors(entt::entity e, float px, float py) const {
     auto& world = ctx_.world;
     entt::entity cur = world.get<UINode>(e).parent;
@@ -467,6 +502,11 @@ void UISystem::runInteraction(InputState& input) {
         return it == drawRank.end() ? 0ull : it->second;
     };
 
+    // ── 0b. 模态对话框激活检测：拿到"最顶层激活模态"，hit-test / 滚轮 /
+    //       dragToScroll 都只对其子树内的节点生效，外部 UI 一律被屏蔽。
+    //       同时，按下落在子树之外即视为"点了遮罩"，触发 onClickOutside。
+    const entt::entity modalRoot = findActiveModalRoot();
+
     // ── 1. 命中测试：在所有可交互节点里挑 drawRank 最大者（最上层）。
     entt::entity bestHit  = entt::null;
     uint64_t     bestRank = 0;
@@ -475,6 +515,10 @@ void UISystem::runInteraction(InputState& input) {
         for (auto [e, n] : nv.each()) {
             if (!n.visible || !n.interactable) continue;
             if (!pointInRect(px, py, n)) continue;
+            // 模态激活时：不在模态子树内的节点全部排除。这一行就是
+            // "禁止穿透到下方 UI" 的全部实现 —— 配合下面的 ScrollView
+            // 过滤即可让模态期间所有非模态控件失活。
+            if (!isUnderModal(e, modalRoot)) continue;
             // 如果该节点位于某个 ScrollView 子树内，命中点还必须落在那些视口里
             if (!insideScissorAncestors(e, px, py)) continue;
             // 只把真正的交互组件视作命中目标。否则贴在按钮上的 UILabel
@@ -501,6 +545,15 @@ void UISystem::runInteraction(InputState& input) {
     hovered_ = bestHit;
     if (hovered_ != entt::null) world.get<UINode>(hovered_).hovered = true;
 
+    // ── 1c. 模态遮罩点击：按下落在模态子树之外 (= 命中已被过滤为 null)
+    //       且模态激活，触发 onClickOutside。点击同时被消费 (无 hovered_ →
+    //       无 pressed_ → 不会触发任何业务控件)。
+    if (justPressed && modalRoot != entt::null && bestHit == entt::null) {
+        if (auto* m = world.try_get<UIModal>(modalRoot); m && m->onClickOutside) {
+            m->onClickOutside();
+        }
+    }
+
     // ── 1b. 滚轮 / 拖拽滚动：找到鼠标下"最深"的 ScrollView，把 wheel delta
     //       注入它的 scrollX/Y。dragToScroll 在 hovered_ 命中其他交互体时让位。
     {
@@ -514,6 +567,9 @@ void UISystem::runInteraction(InputState& input) {
         for (auto [e, n, sv] : svv.each()) {
             if (!n.visible) continue;
             if (!pointInRect(px, py, n)) continue;
+            // 模态激活时：模态子树外的 ScrollView 不接受滚轮 / dragToScroll，
+            // 否则用户能透过遮罩滚动底层列表。
+            if (!isUnderModal(e, modalRoot)) continue;
             if (!insideScissorAncestors(e, px, py)) continue;
             const uint64_t r = rankOf(e);
             if (scrollTarget == entt::null || r >= bestSvRank) {
@@ -1489,14 +1545,22 @@ void UISystem::emitNodeVisuals(entt::entity e, int baseSort) {
     }
 }
 
-void UISystem::buildNodeCommands(entt::entity e, int& seq, int /*parentBaseSort*/) {
+void UISystem::buildNodeCommands(entt::entity e, int& seq, int /*parentBaseSort*/, int layerBoost) {
     auto& world = ctx_.world;
     const auto& n = world.get<UINode>(e);
     if (!n.visible) return;
 
-    // baseSort = layer * 2^20 + sortOrder * 16 + seq；layer 占高位 → 跨子树
-    // 重叠时大 layer 永远在上，与命中测试 (drawRank 的 layer 高 32 位) 一致。
-    const int baseSort = (n.layer << 20) + n.sortOrder * 16 + (seq++ & 0xFFFF);
+    // 进入 UIModal{enabled=true} 节点时：抬升本节点及其全部后代的 layerBoost，
+    // 让模态子树整体绘制顺序高于普通 UI。kModalLayerBoost (1<<10) 远大于业务
+    // 实际使用的 layer 值范围，因此能可靠覆盖。
+    if (auto* m = world.try_get<UIModal>(e); m && m->enabled) {
+        layerBoost = (std::max)(layerBoost, kModalLayerBoost);
+    }
+
+    // baseSort = (layer + boost) * 2^20 + sortOrder * 16 + seq；layer 占高位 →
+    // 跨子树重叠时大 layer 永远在上，与命中测试 (drawRank 的 layer 高 32 位) 一致。
+    const int effLayer = n.layer + layerBoost;
+    const int baseSort = (effLayer << 20) + n.sortOrder * 16 + (seq++ & 0xFFFF);
 
     // 1) 自身视觉先画
     emitNodeVisuals(e, baseSort);
@@ -1523,7 +1587,7 @@ void UISystem::buildNodeCommands(entt::entity e, int& seq, int /*parentBaseSort*
     }
     std::stable_sort(kids.begin(), kids.end(),
                      [](const Entry& a, const Entry& b) { return a.order < b.order; });
-    for (const auto& k : kids) buildNodeCommands(k.child, seq, baseSort);
+    for (const auto& k : kids) buildNodeCommands(k.child, seq, baseSort, layerBoost);
 
     if (clipsChildren) {
         backend::PopScissorCmd pp{};
@@ -1537,7 +1601,19 @@ void UISystem::buildCommands() {
     uiCommands_.clear();
     auto& world = ctx_.world;
 
-    // 从每个 Canvas 出发做 DFS。Canvas 的直接子节点 = parent==canvasE 的 UINode。
+    // 模态优先：CPU 后端按 uiCommands_ 的"插入顺序"绘制 (不按 sortKey 重新
+    // 排序)，所以视觉上"模态在最上方"必须靠 emit 顺序来保证：
+    //   1) 先 DFS 所有非模态子树
+    //   2) emit 全屏遮罩
+    //   3) 最后 DFS 模态子树
+    // GPU-driven 后端走 sortKey 排序 → 由 buildNodeCommands 的 layerBoost 兜底。
+    // 双轨并存即可在两条路径都拿到正确的层级。
+    //
+    // 约束：UIModal 节点必须是 UICanvas 的直接子节点。把模态深嵌进某个布局组
+    // 子树会导致这里 phase 1 把模态的祖先一起渲染，模态视觉次序会错——
+    // 业务也不该把"全屏对话框"塞进局部子树，这是合理约束。
+    const entt::entity modalRoot = findActiveModalRoot();
+
     auto canvasView = world.view<UICanvas>();
     int seq = 0;
     for (auto [canvasE, c] : canvasView.each()) {
@@ -1549,11 +1625,37 @@ void UISystem::buildCommands() {
         }
         std::stable_sort(roots.begin(), roots.end(),
                          [](const Entry& a, const Entry& b) { return a.order < b.order; });
-        for (const auto& r : roots) buildNodeCommands(r.child, seq, 0);
+        // Phase 1：DFS 所有非模态根
+        for (const auto& r : roots) {
+            if (r.child == modalRoot) continue;
+            buildNodeCommands(r.child, seq, 0, /*layerBoost=*/0);
+        }
+    }
+
+    // Phase 2：模态遮罩 (位于普通 UI 之上、模态子树之下)
+    emitModalOverlayIfAny();
+
+    // Phase 3：模态子树最后绘制 → 视觉永远盖在遮罩与所有普通 UI 之上
+    if (modalRoot != entt::null && world.valid(modalRoot)) {
+        buildNodeCommands(modalRoot, seq, 0, /*layerBoost=*/0);
     }
 
     // tooltip：绘制在所有 UI 之上，且不进入任何 ScrollView 的 scissor 子树。
     emitTooltipIfAny();
+}
+
+// 在普通 UI (effLayer < kModalLayerBoost) 与模态子树 (effLayer >= kModalLayerBoost)
+// 之间的"夹层"插入一张全屏遮罩。sortKey 用 (kModalLayerBoost << 20) - 1，刚好
+// 比模态子树最低 baseSort 小 1，又比所有普通 UI 大 → 视觉上盖住底层、被对话框
+// 盖住。点击吞掉的逻辑由 runInteraction 中的 isUnderModal 过滤完成，不依赖此
+// rect 是否参与命中。
+void UISystem::emitModalOverlayIfAny() {
+    const entt::entity modalRoot = findActiveModalRoot();
+    if (modalRoot == entt::null) return;
+    auto* m = ctx_.world.try_get<UIModal>(modalRoot);
+    if (!m || !m->drawOverlay) return;
+    const int sortKey = (kModalLayerBoost << 20) - 1;
+    emitRect(0.f, 0.f, screenW_, screenH_, m->overlayColor, {}, {}, sortKey);
 }
 
 // ───────────────────────────────────────────────────────────────────────────────

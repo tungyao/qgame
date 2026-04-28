@@ -415,6 +415,144 @@ static void buildMaskTest(engine::GameAPI& api, entt::entity canvas,
 	});
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Modal 测试：
+//   左下角放一个 "Open Modal" 触发按钮 + 一个 "Bottom Btn" 干扰按钮 (验证模态
+//   打开后它无法被点击)。点击 Open Modal 后构造一个对话框：
+//     - 半透明黑底全屏遮罩 (UIModal.drawOverlay 默认开)
+//     - 居中 NineSlice 风格面板，上面一行标题、一个 "OK" 按钮、一个 "Cancel" 按钮
+//     - 面板内部还塞一个按钮专门验证"模态内的 button 仍可点击"
+//   点击遮罩区域 (面板外) → onClickOutside 触发 → 关闭模态 (业务自行决定)。
+//   注意：模态对话框节点不需要手动调 setUILayer —— UISystem 通过 layerBoost
+//   自动把整棵子树抬到所有普通 UI 之上。
+// ─────────────────────────────────────────────────────────────────────────────
+static void buildModalTest(engine::GameAPI& api, entt::entity canvas, engine::FontHandle font) {
+	// 模态对话框根节点 (默认 visible=true，但我们显式 setUIModal(false) 让它一开始
+	// 处于"未激活模态"状态——节点本身仍然存在 + 不可见，等被打开时才上去)。
+	auto modal = api.createUIElement();
+	api.setUIParent(modal, canvas);
+	api.setUISize(modal, 400.f, 220.f);
+	api.setUIAnchor(modal, 0.5f, 0.5f, 0.5f, 0.5f);
+	api.setUIPivot(modal, 0.5f, 0.5f);
+	api.setUIOffset(modal, 0.f, 0.f);
+	api.setUIBackground(modal, { 60, 60, 70, 245 }, {});
+	api.setUIVisible(modal, false);
+	api.setUIModal(modal, false);   // 起始未激活
+	api.setUIModalOverlay(modal, true, { 0, 0, 0, 160 });
+
+	// 标题文字
+	{
+		auto title = api.createUIText(380.f, 30.f, "Modal Dialog");
+		api.setUIParent(title, modal);
+		api.setUIAnchor(title, 0.5f, 0.f, 0.5f, 0.f);
+		api.setUIPivot(title, 0.5f, 0.f);
+		api.setUIOffset(title, 0.f, 14.f);
+		api.setUITextFont(title, font, 18.f);
+		api.setUITextColor(title, { 240, 240, 240, 255 });
+	}
+
+	// 说明文字
+	{
+		auto info = api.createUIText(360.f, 60.f,
+			"Click outside the panel\nor press OK / Cancel to close.");
+		api.setUIParent(info, modal);
+		api.setUIAnchor(info, 0.5f, 0.5f, 0.5f, 0.5f);
+		api.setUIPivot(info, 0.5f, 0.5f);
+		api.setUIOffset(info, 0.f, -10.f);
+		api.setUITextFont(info, font, 13.f);
+		api.setUITextColor(info, { 200, 200, 210, 255 });
+	}
+
+	// 一个关闭模态的辅助 lambda：同时清掉 modal 与 visible
+	auto closeModal = [&api, modal]() {
+		api.setUIModal(modal, false);
+		api.setUIVisible(modal, false);
+	};
+
+	// OK 按钮：打印并关闭
+	{
+		auto btn = api.createButton(100.f, 36.f, [closeModal]() {
+			printf("[Modal] OK clicked\n");
+			closeModal();
+		});
+		api.setUIParent(btn, modal);
+		api.setUIAnchor(btn, 0.5f, 1.f, 0.5f, 1.f);
+		api.setUIPivot(btn, 1.f, 1.f);
+		api.setUIOffset(btn, -10.f, -16.f);
+		api.setButtonColors(btn, { 70, 130, 80, 255 }, { 100, 170, 110, 255 }, { 50, 100, 60, 255 });
+		auto lbl = api.createUIText(100.f, 36.f, "OK");
+		api.setUIParent(lbl, btn);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 14.f);
+		api.setUITextColor(lbl, { 240, 240, 240, 255 });
+		api.setUISortOrder(lbl, 1);
+	}
+
+	// Cancel 按钮：仅关闭
+	{
+		auto btn = api.createButton(100.f, 36.f, [closeModal]() {
+			printf("[Modal] Cancel clicked\n");
+			closeModal();
+		});
+		api.setUIParent(btn, modal);
+		api.setUIAnchor(btn, 0.5f, 1.f, 0.5f, 1.f);
+		api.setUIPivot(btn, 0.f, 1.f);
+		api.setUIOffset(btn, 10.f, -16.f);
+		api.setButtonColors(btn, { 130, 70, 70, 255 }, { 170, 100, 100, 255 }, { 100, 50, 50, 255 });
+		auto lbl = api.createUIText(100.f, 36.f, "Cancel");
+		api.setUIParent(lbl, btn);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 14.f);
+		api.setUITextColor(lbl, { 240, 240, 240, 255 });
+		api.setUISortOrder(lbl, 1);
+	}
+
+	// 点遮罩自动关闭
+	api.setUIModalOnClickOutside(modal, [closeModal]() {
+		printf("[Modal] click outside → close\n");
+		closeModal();
+	});
+
+	// ── 触发器：左下角的 "Open Modal" 按钮 ──────────────────────────────────────
+	{
+		auto open = api.createButton(140.f, 36.f, [&api, modal]() {
+			printf("[Modal] open\n");
+			api.setUIVisible(modal, true);
+			api.setUIModal(modal, true);
+		});
+		api.setUIParent(open, canvas);
+		api.setUIAnchor(open, 0.f, 1.f, 0.f, 1.f);
+		api.setUIPivot(open, 0.f, 1.f);
+		api.setUIOffset(open, 20.f, -80.f);
+		api.setButtonColors(open, { 80, 110, 160, 255 }, { 110, 140, 200, 255 }, { 60, 80, 120, 255 });
+		auto lbl = api.createUIText(140.f, 36.f, "Open Modal");
+		api.setUIParent(lbl, open);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 14.f);
+		api.setUITextColor(lbl, { 240, 240, 240, 255 });
+		api.setUISortOrder(lbl, 1);
+	}
+
+	// ── 干扰按钮：验证模态打开时它无法被点击 (鼠标穿透被拒) ─────────────────────
+	{
+		auto noisy = api.createButton(140.f, 36.f, []() {
+			// 若模态生效，模态打开期间这条永远不应当出现
+			printf("[Modal] BOTTOM BTN clicked (should NOT print while modal open)\n");
+		});
+		api.setUIParent(noisy, canvas);
+		api.setUIAnchor(noisy, 0.f, 1.f, 0.f, 1.f);
+		api.setUIPivot(noisy, 0.f, 1.f);
+		api.setUIOffset(noisy, 20.f, -36.f);
+		api.setButtonColors(noisy, { 120, 80, 80, 255 }, { 160, 110, 110, 255 }, { 90, 60, 60, 255 });
+		auto lbl = api.createUIText(140.f, 36.f, "Bottom Btn");
+		api.setUIParent(lbl, noisy);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 14.f);
+		api.setUITextColor(lbl, { 240, 240, 240, 255 });
+		api.setUISortOrder(lbl, 1);
+	}
+}
+
 int main(int argc, char* argv[]) {
 	bool useOpenGL = false;
 	for (int i = 1; i < argc; ++i) {
@@ -1543,6 +1681,9 @@ int main(int argc, char* argv[]) {
 	entt::entity maskHintLabel = entt::null;
 	buildMaskTest(api, canvas, font, maskRunner, maskPanel, maskHintLabel);
 	(void)maskPanel; (void)maskHintLabel;
+
+	// ── Modal 测试 ──────────────────────────────────────────────────────────────
+	buildModalTest(api, canvas, font);
 
 	// ── TextInput 测试 ──────────────────────────────────────────────────────────
 	entt::entity textInput;
