@@ -195,6 +195,48 @@ struct UIScrollView {
     std::function<void(float, float)> onScroll;   // (scrollX, scrollY)
 };
 
+// ── 自动布局组 ──────────────────────────────────────────────────────────────
+// 给一个 UINode 加上 UILayoutGroup 后，UISystem 每帧会主动计算它的"直接子节点"
+// 的位置/大小，覆盖子节点原本的 anchor / pivot / offset (Stretch 模式还会覆盖
+// 子节点交叉轴的 width/height)。
+//
+// 三种排布：
+//   Horizontal  从左到右(reverse=true 则从右到左)依次摆放，子节点宽度由各自 width
+//               决定；交叉轴(垂直方向)按 crossAlign 对齐，Stretch 时撑满父高。
+//   Vertical    上下方向，规则同上。
+//   Grid        以"首个子节点"的 width/height 作为单元格大小，按 gridColumns 列
+//               左到右、上到下排布；spacingX/spacingY 分别为列/行间距。
+//
+// 排序：子节点按 UINode.sortOrder 升序入队，再按 reverse 翻转主轴。和渲染层一致。
+//
+// 注意：被布局管理的子节点不应再手工 setUIAnchor / setUIOffset —— 那些值会被本
+// 系统每帧重写。如果需要嵌套，一个布局组的子节点本身可以再挂 UILayoutGroup。
+struct UILayoutGroup {
+    enum class Type       { Horizontal, Vertical, Grid };
+    enum class CrossAlign { Start, Center, End, Stretch };
+
+    Type       type        = Type::Vertical;
+
+    // 内边距：实际排布区域 = 父节点屏幕矩形 - padding
+    float      paddingL    = 0.f;
+    float      paddingT    = 0.f;
+    float      paddingR    = 0.f;
+    float      paddingB    = 0.f;
+
+    // 子节点间距。Horizontal 用 spacingX；Vertical 用 spacingY；Grid 两者都用。
+    float      spacingX    = 0.f;
+    float      spacingY    = 0.f;
+
+    // 仅 Grid：每行列数（>=1）
+    int        gridColumns = 4;
+
+    // 交叉轴对齐 (Horizontal:y 方向 / Vertical:x 方向；Grid 忽略)
+    CrossAlign crossAlign  = CrossAlign::Start;
+
+    // 主轴反向：Horizontal 时从右到左，Vertical 时从下到上
+    bool       reverse     = false;
+};
+
 // ── 拖拽 ────────────────────────────────────────────────────────────────────
 // 约束：拖拽元素假设 anchor=topLeft, pivot=(0,0)，offsetX/Y 直接当作屏幕坐标。
 //      工厂函数 makeDraggable 会强制设好这些参数。

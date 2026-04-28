@@ -10,6 +10,7 @@
 #include <SDL3/SDL.h>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 
 
 namespace engine {
@@ -529,6 +530,55 @@ void GameAPI::getScrollOffset(entt::entity e, float* outX, float* outY) const {
     auto* sv = ctx_.world.try_get<UIScrollView>(e);
     if (outX) *outX = sv ? sv->scrollX : 0.f;
     if (outY) *outY = sv ? sv->scrollY : 0.f;
+}
+
+// ── LayoutGroup ─────────────────────────────────────────────────────────────
+
+entt::entity GameAPI::createLayoutGroup(float width, float height, int type) {
+    entt::entity e = createUIElement();
+    setUISize(e, width, height);
+    auto& g = ctx_.world.emplace<UILayoutGroup>(e);
+    g.type = (type == 0) ? UILayoutGroup::Type::Horizontal
+           : (type == 2) ? UILayoutGroup::Type::Grid
+                         : UILayoutGroup::Type::Vertical;
+    renameEntity(ctx_.world, e, "layout");
+    return e;
+}
+
+void GameAPI::setLayoutPadding(entt::entity e, float left, float top,
+                               float right, float bottom) {
+    if (auto* g = ctx_.world.try_get<UILayoutGroup>(e)) {
+        g->paddingL = left;  g->paddingT = top;
+        g->paddingR = right; g->paddingB = bottom;
+    }
+}
+
+void GameAPI::setLayoutSpacing(entt::entity e, float spacingX, float spacingY) {
+    if (auto* g = ctx_.world.try_get<UILayoutGroup>(e)) {
+        g->spacingX = spacingX;
+        g->spacingY = spacingY;
+    }
+}
+
+void GameAPI::setLayoutGridColumns(entt::entity e, int columns) {
+    if (auto* g = ctx_.world.try_get<UILayoutGroup>(e)) {
+        g->gridColumns = std::max(1, columns);
+    }
+}
+
+void GameAPI::setLayoutCrossAlign(entt::entity e, int align) {
+    if (auto* g = ctx_.world.try_get<UILayoutGroup>(e)) {
+        switch (align) {
+            case 1:  g->crossAlign = UILayoutGroup::CrossAlign::Center;  break;
+            case 2:  g->crossAlign = UILayoutGroup::CrossAlign::End;     break;
+            case 3:  g->crossAlign = UILayoutGroup::CrossAlign::Stretch; break;
+            default: g->crossAlign = UILayoutGroup::CrossAlign::Start;   break;
+        }
+    }
+}
+
+void GameAPI::setLayoutReverse(entt::entity e, bool reverse) {
+    if (auto* g = ctx_.world.try_get<UILayoutGroup>(e)) g->reverse = reverse;
 }
 
 // ── Draggable ───────────────────────────────────────────────────────────────

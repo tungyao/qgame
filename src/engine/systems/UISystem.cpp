@@ -191,12 +191,115 @@ void UISystem::layoutNode(entt::entity e, float parentX, float parentY,
         childScrollY = -sv->scrollY;
     }
 
-    // 递归布局子节点
-    auto nv = world.view<UINode>();
-    for (auto [child, cn] : nv.each()) {
-        if (cn.parent == e) {
-            layoutNode(child, n.screenX, n.screenY, n.screenW, n.screenH,
-                       childScrollX, childScrollY);
+    // 若挂了 UILayoutGroup，交由布局组逻辑统一摆放子节点；否则按各子节点自身的
+    // anchor/offset 正常递归。
+    if (world.all_of<UILayoutGroup>(e)) {
+        applyLayoutGroup(e, childScrollX, childScrollY);
+    } else {
+        auto nv = world.view<UINode>();
+        for (auto [child, cn] : nv.each()) {
+            if (cn.parent == e) {
+                layoutNode(child, n.screenX, n.screenY, n.screenW, n.screenH,
+                           childScrollX, childScrollY);
+            }
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// 布局组：把直接子节点排成行/列/网格
+// ───────────────────────────────────────────────────────────────────────────────
+void UISystem::applyLayoutGroup(entt::entity e, float scrollOffX, float scrollOffY) {
+    auto& world = ctx_.world;
+    const auto& parent = world.get<UINode>(e);
+    const auto& g      = world.get<UILayoutGroup>(e);
+
+    // 排布区域：父矩形减去 padding
+    const float innerX = parent.screenX + g.paddingL;
+    const float innerY = parent.screenY + g.paddingT;
+    const float innerW = std::max(0.f, parent.screenW - g.paddingL - g.paddingR);
+    const float innerH = std::max(0.f, parent.screenH - g.paddingT - g.paddingB);
+
+    // 收集 visible 直接子节点，按 sortOrder 升序保持稳定
+    struct Item { entt::entity ent; int order; };
+    std::vector<Item> kids;
+    {
+        auto nv = world.view<UINode>();
+        for (auto [c, cn] : nv.each()) {
+            if (cn.parent == e && cn.visible) kids.push_back({c, cn.sortOrder});
+        }
+    }
+    std::stable_sort(kids.begin(), kids.end(),
+                     [](const Item& a, const Item& b) { return a.order < b.order; });
+    if (g.reverse) std::reverse(kids.begin(), kids.end());
+
+    // 把一个子节点放到 (cellX, cellY, cellW, cellH)：覆盖其 anchor/pivot/offset，
+    // 让 layoutNode 重新跑时 screenXY 落到我们指定的位置；再走 layoutNode 复用它
+    // 自带的 ScrollView 测量 / 嵌套 LayoutGroup / 滚动偏移逻辑。
+    auto placeChild = [&](entt::entity child, float cellX, float cellY,
+                          float cellW, float cellH) {
+        auto& cn = world.get<UINode>(child);
+        cn.anchor  = UIAnchor::topLeft();
+        cn.pivotX  = 0.f;
+        cn.pivotY  = 0.f;
+        cn.offsetX = cellX - parent.screenX;   // anchor=topLeft 下 screenX = parent + offset
+        cn.offsetY = cellY - parent.screenY;
+        // Stretch 模式：交叉轴撑满（仅当本身没有交叉轴需求时改）
+        if (g.crossAlign == UILayoutGroup::CrossAlign::Stretch) {
+            if (g.type == UILayoutGroup::Type::Horizontal)      cn.height = cellH;
+            else if (g.type == UILayoutGroup::Type::Vertical)   cn.width  = cellW;
+            else /* Grid */                                   { cn.width  = cellW; cn.height = cellH; }
+        }
+        layoutNode(child, parent.screenX, parent.screenY,
+                   parent.screenW, parent.screenH, scrollOffX, scrollOffY);
+    };
+
+    if (g.type == UILayoutGroup::Type::Horizontal) {
+        float cursor = 0.f;
+        for (auto& k : kids) {
+            const auto& cn = world.get<UINode>(k.ent);
+            const float w = cn.width;
+            const float h = cn.height;
+            float cellY = innerY;
+            switch (g.crossAlign) {
+                case UILayoutGroup::CrossAlign::Start:   cellY = innerY; break;
+                case UILayoutGroup::CrossAlign::Center:  cellY = innerY + (innerH - h) * 0.5f; break;
+                case UILayoutGroup::CrossAlign::End:     cellY = innerY + (innerH - h); break;
+                case UILayoutGroup::CrossAlign::Stretch: cellY = innerY; break;
+            }
+            placeChild(k.ent, innerX + cursor, cellY, w, innerH);
+            cursor += w + g.spacingX;
+        }
+    } else if (g.type == UILayoutGroup::Type::Vertical) {
+        float cursor = 0.f;
+        for (auto& k : kids) {
+            const auto& cn = world.get<UINode>(k.ent);
+            const float w = cn.width;
+            const float h = cn.height;
+            float cellX = innerX;
+            switch (g.crossAlign) {
+                case UILayoutGroup::CrossAlign::Start:   cellX = innerX; break;
+                case UILayoutGroup::CrossAlign::Center:  cellX = innerX + (innerW - w) * 0.5f; break;
+                case UILayoutGroup::CrossAlign::End:     cellX = innerX + (innerW - w); break;
+                case UILayoutGroup::CrossAlign::Stretch: cellX = innerX; break;
+            }
+            placeChild(k.ent, cellX, innerY + cursor, innerW, h);
+            cursor += h + g.spacingY;
+        }
+    } else { // Grid：以"首个子节点"的尺寸作为单元格大小
+        const int cols = std::max(1, g.gridColumns);
+        float cellW = 32.f, cellH = 32.f;
+        if (!kids.empty()) {
+            const auto& first = world.get<UINode>(kids.front().ent);
+            cellW = first.width;
+            cellH = first.height;
+        }
+        for (size_t i = 0; i < kids.size(); ++i) {
+            const int col = static_cast<int>(i) % cols;
+            const int row = static_cast<int>(i) / cols;
+            const float cx = innerX + col * (cellW + g.spacingX);
+            const float cy = innerY + row * (cellH + g.spacingY);
+            placeChild(kids[i].ent, cx, cy, cellW, cellH);
         }
     }
 }

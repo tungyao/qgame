@@ -69,6 +69,126 @@ static std::vector<uint8_t> makeTextTexture(const std::string& text, core::Color
 	return pixels;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LayoutGroup 测试：在指定画布上放三个布局容器，演示 Horizontal / Vertical / Grid
+//
+//   ┌─────── Vertical 列表 ────────┐ ┌── Horizontal 工具条 ──┐
+//   │  ▣ Item A                    │ │ [A][B][C][D][E]       │
+//   │  ▣ Item B                    │ └───────────────────────┘
+//   │  ▣ Item C                    │ ┌──── Grid 物品栏 ─────┐
+//   │  ▣ Item D                    │ │ [01][02][03][04][05] │
+//   └──────────────────────────────┘ │ [06][07][08][09][10] │
+//                                    │ ...                  │
+//                                    └──────────────────────┘
+//
+// 子节点不需要再 setUIAnchor / setUIOffset —— LayoutGroup 每帧会覆盖。
+// ─────────────────────────────────────────────────────────────────────────────
+static void buildLayoutTest(engine::GameAPI& api, entt::entity canvas, engine::FontHandle font) {
+	// ── 1) Vertical：左下角的列表 ────────────────────────────────────────────────
+	{
+		auto box = api.createLayoutGroup(220.f, 200.f, /*type=*/1 /*Vertical*/);
+		api.setUIParent(box, canvas);
+		api.setUIAnchor(box, 1.f, 1.f, 1.f, 1.f);          // 锚到右下
+		api.setUIPivot(box, 1.f, 1.f);
+		api.setUIOffset(box, -20.f, -260.f);
+		api.setUIBackground(box, { 30, 35, 45, 220 }, {});
+		api.setLayoutPadding(box, 8.f, 8.f, 8.f, 8.f);
+		api.setLayoutSpacing(box, 0.f, 4.f);
+		api.setLayoutCrossAlign(box, /*Stretch*/3);        // 横向铺满 → 每个按钮等宽
+
+		const char* items[] = { "Item A", "Item B", "Item C", "Item D" };
+		for (int i = 0; i < 4; ++i) {
+			auto btn = api.createButton(0.f, 30.f, [name = std::string(items[i])]() {
+				printf("[Layout-V] click %s\n", name.c_str());
+			});
+			api.setUIParent(btn, box);
+			api.setButtonColors(btn,
+				{ uint8_t(60 + i * 20), 90, 130, 255 },
+				{ 110, 140, 180, 255 },
+				{ 50,  70, 100, 255 });
+
+			auto lbl = api.createUIText(0.f, 30.f, items[i]);
+			api.setUIParent(lbl, btn);                     // 文本撑满按钮（其父非布局组）
+			api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+			api.setUITextFont(lbl, font, 14.f);
+			api.setUITextColor(lbl, { 230, 230, 230, 255 });
+			api.setUISortOrder(lbl, 1);
+		}
+	}
+
+	// ── 2) Horizontal：底部居中的小工具条 ────────────────────────────────────────
+	{
+		auto bar = api.createLayoutGroup(0.f, 40.f, /*type=*/0 /*Horizontal*/);
+		api.setUIParent(bar, canvas);
+		// 自定宽度：5 个 60px + 4 个 6px 间距 + padding 16 = 340
+		api.setUISize(bar, 340.f, 40.f);
+		api.setUIAnchor(bar, 0.5f, 1.f, 0.5f, 1.f);
+		api.setUIPivot(bar, 0.5f, 1.f);
+		api.setUIOffset(bar, 0.f, -50.f);
+		api.setUIBackground(bar, { 25, 25, 35, 220 }, {});
+		api.setLayoutPadding(bar, 8.f, 6.f, 8.f, 6.f);
+		api.setLayoutSpacing(bar, 6.f, 0.f);
+		api.setLayoutCrossAlign(bar, /*Center*/1);
+
+		for (int i = 0; i < 5; ++i) {
+			char label[8]; std::snprintf(label, sizeof(label), "%c", 'A' + i);
+			auto btn = api.createButton(60.f, 28.f, [c = label[0]]() {
+				printf("[Layout-H] click %c\n", c);
+			});
+			api.setUIParent(btn, bar);
+			api.setButtonColors(btn,
+				{ 70, 110, 90, 255 }, { 100, 160, 130, 255 }, { 50, 80, 65, 255 });
+
+			auto lbl = api.createUIText(60.f, 28.f, label);
+			api.setUIParent(lbl, btn);
+			api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+			api.setUITextFont(lbl, font, 16.f);
+			api.setUITextColor(lbl, { 240, 240, 240, 255 });
+			api.setUISortOrder(lbl, 1);
+		}
+	}
+
+	// ── 3) Grid：右上角的 5×4 物品栏 ────────────────────────────────────────────
+	{
+		const int cols = 5, rows = 4;
+		const float cellW = 40.f, cellH = 40.f;
+		const float pad = 6.f, sp = 4.f;
+		const float w = pad * 2 + cols * cellW + (cols - 1) * sp;
+		const float h = pad * 2 + rows * cellH + (rows - 1) * sp;
+
+		auto grid = api.createLayoutGroup(w, h, /*type=*/2 /*Grid*/);
+		api.setUIParent(grid, canvas);
+		api.setUIAnchor(grid, 1.f, 1.f, 1.f, 1.f);
+		api.setUIPivot(grid, 1.f, 1.f);
+		api.setUIOffset(grid, -20.f, -20.f);
+		api.setUIBackground(grid, { 35, 30, 25, 220 }, {});
+		api.setLayoutPadding(grid, pad, pad, pad, pad);
+		api.setLayoutSpacing(grid, sp, sp);
+		api.setLayoutGridColumns(grid, cols);
+
+		// 用 Image + Button 模拟物品格子；首个子节点的 width/height 决定单元格大小
+		for (int i = 0; i < cols * rows; ++i) {
+			auto slot = api.createButton(cellW, cellH, [i]() {
+				printf("[Layout-Grid] slot %02d clicked\n", i + 1);
+			});
+			api.setUIParent(slot, grid);
+			const uint8_t shade = static_cast<uint8_t>(60 + (i * 7) % 80);
+			api.setButtonColors(slot,
+				{ shade, shade, uint8_t(shade + 30), 255 },
+				{ uint8_t(shade + 30), uint8_t(shade + 30), 220, 255 },
+				{ uint8_t(shade - 20), uint8_t(shade - 20), 90, 255 });
+
+			char num[4]; std::snprintf(num, sizeof(num), "%02d", i + 1);
+			auto lbl = api.createUIText(cellW, cellH, num);
+			api.setUIParent(lbl, slot);
+			api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+			api.setUITextFont(lbl, font, 14.f);
+			api.setUITextColor(lbl, { 240, 235, 200, 255 });
+			api.setUISortOrder(lbl, 1);
+		}
+	}
+}
+
 int main(int argc, char* argv[]) {
 	bool useOpenGL = false;
 	for (int i = 1; i < argc; ++i) {
@@ -1093,6 +1213,9 @@ int main(int argc, char* argv[]) {
 		api.setUITextFont(playerName, font, 12.f);
 		api.setUITextColor(playerName, { 255, 230, 180, 255 });
 	}
+
+	// ── LayoutGroup 测试（Horizontal / Vertical / Grid） ────────────────────────
+	buildLayoutTest(api, canvas, font);
 
 	// ── 底部提示 ─────────────────────────────────────────────────────────────────
 	{

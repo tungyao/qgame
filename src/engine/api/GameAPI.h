@@ -244,6 +244,18 @@ public:
     void setScrollOnChanged(entt::entity e, std::function<void(float, float)> cb);
     void getScrollOffset(entt::entity e, float* outX, float* outY) const;
 
+    // ── LayoutGroup ──────────────────────────────────────────────────────────
+    // 创建一个自动布局容器：其直接子节点会按 type 排成行/列/网格，子节点的
+    // anchor/pivot/offset 由 UISystem 每帧改写（Stretch 模式还会改写交叉轴尺寸）。
+    // type: 0=Horizontal, 1=Vertical, 2=Grid。
+    entt::entity createLayoutGroup(float width, float height, int type = 1);
+    void setLayoutPadding(entt::entity e, float left, float top,
+                          float right, float bottom);
+    void setLayoutSpacing(entt::entity e, float spacingX, float spacingY);
+    void setLayoutGridColumns(entt::entity e, int columns);     // 仅 Grid
+    void setLayoutCrossAlign(entt::entity e, int align);        // 0=Start 1=Center 2=End 3=Stretch
+    void setLayoutReverse(entt::entity e, bool reverse);
+
     // ── Draggable ────────────────────────────────────────────────────────────
     // 调用后强制 anchor=topLeft, pivot=(0,0)，offset 直接当作屏幕坐标。
     void makeDraggable(entt::entity e,

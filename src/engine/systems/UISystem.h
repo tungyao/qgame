@@ -59,6 +59,9 @@ private:
                     float parentW, float parentH,
                     float scrollOffX, float scrollOffY);
     void measureScrollContent(entt::entity sv);
+    // 按 UILayoutGroup 设定为 e 的直接子节点逐个计算屏幕矩形并递归。
+    // scrollOffX/Y 是 e 自身因父级 ScrollView 产生的滚动偏移（透传给孙节点）。
+    void applyLayoutGroup(entt::entity e, float scrollOffX, float scrollOffY);
     void runInteraction(InputState& input);
 
     // 命令缓存构建
