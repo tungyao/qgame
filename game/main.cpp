@@ -13,6 +13,7 @@
 #include <string>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 
 static std::vector<uint8_t> makeCheckerboard(int w, int h, int cellSize, core::Color a, core::Color b) {
 	std::vector<uint8_t> px(w * h * 4);
@@ -316,6 +317,102 @@ static void buildTooltipTest(engine::GameAPI& api, entt::entity canvas, engine::
 		api.setUISize(lbl, 200.f, 28.f);
 		api.setUITooltip(lbl, "Plain label can also have a tooltip", font, 12.f, 0.6f);
 	}
+}
+
+// ── UIMask 测试 ─────────────────────────────────────────────────────────────
+// 一个 200x120 的裁剪框，里头放一张超出边界的大色块 + 一行长文本，
+// 还有一个会跟动画往返穿过裁剪边界的方块。
+// 右侧另一个相同尺寸的"无 mask"对照组，验证未启用 mask 时确实溢出。
+// 用一个外部按钮可以运行时切换 mask 启用/禁用。
+static void buildMaskTest(engine::GameAPI& api, entt::entity canvas,
+                          engine::FontHandle font,
+                          entt::entity& outRunner,
+                          entt::entity& outMaskNode,
+                          entt::entity& outMaskHint) {
+	auto title = api.createUIText(420.f, 22.f, "UIMask: clipped vs un-clipped");
+	api.setUIParent(title, canvas);
+	api.setUIAnchor(title, 0.f, 1.f, 0.f, 1.f);
+	api.setUIPivot(title, 0.f, 1.f);
+	api.setUIOffset(title, 320.f, -270.f);
+	api.setUITextFont(title, font, 14.f);
+	api.setUITextColor(title, { 200, 220, 255, 255 });
+
+	auto buildPanel = [&](float ox, const char* tag, bool useMask) -> entt::entity {
+		auto panel = api.createUIElement();
+		api.setUIParent(panel, canvas);
+		api.setUISize(panel, 200.f, 120.f);
+		api.setUIAnchor(panel, 0.f, 1.f, 0.f, 1.f);
+		api.setUIPivot(panel, 0.f, 1.f);
+		api.setUIOffset(panel, ox, -140.f);
+		api.setUIBackground(panel, { 30, 35, 50, 255 }, {});
+		if (useMask) api.setUIMask(panel, true);
+
+		// 一个故意比父框还大的彩色子块（左上角对齐，向右下溢出）
+		auto big = api.createUIImage(320.f, 200.f);
+		api.setUIParent(big, panel);
+		api.setUIAnchor(big, 0.f, 0.f, 0.f, 0.f);
+		api.setUIPivot(big, 0.f, 0.f);
+		api.setUIOffset(big, -20.f, -30.f);
+		api.setUIImageColor(big, useMask ? core::Color{ 80, 160, 220, 200 }
+		                                 : core::Color{ 220, 120, 80, 200 });
+		api.setUIInteractable(big, false);
+
+		// 长文本，超出右边界
+		auto txt = api.createUIText(420.f, 22.f,
+		    "AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC DDDDDDDDDD");
+		api.setUIParent(txt, panel);
+		api.setUIAnchor(txt, 0.f, 0.f, 0.f, 0.f);
+		api.setUIPivot(txt, 0.f, 0.f);
+		api.setUIOffset(txt, 6.f, 6.f);
+		api.setUITextFont(txt, font, 14.f);
+		api.setUITextColor(txt, { 250, 250, 250, 255 });
+		api.setUIInteractable(txt, false);
+
+		auto label = api.createUIText(200.f, 18.f, tag);
+		api.setUIParent(label, panel);
+		api.setUIAnchor(label, 0.f, 1.f, 1.f, 1.f);
+		api.setUIPivot(label, 0.5f, 1.f);
+		api.setUIOffset(label, 0.f, -2.f);
+		api.setUITextFont(label, font, 12.f);
+		api.setUITextColor(label, { 200, 200, 200, 255 });
+		api.setUIInteractable(label, false);
+		return panel;
+	};
+
+	outMaskNode = buildPanel(320.f, "with UIMask", true);
+	(void)buildPanel(540.f, "no mask",     false);
+
+	// 在带 mask 的面板里放一个会被动画移动的方块——验证它穿越边界时被裁掉。
+	outRunner = api.createUIImage(40.f, 40.f);
+	api.setUIParent(outRunner, outMaskNode);
+	api.setUIAnchor(outRunner, 0.f, 0.f, 0.f, 0.f);
+	api.setUIPivot(outRunner, 0.f, 0.f);
+	api.setUIOffset(outRunner, 0.f, 70.f);
+	api.setUIImageColor(outRunner, { 240, 220, 100, 255 });
+	api.setUIInteractable(outRunner, false);
+
+	// 切换按钮：运行时开关 mask，验证视觉立即刷新。
+	auto btn = api.createButton(180.f, 28.f, nullptr);
+	api.setUIParent(btn, canvas);
+	api.setUIAnchor(btn, 0.f, 1.f, 0.f, 1.f);
+	api.setUIPivot(btn, 0.f, 1.f);
+	api.setUIOffset(btn, 320.f, -110.f);
+	api.setButtonColors(btn, {70,90,120,255}, {110,140,180,255}, {50,70,100,255});
+
+	outMaskHint = api.createUIText(180.f, 28.f, "Mask: ON  (click to toggle)");
+	api.setUIParent(outMaskHint, btn);
+	api.setUIAnchor(outMaskHint, 0.f, 0.f, 1.f, 1.f);
+	api.setUITextFont(outMaskHint, font, 12.f);
+	api.setUITextColor(outMaskHint, { 240, 240, 240, 255 });
+	api.setUISortOrder(outMaskHint, 1);
+
+	api.setButtonCallback(btn, [&api, panel = outMaskNode, hint = outMaskHint]() {
+		static bool on = true;
+		on = !on;
+		api.setUIMask(panel, on);
+		api.setUIText(hint, on ? "Mask: ON  (click to toggle)"
+		                       : "Mask: OFF (click to toggle)");
+	});
 }
 
 int main(int argc, char* argv[]) {
@@ -1420,6 +1517,13 @@ int main(int argc, char* argv[]) {
 	// ── Tooltip 测试 ────────────────────────────────────────────────────────────
 	buildTooltipTest(api, canvas, font);
 
+	// ── UIMask 测试 ─────────────────────────────────────────────────────────────
+	entt::entity maskRunner    = entt::null;
+	entt::entity maskPanel     = entt::null;
+	entt::entity maskHintLabel = entt::null;
+	buildMaskTest(api, canvas, font, maskRunner, maskPanel, maskHintLabel);
+	(void)maskPanel; (void)maskHintLabel;
+
 	// ── TextInput 测试 ──────────────────────────────────────────────────────────
 	entt::entity textInput;
 	entt::entity inputLabel;
@@ -1508,9 +1612,19 @@ int main(int argc, char* argv[]) {
 	constexpr float kSpeed = 200.f;
 	bool gpuDrivenEnabled = false;
 
+	float maskRunT = 0.f;
 	while (ctx.scheduler.tick()) {
 		float dt = ctx.scheduler.deltaTime();
 		auto& anim = api.getComponent<engine::AnimatorComponent>(player);
+
+		// UIMask runner: 在 200 宽的面板里左右往返 (-30 → 230)，方块本身 40 宽，
+		// 所以两侧各有 ~30px 会越过边界 —— 启用 mask 时被裁掉、关闭时溢出可见。
+		if (maskRunner != entt::null) {
+			maskRunT += dt;
+			float u = 0.5f - 0.5f * std::cos(maskRunT * 1.6f);   // 0..1
+			float x = -30.f + u * (230.f - (-30.f));
+			api.setUIOffset(maskRunner, x, 70.f);
+		}
 
 		// WASD 控制 player 移动
 		float dx = 0.f, dy = 0.f;

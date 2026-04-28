@@ -331,7 +331,10 @@ bool UISystem::insideScissorAncestors(entt::entity e, float px, float py) const 
     entt::entity cur = world.get<UINode>(e).parent;
     while (cur != entt::null && world.valid(cur)) {
         if (auto* pn = world.try_get<UINode>(cur)) {
-            if (world.all_of<UIScrollView>(cur)) {
+            const bool clips =
+                world.all_of<UIScrollView>(cur) ||
+                (world.all_of<UIMask>(cur) && world.get<UIMask>(cur).enabled);
+            if (clips) {
                 if (!pointInRect(px, py, *pn)) return false;
             }
             cur = pn->parent;
@@ -1302,9 +1305,12 @@ void UISystem::buildNodeCommands(entt::entity e, int& seq, int /*parentBaseSort*
     // 1) 自身视觉先画
     emitNodeVisuals(e, baseSort);
 
-    // 2) ScrollView：在子树外侧 push/pop 剪裁矩形
-    const bool isScroll = world.all_of<UIScrollView>(e);
-    if (isScroll) {
+    // 2) ScrollView / UIMask：在子树外侧 push/pop 剪裁矩形（同节点同时挂两者
+    //    时只 push 一次，矩形即节点自身屏幕矩形）
+    const bool clipsChildren =
+        world.all_of<UIScrollView>(e) ||
+        (world.all_of<UIMask>(e) && world.get<UIMask>(e).enabled);
+    if (clipsChildren) {
         backend::PushScissorCmd ps{};
         ps.rect    = core::Rect{ n.screenX, n.screenY, n.screenW, n.screenH };
         ps.sortKey = baseSort + 1;
@@ -1323,7 +1329,7 @@ void UISystem::buildNodeCommands(entt::entity e, int& seq, int /*parentBaseSort*
                      [](const Entry& a, const Entry& b) { return a.order < b.order; });
     for (const auto& k : kids) buildNodeCommands(k.child, seq, baseSort);
 
-    if (isScroll) {
+    if (clipsChildren) {
         backend::PopScissorCmd pp{};
         pp.sortKey = baseSort + 0xFFF;  // 保证排在所有子树命令之后
         pp.pass    = RenderPass::Screen;

@@ -532,6 +532,13 @@ void GameAPI::getScrollOffset(entt::entity e, float* outX, float* outY) const {
     if (outY) *outY = sv ? sv->scrollY : 0.f;
 }
 
+// ── Mask / Clip ─────────────────────────────────────────────────────────────
+
+void GameAPI::setUIMask(entt::entity e, bool enabled) {
+    if (!ctx_.world.all_of<UINode>(e)) return;
+    ctx_.world.get_or_emplace<UIMask>(e).enabled = enabled;
+}
+
 // ── Tooltip ─────────────────────────────────────────────────────────────────
 
 void GameAPI::setUITooltip(entt::entity e, const char* text,

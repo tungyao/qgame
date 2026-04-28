@@ -281,6 +281,11 @@ public:
     void setScrollOnChanged(entt::entity e, std::function<void(float, float)> cb);
     void getScrollOffset(entt::entity e, float* outX, float* outY) const;
 
+    // ── Mask / Clip ──────────────────────────────────────────────────────────
+    // 把任意 UI 节点变成"裁剪容器"：其子树的渲染和命中测试都被裁剪到该节点的
+    // 屏幕矩形内（与 ScrollView 共用 scissor 机制）。enabled=false 可临时关闭。
+    void setUIMask(entt::entity e, bool enabled = true);
+
     // ── LayoutGroup ──────────────────────────────────────────────────────────
     // 创建一个自动布局容器：其直接子节点会按 type 排成行/列/网格，子节点的
     // anchor/pivot/offset 由 UISystem 每帧改写（Stretch 模式还会改写交叉轴尺寸）。
