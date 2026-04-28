@@ -233,6 +233,7 @@ public:
     entt::entity createButton(float width, float height,
                               std::function<void()> onClick = nullptr);
     void setButtonCallback(entt::entity e, std::function<void()> onClick);
+    void setButtonOnClick(entt::entity e, std::function<void()> onClick);
     void setButtonColors(entt::entity e,
                          const core::Color& normal,
                          const core::Color& hover,

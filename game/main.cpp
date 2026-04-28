@@ -7,6 +7,7 @@
 #include <engine/components/AnimatorComponent.h>
 #include <engine/components/TextComponent.h>
 #include <engine/components/UIComponents.h>
+#include <engine/components/TweenComponent.h>
 #include <engine/systems/RenderSystem.h>
 #include <SDL3/SDL.h>
 #include <vector>
@@ -551,6 +552,123 @@ static void buildModalTest(engine::GameAPI& api, entt::entity canvas, engine::Fo
 		api.setUITextColor(lbl, { 240, 240, 240, 255 });
 		api.setUISortOrder(lbl, 1);
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TweenSystem 增强测试：验证三件新事 (delay / onUpdate / onComplete) 能在
+// 不耦合 UISystem 的前提下驱动 UI 字段。布局：
+//
+//   ┌─ "Animate Card" 按钮  (顶部偏右，点击启动动画链)
+//   │
+//   └─ 一张彩色卡片 + 标题文字 (居中偏右)
+//        Phase 1: delay 0.3s → fade in (alpha 0→230) + 下滑 (offsetY -40→0)，0.4s
+//        Phase 2 (在 Phase 1 onComplete 里挂)：保持 0.6s (delay) → fade out + 上滑，0.35s
+//        Phase 3 (Phase 2 onComplete 里)：把卡片 visible=false，按钮文字改回 "Animate Card"
+//
+// 关键点：
+//   - 通道用 Custom，TweenSystem 完全不知道写到的是 UI 字段
+//   - delay 期间 outValue 钉在 from (语义 B)，所以"按下→0.3s 内卡片就已经被
+//     拉到 alpha=0、offsetY=-40 的起点"，0.3s 后才开始可见的过渡
+//   - onComplete 里安全地 emplace_or_replace<TweenComponent>，因为 system 把
+//     回调延迟到了所有遍历结束之后
+// ─────────────────────────────────────────────────────────────────────────────
+static void buildTweenTest(engine::GameAPI& api, entt::entity canvas, engine::FontHandle font) {
+	using engine::TweenComponent;
+	using engine::TweenInstance;
+	using engine::TweenChannel;
+	using engine::Easing;
+
+	// 卡片：纯色背景 + 标题。初始 visible=false，等按钮触发动画时才打开。
+	const float cardW = 240.f, cardH = 90.f;
+	const float restY = 0.f;            // 动画终点 offsetY
+	const float startY = -40.f;         // 动画起点 offsetY (向上偏移 40px)
+	auto card = api.createUIElement();
+	api.setUIParent(card, canvas);
+	api.setUISize(card, cardW, cardH);
+	api.setUIAnchor(card, 0.5f, 0.f, 0.5f, 0.f);
+	api.setUIPivot(card, 0.5f, 0.f);
+	api.setUIOffset(card, 260.f, 60.f + restY);
+	api.setUIBackground(card, { 60, 140, 200, 0 }, {});  // 起始 alpha=0
+	api.setUIVisible(card, false);
+	api.setUISortOrder(card, 100);  // 确保它在按钮之上
+
+	auto cardLabel = api.createUIText(cardW, cardH, "Tween Demo");
+	api.setUIParent(cardLabel, card);
+	api.setUIAnchor(cardLabel, 0.f, 0.f, 1.f, 1.f);
+	api.setUITextFont(cardLabel, font, 16.f);
+	api.setUITextColor(cardLabel, { 250, 250, 250, 255 });
+	api.setUISortOrder(cardLabel, 1);
+
+	// 触发按钮 + 标签 (entity 提前声明，便于在动画回调里改文字)
+	auto btn      = api.createButton(160.f, 36.f, nullptr);
+	auto btnLabel = api.createUIText(160.f, 36.f, "Animate Card");
+	api.setUIParent(btn, canvas);
+	api.setUIAnchor(btn, 0.5f, 0.f, 0.5f, 0.f);
+	api.setUIPivot(btn, 0.5f, 0.f);
+	api.setUIOffset(btn, 260.f, 16.f);
+	api.setButtonColors(btn, { 80, 110, 160, 255 }, { 110, 140, 200, 255 }, { 60, 80, 120, 255 });
+	api.setUIParent(btnLabel, btn);
+	api.setUIAnchor(btnLabel, 0.f, 0.f, 1.f, 1.f);
+	api.setUITextFont(btnLabel, font, 14.f);
+	api.setUITextColor(btnLabel, { 240, 240, 240, 255 });
+	api.setUISortOrder(btnLabel, 1);
+
+	// onUpdate 闭包共用：把归一化值 v∈[0,1] 写成 (alpha, offsetY)，
+	// alpha=v*230, offsetY 在 startY..restY 之间 lerp。
+	const auto applyCardProgress = [&api, card, startY, restY](float v) {
+		const uint8_t a = static_cast<uint8_t>(v * 230.f + 0.5f);
+		api.setUIBackground(card, { 60, 140, 200, a }, {});
+		const float y = startY + (restY - startY) * v;
+		// 卡片相对 canvas 锚点的偏移：x 不变，y 跟着动画走
+		api.setUIOffset(card, 260.f, 60.f + y);
+	};
+
+	// 动画启动器 (放进闭包反复用：按钮触发即调；Phase 1 onComplete 里同样
+	// 通过 emplace_or_replace 启动 Phase 2)。
+	api.setButtonOnClick(btn, [&api, card, btnLabel, applyCardProgress]() {
+		// 防重入：如果卡片已经可见，认为动画进行中，按一下不再触发
+		if (api.hasComponent<engine::UINode>(card) &&
+			api.getComponent<engine::UINode>(card).visible) {
+			return;
+		}
+
+		api.setUIText(btnLabel, "Animating...");
+		api.setUIVisible(card, true);
+
+		// ── Phase 1：延迟 0.3s → fade in + slide down 0.4s ──────────────────
+		TweenInstance t1{};
+		t1.channel  = TweenChannel::Custom;
+		t1.from     = 0.f;
+		t1.to       = 1.f;
+		t1.duration = 0.4f;
+		t1.delay    = 0.3f;            // ← 测 delay：按下后 0.3s 才看到动起来
+		t1.easing   = Easing::QuadOut;
+		t1.onUpdate = applyCardProgress;
+		t1.onComplete = [&api, card, btnLabel, applyCardProgress]() {
+			// ── Phase 2：保持 0.6s (delay) → fade out + slide up 0.35s ─────
+			TweenInstance t2{};
+			t2.channel  = TweenChannel::Custom;
+			t2.from     = 1.f;          // 反向：从 1 衰减到 0
+			t2.to       = 0.f;
+			t2.duration = 0.35f;
+			t2.delay    = 0.6f;         // ← 再次测 delay：定格 0.6s 让人看清
+			t2.easing   = Easing::QuadIn;
+			t2.onUpdate = applyCardProgress;
+			t2.onComplete = [&api, card, btnLabel]() {
+				// ── Phase 3：清场 ───────────────────────────────────────────
+				api.setUIVisible(card, false);
+				api.setUIText(btnLabel, "Animate Card");
+				printf("[Tween] full cycle done\n");
+			};
+			TweenComponent tc2;
+			tc2.add(t2);
+			api.addComponent<TweenComponent>(card, std::move(tc2));
+		};
+
+		TweenComponent tc1;
+		tc1.add(t1);
+		api.addComponent<TweenComponent>(card, std::move(tc1));
+	});
 }
 
 int main(int argc, char* argv[]) {
@@ -1684,6 +1802,7 @@ int main(int argc, char* argv[]) {
 
 	// ── Modal 测试 ──────────────────────────────────────────────────────────────
 	buildModalTest(api, canvas, font);
+	buildTweenTest(api, canvas, font);
 
 	// ── TextInput 测试 ──────────────────────────────────────────────────────────
 	entt::entity textInput;

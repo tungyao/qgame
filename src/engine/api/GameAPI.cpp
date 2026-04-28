@@ -321,6 +321,10 @@ void GameAPI::setButtonCallback(entt::entity e, std::function<void()> onClick) {
     if (auto* b = ctx_.world.try_get<UIButton>(e)) b->onClick = std::move(onClick);
 }
 
+void GameAPI::setButtonOnClick(entt::entity e, std::function<void()> onClick) {
+    setButtonCallback(e, std::move(onClick));
+}
+
 void GameAPI::setButtonColors(entt::entity e,
                               const core::Color& normal,
                               const core::Color& hover,
