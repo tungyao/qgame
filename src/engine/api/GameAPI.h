@@ -283,6 +283,24 @@ public:
                        std::function<void(float x, float y)> onDrag = nullptr);
     void setDragBounds(entt::entity e, float minX, float minY,
                        float maxX, float maxY);
+    // 设置拖拽元素的 payload 标签（与 UIDropTarget::acceptedPayload 配对过滤）
+    void setDragPayload(entt::entity e, std::string payload);
+    // 未命中任何 DropTarget 时是否自动回弹到拖拽起点
+    void setDragSnapBack(entt::entity e, bool snapBack);
+
+    // ── DropTarget ───────────────────────────────────────────────────────────
+    // 把任意 UI 节点标记为可投放区域。onDrop 接收正在被拖的 UIDraggable 实体。
+    void makeDropTarget(entt::entity e,
+                        std::function<void(entt::entity)> onDrop = nullptr);
+    // 仅当 UIDraggable.payload == acceptedPayload 时接受（空字符串 = 不过滤）
+    void setDropAcceptedPayload(entt::entity e, std::string payload);
+    void setDropHoverHighlight(entt::entity e, bool enabled, core::Color color);
+    void setDropAcceptCallback(entt::entity e,
+                               std::function<bool(entt::entity)> canAccept);
+    void setDropEnterCallback(entt::entity e,
+                              std::function<void(entt::entity)> onEnter);
+    void setDropLeaveCallback(entt::entity e,
+                              std::function<void(entt::entity)> onLeave);
 
     // ── 状态查询 ─────────────────────────────────────────────────────────────
     bool isPointerOverUI(entt::entity e) const;

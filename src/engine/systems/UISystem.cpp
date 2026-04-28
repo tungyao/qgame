@@ -452,6 +452,10 @@ void UISystem::runInteraction(InputState& input) {
             d->dragging = true;
             d->grabOffsetX = px - n.screenX;
             d->grabOffsetY = py - n.screenY;
+            d->originX = n.offsetX;
+            d->originY = n.offsetY;
+            d->dropAccepted = false;
+            currentDropTarget_ = entt::null;
             if (d->onDragStart) d->onDragStart();
         }
         if (auto* s = world.try_get<UISlider>(pressed_)) {
@@ -511,6 +515,54 @@ void UISystem::runInteraction(InputState& input) {
         }
     }
 
+    // ── 4b. 拖拽中的 DropTarget 命中：找到最上层接受当前 payload 的目标，
+    //       维护 onDragEnter/Leave，并把 target 的 hovering 标志记到组件里
+    //       供渲染层 emit 高亮。仅当 pressed_ 是 UIDraggable 且 dragging 时执行。
+    // 仅在"按住且正在拖拽"时更新 hover 与 enter/leave；释放那一帧 down=false，
+    // 必须保持 currentDropTarget_ 不变，留给下面 step 5 的释放分支判定 onDrop。
+    {
+        UIDraggable* pd = (pressed_ != entt::null) ? world.try_get<UIDraggable>(pressed_) : nullptr;
+        if (down && pd && pd->dragging) {
+            entt::entity newTarget = entt::null;
+            int bestSO = std::numeric_limits<int>::min();
+            uint32_t bestSeq = 0;
+            uint32_t seq = 0;
+            auto dtv = world.view<UINode, UIDropTarget>();
+            for (auto [e, n, dt] : dtv.each()) {
+                const uint32_t mySeq = seq++;
+                if (e == pressed_) continue;          // 不能投放到自己身上
+                if (!n.visible || !n.interactable) continue;
+                if (!pointInRect(px, py, n)) continue;
+                if (!insideScissorAncestors(e, px, py)) continue;
+                if (!dt.acceptedPayload.empty() && dt.acceptedPayload != pd->payload) continue;
+                if (dt.canAccept && !dt.canAccept(pressed_)) continue;
+                if (newTarget == entt::null
+                    || n.sortOrder > bestSO
+                    || (n.sortOrder == bestSO && mySeq >= bestSeq)) {
+                    bestSO = n.sortOrder;
+                    bestSeq = mySeq;
+                    newTarget = e;
+                }
+            }
+            if (newTarget != currentDropTarget_) {
+                if (currentDropTarget_ != entt::null) {
+                    if (auto* old = world.try_get<UIDropTarget>(currentDropTarget_)) {
+                        old->hovering = false;
+                        old->hoveringEntity = entt::null;
+                        if (old->onDragLeave) old->onDragLeave(pressed_);
+                    }
+                }
+                if (newTarget != entt::null) {
+                    auto& nt = world.get<UIDropTarget>(newTarget);
+                    nt.hovering = true;
+                    nt.hoveringEntity = pressed_;
+                    if (nt.onDragEnter) nt.onDragEnter(pressed_);
+                }
+                currentDropTarget_ = newTarget;
+            }
+        }
+    }
+
     // ── 5. 抬起：触发 onUp/onClick/onChanged，结束拖拽/滑条 ─────────────────
     if (justReleased && pressed_ != entt::null) {
         auto& n = world.get<UINode>(pressed_);
@@ -531,6 +583,19 @@ void UISystem::runInteraction(InputState& input) {
         if (auto* d = world.try_get<UIDraggable>(pressed_)) {
             if (d->dragging) {
                 d->dragging = false;
+                // 命中 DropTarget → 触发 onDrop，记录 dropAccepted；否则按需回弹
+                if (currentDropTarget_ != entt::null) {
+                    auto& dt = world.get<UIDropTarget>(currentDropTarget_);
+                    d->dropAccepted = true;
+                    if (dt.onDrop) dt.onDrop(pressed_);
+                    dt.hovering = false;
+                    dt.hoveringEntity = entt::null;
+                } else if (d->snapBackOnMiss) {
+                    auto& dn = world.get<UINode>(pressed_);
+                    dn.offsetX = d->originX;
+                    dn.offsetY = d->originY;
+                }
+                currentDropTarget_ = entt::null;
                 if (d->onDragEnd) d->onDragEnd();
             }
         }
@@ -748,6 +813,14 @@ void UISystem::emitNodeVisuals(entt::entity e, int baseSort) {
     }
     if (auto* lbl = world.try_get<UILabel>(e)) {
         emitText(*lbl, n, baseSort + 8);
+    }
+    // DropTarget 高亮：当拖拽中的元素悬停于本节点之上时叠一层 tint。
+    // 放最后画，盖在背景/图片之上但仍在 label 之下 (label 用 +8)。
+    if (auto* dt = world.try_get<UIDropTarget>(e)) {
+        if (dt->hovering && dt->highlightOnHover) {
+            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                     dt->highlightColor, {}, {}, baseSort + 7);
+        }
     }
 }
 

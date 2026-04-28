@@ -142,6 +142,16 @@ api.setUITextAlignment(label, /*0=L,1=C,2=R*/ 1);
 // 拖拽（自动设 anchor=topLeft + pivot=(0,0)，offset 直接当屏幕坐标）
 api.makeDraggable(img, [](float x, float y){...});
 api.setDragBounds(img, 0, 0, 1280, 720);
+api.setDragPayload(img, "item");           // 用于 DropTarget 过滤
+api.setDragSnapBack(img, true);             // 未命中 DropTarget 时回弹到拖拽起点
+
+// 投放目标
+api.makeDropTarget(slot, [](entt::entity dragged){...});
+api.setDropAcceptedPayload(slot, "item");
+api.setDropHoverHighlight(slot, true, {255,255,255,80});
+api.setDropAcceptCallback(slot, [](entt::entity d){ return ...; });
+api.setDropEnterCallback(slot, [](entt::entity d){...});
+api.setDropLeaveCallback(slot, [](entt::entity d){...});
 
 // 状态查询
 entt::entity hovered = api.getHoveredUI();

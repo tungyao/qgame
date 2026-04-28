@@ -654,6 +654,55 @@ void GameAPI::setDragBounds(entt::entity e, float minX, float minY,
     d.maxY = maxY;
 }
 
+void GameAPI::setDragPayload(entt::entity e, std::string payload) {
+    auto& d = ctx_.world.get_or_emplace<UIDraggable>(e);
+    d.payload = std::move(payload);
+}
+
+void GameAPI::setDragSnapBack(entt::entity e, bool snapBack) {
+    auto& d = ctx_.world.get_or_emplace<UIDraggable>(e);
+    d.snapBackOnMiss = snapBack;
+}
+
+// ── DropTarget ──────────────────────────────────────────────────────────────
+
+void GameAPI::makeDropTarget(entt::entity e,
+                             std::function<void(entt::entity)> onDrop) {
+    auto* n = ctx_.world.try_get<UINode>(e);
+    if (!n) return;
+    auto& dt = ctx_.world.get_or_emplace<UIDropTarget>(e);
+    dt.onDrop = std::move(onDrop);
+}
+
+void GameAPI::setDropAcceptedPayload(entt::entity e, std::string payload) {
+    auto& dt = ctx_.world.get_or_emplace<UIDropTarget>(e);
+    dt.acceptedPayload = std::move(payload);
+}
+
+void GameAPI::setDropHoverHighlight(entt::entity e, bool enabled, core::Color color) {
+    auto& dt = ctx_.world.get_or_emplace<UIDropTarget>(e);
+    dt.highlightOnHover = enabled;
+    dt.highlightColor   = color;
+}
+
+void GameAPI::setDropAcceptCallback(entt::entity e,
+                                    std::function<bool(entt::entity)> canAccept) {
+    auto& dt = ctx_.world.get_or_emplace<UIDropTarget>(e);
+    dt.canAccept = std::move(canAccept);
+}
+
+void GameAPI::setDropEnterCallback(entt::entity e,
+                                   std::function<void(entt::entity)> onEnter) {
+    auto& dt = ctx_.world.get_or_emplace<UIDropTarget>(e);
+    dt.onDragEnter = std::move(onEnter);
+}
+
+void GameAPI::setDropLeaveCallback(entt::entity e,
+                                   std::function<void(entt::entity)> onLeave) {
+    auto& dt = ctx_.world.get_or_emplace<UIDropTarget>(e);
+    dt.onDragLeave = std::move(onLeave);
+}
+
 // ── 状态查询 ─────────────────────────────────────────────────────────────────
 
 bool GameAPI::isPointerOverUI(entt::entity e) const {

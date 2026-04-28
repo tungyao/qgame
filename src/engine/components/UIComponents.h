@@ -303,9 +303,50 @@ struct UIDraggable {
     float minX = 0.f, minY = 0.f;
     float maxX = 0.f, maxY = 0.f;     // 仅当 clamp=true 时生效
 
+    // 可选标签：UIDropTarget 用 acceptedPayload 做粗粒度过滤（例如背包格子只
+    // 接受 "item"，技能槽只接受 "skill"）。空字符串 = 不参与匹配。
+    std::string payload;
+
+    // 若拖拽以"成功投放到 DropTarget"结束，UISystem 会在 onDragEnd 之前把
+    // dropAccepted 置为 true，回调里可据此决定是否回弹到原位。
+    bool  dropAccepted = false;       // 运行时
+    // 拖拽开始前的 offsetX/Y，UISystem 记录用以"未命中 DropTarget 自动回弹"。
+    float originX = 0.f;
+    float originY = 0.f;
+    bool  snapBackOnMiss = false;     // 未命中任意 DropTarget 时是否回原位
+
     std::function<void(float, float)> onDrag;
     std::function<void()>             onDragStart;
     std::function<void()>             onDragEnd;
+};
+
+// ── 投放目标 ────────────────────────────────────────────────────────────────
+// 给一个 UINode 加上 UIDropTarget 后，它就成为可接收 UIDraggable 投放的区域。
+// 拖拽过程中 UISystem 每帧做命中测试（鼠标坐标 vs DropTarget 屏幕矩形），找到
+// 最上层(sortOrder 最大)且接受当前 payload 的目标，触发 onDragEnter/Leave。
+// 鼠标抬起时若仍命中目标 → 触发 onDrop，并把被拖元素的 UIDraggable.dropAccepted
+// 置为 true。
+//
+// 过滤规则（依次判断，前者通过才轮到下一个）：
+//   1) acceptedPayload 非空时，要求 UIDraggable.payload == acceptedPayload；
+//   2) canAccept 回调存在时，调用并要求返回 true。
+// 两者都为空/未提供 → 默认接受任意拖拽。
+//
+// 视觉反馈：highlightOnHover=true 时，UISystem 在节点之上叠一层 highlightColor
+// 矩形；不需要时关掉自行用 onDragEnter/Leave 改 UIBackground。
+struct UIDropTarget {
+    std::string acceptedPayload;     // 空 = 不按 payload 过滤
+    std::function<bool(entt::entity)> canAccept;       // (draggable) -> 是否接受
+    std::function<void(entt::entity)> onDragEnter;     // (draggable)
+    std::function<void(entt::entity)> onDragLeave;     // (draggable)
+    std::function<void(entt::entity)> onDrop;          // (draggable)
+
+    bool        highlightOnHover = true;
+    core::Color highlightColor   = {255, 255, 255, 60};
+
+    // 运行时：当前是否正有可接受的拖拽元素悬停在我之上
+    bool         hovering        = false;
+    entt::entity hoveringEntity  = entt::null;
 };
 
 } // namespace engine

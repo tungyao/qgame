@@ -96,6 +96,10 @@ private:
     // tooltip：跟踪当前悬停的 tooltip 触发器和累计停留时间
     entt::entity tooltipHovered_ = entt::null;
     float        tooltipHoverT_  = 0.f;
+
+    // drag-and-drop：当前拖拽元素正在悬停的 DropTarget（用来跨帧产生
+    // onDragEnter/Leave，并在抬起时找到最终落点）
+    entt::entity currentDropTarget_ = entt::null;
     float        pointerSx_ = 0.f, pointerSy_ = 0.f;   // 上一帧鼠标屏幕像素
 
     float screenW_ = 1920.f, screenH_ = 1080.f;

@@ -1275,6 +1275,70 @@ int main(int argc, char* argv[]) {
 		api.setDragBounds(draggable, 0.f, 0.f, 1280.f, 720.f);
 	}
 
+	// ── DropTarget 测试 ─────────────────────────────────────────────────────────
+	// 两个投放槽：左槽接受 payload="item"，右槽用 canAccept 拒绝同一物品。
+	// 一个带 payload="item" 的小拖拽块，未命中槽位时自动回弹到起点。
+	{
+		auto dropHint = api.createUIText(280.f, 20.f, "DropTarget: drag GEM into a slot");
+		api.setUIParent(dropHint, canvas);
+		api.setUIAnchor(dropHint, 0.5f, 0.f, 0.5f, 0.f);
+		api.setUIPivot(dropHint, 0.5f, 0.f);
+		api.setUIOffset(dropHint, 0.f, 90.f);
+		api.setUITextFont(dropHint, font, 13.f);
+		api.setUITextColor(dropHint, { 200, 200, 200, 255 });
+
+		auto makeSlot = [&](float ox, const char* label,
+		                    bool acceptItem, bool useReject) {
+			auto slot = api.createUIElement();
+			api.setUIParent(slot, canvas);
+			api.setUISize(slot, 96.f, 96.f);
+			api.setUIAnchor(slot, 0.5f, 0.f, 0.5f, 0.f);
+			api.setUIPivot(slot, 0.5f, 0.f);
+			api.setUIOffset(slot, ox, 120.f);
+			api.setUIInteractable(slot, true);
+			api.setUIBackground(slot, { 40, 50, 60, 255 }, {});
+			if (acceptItem) api.setDropAcceptedPayload(slot, "item");
+			if (useReject) {
+				api.setDropAcceptCallback(slot,
+					[](entt::entity) { return false; });
+			}
+			api.makeDropTarget(slot, [label](entt::entity dragged) {
+				printf("[Drop] %s received entity %u\n", label,
+					(unsigned)entt::to_integral(dragged));
+			});
+			api.setDropEnterCallback(slot, [label](entt::entity) {
+				printf("[Drop] enter %s\n", label);
+			});
+			api.setDropLeaveCallback(slot, [label](entt::entity) {
+				printf("[Drop] leave %s\n", label);
+			});
+			api.setDropHoverHighlight(slot, true, { 255, 255, 120, 90 });
+
+			auto tag = api.createUIText(96.f, 18.f, label);
+			api.setUIParent(tag, slot);
+			api.setUIAnchor(tag, 0.5f, 1.f, 0.5f, 1.f);
+			api.setUIPivot(tag, 0.5f, 1.f);
+			api.setUIOffset(tag, 0.f, -4.f);
+			api.setUITextFont(tag, font, 11.f);
+			api.setUITextColor(tag, { 220, 220, 220, 255 });
+			api.setUIInteractable(tag, false);
+			return slot;
+		};
+		makeSlot(-80.f, "ACCEPT(item)", true,  false);
+		makeSlot( 30.f, "REJECT",       true,  true);
+
+		// 可拖拽宝石。注意：makeDraggable 之后不要再改 anchor/pivot——drag-follow
+		// 把 offset 当 topLeft 屏幕坐标存，改回 center 锚点会让视觉位置每帧偏移。
+		auto gem = api.createUIImage(40.f, 40.f);
+		api.setUIParent(gem, canvas);
+		api.makeDraggable(gem, nullptr);
+		api.setDragPayload(gem, "item");
+		api.setDragSnapBack(gem, true);          // 没投中就回弹
+		api.setUIOffset(gem, 750.f, 145.f);      // 1280/2 + 110, topLeft 屏幕坐标
+		api.setUIImageColor(gem, { 80, 200, 220, 255 });
+		api.setUISortOrder(gem, 100);            // 置顶，避免被槽底盖住
+	}
+
 	// ── ScrollView 测试（中下部）：垂直列表，滚轮 / 拖拽 / 内嵌按钮 ─────────────
 	{
 		auto scrollHint = api.createUIText(220.f, 20.f, "ScrollView (wheel / drag)");
