@@ -10,6 +10,7 @@
 #include <engine/systems/RenderSystem.h>
 #include <SDL3/SDL.h>
 #include <vector>
+#include <string>
 #include <cstdio>
 #include <cstring>
 
@@ -75,7 +76,7 @@ int main(int argc, char* argv[]) {
 			useOpenGL = true;
 		}
 	}
-	
+
 	engine::EngineConfig cfg;
 	cfg.windowTitle = "StarEngine - Two Camera Demo";
 	cfg.windowWidth = 1280;
@@ -120,11 +121,11 @@ int main(int argc, char* argv[]) {
 			f.duration = dur;
 			clip.frames.push_back(f);
 			clip.duration += dur;
-		};
-		pushFrame(0.f,  0.f,  0.10f);
-		pushFrame(32.f, 0.f,  0.10f);
+			};
+		pushFrame(0.f, 0.f, 0.10f);
+		pushFrame(32.f, 0.f, 0.10f);
 		pushFrame(32.f, 32.f, 0.10f);
-		pushFrame(0.f,  32.f, 0.10f);
+		pushFrame(0.f, 32.f, 0.10f);
 		// Phase 2: 帧事件 — 攻击的 hit window + sfx
 		clip.events.push_back({ 0.05f, "sfx",         0, 0.f, "swing" });
 		clip.events.push_back({ 0.10f, "hitbox_on",   0, 0.f, "" });
@@ -273,7 +274,7 @@ int main(int argc, char* argv[]) {
 
 		engine::AnimatorComponent ac{};
 		ac.applyTexture = true;
-		ac.controller   = ctrl;
+		ac.controller = ctrl;
 		api.addComponent(fsmHero, ac);
 	}
 
@@ -336,7 +337,7 @@ int main(int argc, char* argv[]) {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Phase 5.3 测试: 程序化动画层 (Procedural Animation Layers)
 	// ═══════════════════════════════════════════════════════════════════════════
-	
+
 	// Phase 5.3a: HitShake - 受击抖动
 	entt::entity hitShakeTest;
 	{
@@ -663,12 +664,12 @@ int main(int argc, char* argv[]) {
 	// Phase 2: Reactive Render Graph - 状态变化驱动渲染
 	// Phase 3: Streaming Tile World - 无限地图流式加载
 	// ═══════════════════════════════════════════════════════════════════════════
-	
+
 	constexpr bool CREATE_MANY_SPRITES = true;
 	constexpr int SPRITE_GRID_SIZE = 30;  // 30x30 = 900 sprites (可调大到 50x50=2500 测试性能)
-	
+
 	TextureHandle smallTex;  // 用于性能测试的纹理
-	
+
 	if (CREATE_MANY_SPRITES) {
 		printf("\n");
 		printf("╔════════════════════════════════════════════════════════════════╗\n");
@@ -676,14 +677,14 @@ int main(int argc, char* argv[]) {
 		printf("╠════════════════════════════════════════════════════════════════╣\n");
 		printf("║  Creating %4d sprites in a grid for stress testing...        ║\n", SPRITE_GRID_SIZE * SPRITE_GRID_SIZE);
 		printf("╚════════════════════════════════════════════════════════════════╝\n");
-		
+
 		auto smallPx = makeCheckerboard(16, 16, 4, { 200, 200, 100, 255 }, { 100, 100, 200, 255 });
 		smallTex = api.createTextureFromMemory(smallPx.data(), 16, 16);
-		
+
 		float startX = -800.f;
 		float startY = -400.f;
 		float spacing = 40.f;
-		
+
 		// 创建网格精灵
 		for (int gy = 0; gy < SPRITE_GRID_SIZE; ++gy) {
 			for (int gx = 0; gx < SPRITE_GRID_SIZE; ++gx) {
@@ -691,7 +692,7 @@ int main(int argc, char* argv[]) {
 				float x = startX + gx * spacing;
 				float y = startY + gy * spacing;
 				api.addComponent(e, engine::Transform{ x, y });
-				
+
 				engine::Sprite sp{};
 				sp.texture = smallTex;
 				sp.srcRect = { 0.f, 0.f, 16.f, 16.f };
@@ -707,7 +708,7 @@ int main(int argc, char* argv[]) {
 				api.addComponent(e, sp);
 			}
 		}
-		
+
 		printf("\n");
 		printf("┌─────────────────────────────────────────────────────────────────┐\n");
 		printf("│  GPU-Driven Rendering - Controls                               │\n");
@@ -751,7 +752,7 @@ int main(int argc, char* argv[]) {
 		txt.layer = 100;
 		api.addComponent(perfText, txt);
 	}
-	
+
 	// ── GPU 架构说明 ─────────────────────────────────────────────────────────
 	entt::entity archText;
 	{
@@ -774,8 +775,8 @@ int main(int argc, char* argv[]) {
 	api.setFixedTimestep(1.f / 60.f);  // 60Hz 物理更新
 
 	// 自定义碰撞层（扩展预定义层）
-	constexpr engine::CollisionLayer COLLISION_LAYER_BULLET  = 16;  // 第5层
-	constexpr engine::CollisionLayer COLLISION_LAYER_PICKUP  = 32;  // 第6层
+	constexpr engine::CollisionLayer COLLISION_LAYER_BULLET = 16;  // 第5层
+	constexpr engine::CollisionLayer COLLISION_LAYER_PICKUP = 32;  // 第6层
 
 	// 地面 (static collider, STATIC 层，只与 DEFAULT/PLAYER/ENEMY 碰撞)
 	{
@@ -922,7 +923,7 @@ int main(int argc, char* argv[]) {
 		testButton = api.createButton(200.f, 50.f, []() {
 			clickCount++;
 			printf("[UI] Button clicked! Count: %d\n", clickCount);
-		});
+			});
 		api.setUIParent(testButton, canvas);
 		api.setUIAnchor(testButton, 1.f, 0.f, 1.f, 0.f);
 		api.setUIPivot(testButton, 1.f, 0.f);
@@ -947,7 +948,7 @@ int main(int argc, char* argv[]) {
 	{
 		volumeSlider = api.createSlider(200.f, 24.f, 0.f, 100.f, [](float v) {
 			volume = v / 100.f;
-		});
+			});
 		api.setUIParent(volumeSlider, canvas);
 		api.setUIAnchor(volumeSlider, 1.f, 0.f, 1.f, 0.f);
 		api.setUIPivot(volumeSlider, 1.f, 0.f);
@@ -969,7 +970,7 @@ int main(int argc, char* argv[]) {
 	{
 		soundToggle = api.createToggle(60.f, 30.f, [](bool on) {
 			soundEnabled = on;
-		});
+			});
 		api.setUIParent(soundToggle, canvas);
 		api.setUIAnchor(soundToggle, 1.f, 0.f, 1.f, 0.f);
 		api.setUIPivot(soundToggle, 1.f, 0.f);
@@ -1019,10 +1020,61 @@ int main(int argc, char* argv[]) {
 		// makeDraggable 会强制 anchor=topLeft + pivot=(0,0)；offset 即屏幕坐标
 		api.makeDraggable(draggable, [](float x, float y) {
 			(void)x; (void)y;
-		});
+			});
 		api.setUIOffset(draggable, 40.f, 360.f);
 		api.setUIImageColor(draggable, { 200, 80, 80, 255 });
 		api.setDragBounds(draggable, 0.f, 0.f, 1280.f, 720.f);
+	}
+
+	// ── ScrollView 测试（中下部）：垂直列表，滚轮 / 拖拽 / 内嵌按钮 ─────────────
+	{
+		auto scrollHint = api.createUIText(220.f, 20.f, "ScrollView (wheel / drag)");
+		api.setUIParent(scrollHint, canvas);
+		api.setUIAnchor(scrollHint, 0.f, 1.f, 0.f, 1.f);
+		api.setUIPivot(scrollHint, 0.f, 1.f);
+		api.setUIOffset(scrollHint, 40.f, -270.f);
+		api.setUITextFont(scrollHint, font, 13.f);
+		api.setUITextColor(scrollHint, { 200, 200, 200, 255 });
+
+		// 视口 240x220
+		auto scroll = api.createScrollView(240.f, 220.f, 0 /*Vertical*/);
+		api.setUIParent(scroll, canvas);
+		api.setUIAnchor(scroll, 0.f, 1.f, 0.f, 1.f);
+		api.setUIPivot(scroll, 0.f, 1.f);
+		api.setUIOffset(scroll, 40.f, -40.f);
+		// 视口背景：贴一个深色背景便于观察裁剪
+		api.setUIBackground(scroll, { 30, 30, 40, 255 }, {});
+
+		// 在 ScrollView 内塞 20 个按钮
+		const int kItems = 20;
+		const float itemH = 36.f;
+		const float pad = 6.f;
+		for (int i = 0; i < kItems; ++i) {
+			char label[64];
+			std::snprintf(label, sizeof(label), "Item %02d", i + 1);
+
+			auto btn = api.createButton(220.f, itemH, [i, label = std::string(label)]() {
+				printf("[Scroll] clicked %s\n", label.c_str());
+				});
+			api.setUIParent(btn, scroll);
+			// 子节点遵循"约定"：anchor=topLeft + pivot=(0,0)，offset 即视口内坐标
+			api.setUIAnchor(btn, 0.f, 0.f, 0.f, 0.f);
+			api.setUIPivot(btn, 0.f, 0.f);
+			api.setUIOffset(btn, pad, pad + i * (itemH + pad));
+			api.setUISize(btn, 220.f, itemH);
+			api.setButtonColors(btn,
+				{ uint8_t(70 + (i * 5) % 80), 90, 130, 255 },
+				{ 110, 140, 180, 255 },
+				{ 50, 70, 100, 255 });
+
+			auto lbl = api.createUIText(220.f, itemH, label);
+			api.setUIParent(lbl, btn);
+			api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+			api.setUITextFont(lbl, font, 16.f);
+			api.setUITextColor(lbl, { 240, 240, 240, 255 });
+			api.setUISortOrder(lbl, 1);
+		}
+		// contentH 留 0 让 UISystem 自动测量
 	}
 
 	// ── 世界空间血条 (跟随 player) ──────────────────────────────────────────────
@@ -1045,7 +1097,7 @@ int main(int argc, char* argv[]) {
 	// ── 底部提示 ─────────────────────────────────────────────────────────────────
 	{
 		auto hint = api.createUIText(700.f, 24.f,
-		    "F1 toggle GPU-driven  |  ESC quit  |  arrow keys move world camera");
+			"F1 toggle GPU-driven  |  ESC quit  |  arrow keys move world camera");
 		api.setUIParent(hint, canvas);
 		api.setUIAnchor(hint, 0.5f, 1.f, 0.5f, 1.f);
 		api.setUIPivot(hint, 0.5f, 1.f);
@@ -1057,7 +1109,7 @@ int main(int argc, char* argv[]) {
 	// ── 主循环 ────────────────────────────────────────────────────────────────
 	constexpr float kSpeed = 200.f;
 	bool gpuDrivenEnabled = false;
-	
+
 	while (ctx.scheduler.tick()) {
 		float dt = ctx.scheduler.deltaTime();
 		auto& anim = api.getComponent<engine::AnimatorComponent>(player);
@@ -1076,7 +1128,7 @@ int main(int argc, char* argv[]) {
 			api.patchComponent<engine::Transform>(player, [&](engine::Transform& tf) {
 				tf.x += dx * kSpeed * dt;
 				tf.y += dy * kSpeed * dt;
-			});
+				});
 		}
 
 		// 方向键控制 World 摄像机位置
@@ -1089,7 +1141,7 @@ int main(int argc, char* argv[]) {
 			api.patchComponent<engine::Transform>(worldCamera, [&](engine::Transform& tf) {
 				tf.x += camDx * kSpeed * dt;
 				tf.y += camDy * kSpeed * dt;
-			});
+				});
 		}
 
 		// Phase 1: walk 走最低优先级；attack 锁定时不打断
@@ -1098,7 +1150,8 @@ int main(int argc, char* argv[]) {
 				engine::PlayOptions o; o.priority = 0;
 				anim.play(playerAnim, o);
 			}
-		} else {
+		}
+		else {
 			if (anim.playing && anim.interruptible && anim.currentAnim == playerAnim) anim.stop();
 		}
 
@@ -1140,7 +1193,7 @@ int main(int argc, char* argv[]) {
 		if (auto* eq = ctx.world.try_get<engine::AnimEventQueue>(player)) {
 			for (auto& ev : eq->events) {
 				printf("[Phase2] event '%s' @ t=%.3f (int=%d float=%.2f str='%s')\n",
-				       ev.name.c_str(), ev.time, ev.intParam, ev.floatParam, ev.stringParam.c_str());
+					ev.name.c_str(), ev.time, ev.intParam, ev.floatParam, ev.stringParam.c_str());
 			}
 		}
 
@@ -1156,7 +1209,8 @@ int main(int argc, char* argv[]) {
 				for (auto& ev : eq->events) {
 					if (ev.name.rfind("state_", 0) == 0) {
 						printf("[Phase3] %s\n", ev.name.c_str());
-					} else {
+					}
+					else {
 						printf("[Phase3] anim event '%s' @ t=%.3f\n", ev.name.c_str(), ev.time);
 					}
 				}
@@ -1223,18 +1277,19 @@ int main(int argc, char* argv[]) {
 			if (ctx.systems.has<engine::RenderSystem>()) {
 				auto& renderSystem = ctx.systems.get<engine::RenderSystem>();
 				renderSystem.setGPUDrivenEnabled(gpuDrivenEnabled);
-				
+
 				printf("\n");
 				printf("╔════════════════════════════════════════════════════════════════╗\n");
-				printf("║  Rendering Mode: %-45s  ║\n", 
-				       gpuDrivenEnabled ? "GPU-DRIVEN (Fast)" : "CPU-DRIVEN (Traditional)");
+				printf("║  Rendering Mode: %-45s  ║\n",
+					gpuDrivenEnabled ? "GPU-DRIVEN (Fast)" : "CPU-DRIVEN (Traditional)");
 				printf("╠════════════════════════════════════════════════════════════════╣\n");
 				if (gpuDrivenEnabled) {
 					printf("║  ✓ GPU Culling:  Parallel O(n/64) on GPU                      ║\n");
 					printf("║  ✓ GPU Sorting:  Radix Sort O(n) on GPU                       ║\n");
 					printf("║  ✓ Draw Calls:   1-10 (batched)                               ║\n");
 					printf("║  ✓ CPU Time:     < 0.5ms                                      ║\n");
-				} else {
+				}
+				else {
 					printf("║  • CPU Culling:  Linear O(n) scan                             ║\n");
 					printf("║  • CPU Sorting:  QuickSort O(n log n)                         ║\n");
 					printf("║  • Draw Calls:   10-100+ (texture switches)                   ║\n");
@@ -1242,23 +1297,25 @@ int main(int argc, char* argv[]) {
 				}
 				printf("╚════════════════════════════════════════════════════════════════╝\n\n");
 			}
-			
+
 			// 更新状态文本
 			auto& gpuTxt = api.getComponent<engine::TextComponent>(gpuStatusText);
 			if (gpuDrivenEnabled) {
 				gpuTxt.text = "[GPU Mode] Press G to switch to CPU mode";
 				gpuTxt.color = { 100, 255, 100, 255 };
-			} else {
+			}
+			else {
 				gpuTxt.text = "[CPU Mode] Press G to enable GPU-driven rendering";
 				gpuTxt.color = { 255, 200, 100, 255 };
 			}
-			
+
 			// 更新架构说明
 			auto& archTxt = api.getComponent<engine::TextComponent>(archText);
 			if (gpuDrivenEnabled) {
 				archTxt.text = "Architecture: GPU-Driven (Compute Culling + Indirect Draw)";
 				archTxt.color = { 100, 200, 150, 255 };
-			} else {
+			}
+			else {
 				archTxt.text = "Architecture: CPU-Driven (Traditional Scan + Sort)";
 				archTxt.color = { 120, 120, 150, 255 };
 			}
@@ -1269,40 +1326,42 @@ int main(int argc, char* argv[]) {
 			static float fpsAccum = 0.f;
 			static int fpsFrameCount = 0;
 			static float displayFps = 0.f;
-			
+
 			fpsAccum += dt;
 			fpsFrameCount++;
-			
+
 			// 每 0.5 秒更新一次 FPS 显示
 			if (fpsAccum >= 0.5f) {
 				displayFps = fpsFrameCount / fpsAccum;
 				fpsAccum = 0.f;
 				fpsFrameCount = 0;
 			}
-			
+
 			if (ctx.systems.has<engine::RenderSystem>()) {
 				auto& renderSystem = ctx.systems.get<engine::RenderSystem>();
 				uint32_t spriteCount = renderSystem.spriteBuffer().activeCount();
-				
+
 				// 计算可见精灵数 (简化：使用精灵总数作为估计)
 				// 实际可见数由 GPU/视口裁剪决定
 				uint32_t estimatedVisible = spriteCount;
-				
+
 				auto& perfTxt = api.getComponent<engine::TextComponent>(perfText);
 				char buf[128];
-				snprintf(buf, sizeof(buf), 
-				         "FPS: %.0f | Sprites: %u | Mode: %s",
-				         displayFps,
-				         spriteCount,
-				         gpuDrivenEnabled ? "GPU" : "CPU");
+				snprintf(buf, sizeof(buf),
+					"FPS: %.0f | Sprites: %u | Mode: %s",
+					displayFps,
+					spriteCount,
+					gpuDrivenEnabled ? "GPU" : "CPU");
 				perfTxt.text = buf;
-				
+
 				// 根据性能调整颜色
 				if (displayFps >= 55.f) {
 					perfTxt.color = { 100, 255, 100, 255 };  // 绿色 - 良好
-				} else if (displayFps >= 30.f) {
+				}
+				else if (displayFps >= 30.f) {
 					perfTxt.color = { 255, 255, 100, 255 };  // 黄色 - 一般
-				} else {
+				}
+				else {
 					perfTxt.color = { 255, 100, 100, 255 };  // 红色 - 需优化
 				}
 			}
@@ -1311,20 +1370,21 @@ int main(int argc, char* argv[]) {
 		// ═════════════════════════════════════════════════════════════════════
 		// 物理系统测试：射线检测 + 区域查询
 		// ═════════════════════════════════════════════════════════════════════
-		
+
 		// R 键：从玩家位置向下发射射线，检测地面
 		if (api.isKeyJustPressed(SDLK_R)) {
 			auto& playerTf = api.getComponent<engine::Transform>(player);
 			auto hit = api.raycast(playerTf.x, playerTf.y, 0.f, 1.f, 1000.f, engine::COLLISION_LAYER_STATIC);
 			if (hit.hit) {
 				printf("[Physics] Raycast hit: entity at (%.1f, %.1f), dist=%.1f, normal=(%.2f, %.2f)\n",
-				       hit.hitX, hit.hitY, hit.distance, hit.normalX, hit.normalY);
+					hit.hitX, hit.hitY, hit.distance, hit.normalX, hit.normalY);
 				// 显示命中点标记
 				api.patchComponent<engine::Transform>(rayHitMarker, [&](engine::Transform& tf) {
 					tf.x = hit.hitX - 4.f;
 					tf.y = hit.hitY - 4.f;
-				});
-			} else {
+					});
+			}
+			else {
 				printf("[Physics] Raycast missed\n");
 			}
 		}
@@ -1354,7 +1414,7 @@ int main(int argc, char* argv[]) {
 			api.patchComponent<engine::Transform>(physicsBox, [&](engine::Transform& tf) {
 				tf.x = 600.f;
 				tf.y = 50.f;
-			});
+				});
 			auto& rb = api.getComponent<engine::RigidBody>(physicsBox);
 			rb.velocityX = 0.f;
 			rb.velocityY = 0.f;

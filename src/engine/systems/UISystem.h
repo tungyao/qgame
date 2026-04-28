@@ -56,15 +56,22 @@ private:
     void updateCanvases();
     void runLayout();
     void layoutNode(entt::entity e, float parentX, float parentY,
-                    float parentW, float parentH);
+                    float parentW, float parentH,
+                    float scrollOffX, float scrollOffY);
+    void measureScrollContent(entt::entity sv);
     void runInteraction(InputState& input);
 
     // 命令缓存构建
     void buildCommands();
+    void buildNodeCommands(entt::entity e, int& seq, int parentBaseSort);
+    void emitNodeVisuals(entt::entity e, int baseSort);
     void emitRect(float x, float y, float w, float h,
                   core::Color tint, TextureHandle tex,
                   core::Rect src, int sortKey);
     void emitText(const UILabel& label, const UINode& node, int sortKey);
+
+    // 命中过滤：检查 (px,py) 是否在 e 的所有祖先 ScrollView 视口内
+    bool insideScissorAncestors(entt::entity e, float px, float py) const;
 
     // 世界相机参数（取第一个含 World layer 的相机）
     void getWorldCamera(float& camX, float& camY, float& zoom) const;

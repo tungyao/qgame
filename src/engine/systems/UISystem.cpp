@@ -105,13 +105,36 @@ void UISystem::runLayout() {
         auto nv = world.view<UINode>();
         for (auto [e, n] : nv.each()) {
             if (n.parent != canvasE) continue;
-            layoutNode(e, cx, cy, cw, ch);
+            layoutNode(e, cx, cy, cw, ch, 0.f, 0.f);
         }
     }
 }
 
+void UISystem::measureScrollContent(entt::entity sv) {
+    auto& world = ctx_.world;
+    auto* svc = world.try_get<UIScrollView>(sv);
+    if (!svc) return;
+    // 仅当用户没有显式给 contentW/H (<=0) 时才自动测量
+    bool autoW = svc->contentW <= 0.f;
+    bool autoH = svc->contentH <= 0.f;
+    if (!autoW && !autoH) return;
+    float maxW = 0.f, maxH = 0.f;
+    auto nv = world.view<UINode>();
+    for (auto [child, cn] : nv.each()) {
+        if (cn.parent != sv) continue;
+        // 子节点假设以 topLeft/pivot=0 排布（演示约定）；用 offset+size 估算
+        const float r = cn.offsetX + cn.width;
+        const float b = cn.offsetY + cn.height;
+        if (r > maxW) maxW = r;
+        if (b > maxH) maxH = b;
+    }
+    if (autoW) svc->contentW = maxW;
+    if (autoH) svc->contentH = maxH;
+}
+
 void UISystem::layoutNode(entt::entity e, float parentX, float parentY,
-                          float parentW, float parentH) {
+                          float parentW, float parentH,
+                          float scrollOffX, float scrollOffY) {
     auto& world = ctx_.world;
     auto& n = world.get<UINode>(e);
 
@@ -150,11 +173,30 @@ void UISystem::layoutNode(entt::entity e, float parentX, float parentY,
         n.screenY = cy + n.offsetY - n.pivotY * n.screenH;
     }
 
+    // 父节点是滚动容器时，应用其 scroll 偏移（scrollOffX/Y 由调用方传入）
+    n.screenX += scrollOffX;
+    n.screenY += scrollOffY;
+
+    // 本节点若是 ScrollView，先测量 content 并夹紧 scroll，再向下递归。
+    float childScrollX = 0.f, childScrollY = 0.f;
+    if (auto* sv = world.try_get<UIScrollView>(e)) {
+        measureScrollContent(e);
+        if (sv->clamp) {
+            const float maxX = std::max(0.f, sv->contentW - n.screenW);
+            const float maxY = std::max(0.f, sv->contentH - n.screenH);
+            sv->scrollX = std::clamp(sv->scrollX, 0.f, maxX);
+            sv->scrollY = std::clamp(sv->scrollY, 0.f, maxY);
+        }
+        childScrollX = -sv->scrollX;
+        childScrollY = -sv->scrollY;
+    }
+
     // 递归布局子节点
     auto nv = world.view<UINode>();
     for (auto [child, cn] : nv.each()) {
         if (cn.parent == e) {
-            layoutNode(child, n.screenX, n.screenY, n.screenW, n.screenH);
+            layoutNode(child, n.screenX, n.screenY, n.screenW, n.screenH,
+                       childScrollX, childScrollY);
         }
     }
 }
@@ -166,7 +208,26 @@ inline bool pointInRect(float px, float py, const UINode& n) {
     return px >= n.screenX && px < n.screenX + n.screenW &&
            py >= n.screenY && py < n.screenY + n.screenH;
 }
+inline bool pointInRectXYWH(float px, float py, float x, float y, float w, float h) {
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
 } // namespace
+
+bool UISystem::insideScissorAncestors(entt::entity e, float px, float py) const {
+    auto& world = ctx_.world;
+    entt::entity cur = world.get<UINode>(e).parent;
+    while (cur != entt::null && world.valid(cur)) {
+        if (auto* pn = world.try_get<UINode>(cur)) {
+            if (world.all_of<UIScrollView>(cur)) {
+                if (!pointInRect(px, py, *pn)) return false;
+            }
+            cur = pn->parent;
+        } else {
+            break;  // 到 canvas
+        }
+    }
+    return true;
+}
 
 void UISystem::runInteraction(InputState& input) {
     auto& world = ctx_.world;
@@ -191,12 +252,14 @@ void UISystem::runInteraction(InputState& input) {
             const uint32_t mySeq = seq++;
             if (!n.visible || !n.interactable) continue;
             if (!pointInRect(px, py, n)) continue;
+            // 如果该节点位于某个 ScrollView 子树内，命中点还必须落在那些视口里
+            if (!insideScissorAncestors(e, px, py)) continue;
             // 只把真正的交互组件视作命中目标。否则贴在按钮上的 UILabel
                       // (interactable 默认 true) 会盖住父按钮、屏幕角落的提示文字会
                           // 偷走拖拽块附近的点击 —— 表现为"按钮命中错位"和"拖几次后无法
                          // 再拖"。如果业务确实想让背景/标签接受 raycast，自行加上
                          // UIButton 或调用 setUIInteractable(false) 由用户显式控制。
-               const bool hasInteractor = world.any_of<UIButton, UIToggle,UISlider, UIDraggable>(e);
+               const bool hasInteractor = world.any_of<UIButton, UIToggle, UISlider, UIDraggable>(e);
             if (!hasInteractor) continue;
 
             if (bestHit == entt::null ||n.sortOrder > bestOrder || (n.sortOrder == bestOrder && mySeq >= bestSeq)) {
@@ -209,6 +272,66 @@ void UISystem::runInteraction(InputState& input) {
     }
     hovered_ = bestHit;
     if (hovered_ != entt::null) world.get<UINode>(hovered_).hovered = true;
+
+    // ── 1b. 滚轮 / 拖拽滚动：找到鼠标下"最深"的 ScrollView，把 wheel delta
+    //       注入它的 scrollX/Y。dragToScroll 在 hovered_ 命中其他交互体时让位。
+    {
+        const float wheelDx = input.wheelDeltaX();
+        const float wheelDy = input.wheelDeltaY();
+
+        entt::entity scrollTarget = entt::null;
+        // 取深度最大的（即最内层）含鼠标的 ScrollView：用 sortOrder 当 tiebreak
+        int bestSO = std::numeric_limits<int>::min();
+        auto svv = world.view<UINode, UIScrollView>();
+        for (auto [e, n, sv] : svv.each()) {
+            if (!n.visible) continue;
+            if (!pointInRect(px, py, n)) continue;
+            if (!insideScissorAncestors(e, px, py)) continue;
+            if (n.sortOrder >= bestSO) {
+                bestSO = n.sortOrder;
+                scrollTarget = e;
+            }
+        }
+        if (scrollTarget != entt::null && (wheelDx != 0.f || wheelDy != 0.f)) {
+            auto& sv = world.get<UIScrollView>(scrollTarget);
+            // SDL: wheel.y 向上为正，UI 习惯：内容向下移 = scrollY 增大；
+            // 故鼠标向上滚 (dy>0) → scrollY -= speed*dy (露出顶部内容)。
+            const bool allowH = (sv.direction != UIScrollView::Direction::Vertical);
+            const bool allowV = (sv.direction != UIScrollView::Direction::Horizontal);
+            if (allowH) sv.scrollX -= wheelDx * sv.wheelSpeed;
+            if (allowV) sv.scrollY -= wheelDy * sv.wheelSpeed;
+            if (sv.onScroll) sv.onScroll(sv.scrollX, sv.scrollY);
+        }
+
+        // 拖拽滚动开始：按下点在 ScrollView 视口内、且 hovered_ 没有命中可交互子节点
+        if (justPressed && hovered_ == entt::null && scrollTarget != entt::null) {
+            auto& sv = world.get<UIScrollView>(scrollTarget);
+            if (sv.dragToScroll) {
+                sv.dragging = true;
+                sv.lastPx = px;
+                sv.lastPy = py;
+                pressed_ = scrollTarget;   // 占住 pressed_，免得抬起时触发别处
+                world.get<UINode>(scrollTarget).pressed = true;
+            }
+        }
+
+        // 拖拽滚动跟随
+        if (down) {
+            auto sv2 = world.view<UINode, UIScrollView>();
+            for (auto [e, n, sv] : sv2.each()) {
+                if (!sv.dragging) continue;
+                const float dx = px - sv.lastPx;
+                const float dy = py - sv.lastPy;
+                sv.lastPx = px;
+                sv.lastPy = py;
+                const bool allowH = (sv.direction != UIScrollView::Direction::Vertical);
+                const bool allowV = (sv.direction != UIScrollView::Direction::Horizontal);
+                if (allowH) sv.scrollX -= dx;
+                if (allowV) sv.scrollY -= dy;
+                if (sv.onScroll) sv.onScroll(sv.scrollX, sv.scrollY);
+            }
+        }
+    }
 
     // ── 2. 按下：抓取 pressed_，触发 onDown，开始拖拽/滑条 ───────────────────
     if (justPressed && hovered_ != entt::null) {
@@ -311,6 +434,9 @@ void UISystem::runInteraction(InputState& input) {
                 if (s->onReleased) s->onReleased(s->value);
             }
         }
+        if (auto* sv = world.try_get<UIScrollView>(pressed_)) {
+            sv->dragging = false;
+        }
         pressed_ = entt::null;
     }
 }
@@ -398,103 +524,129 @@ void UISystem::emitText(const UILabel& lbl, const UINode& n, int sortKey) {
     uiCommands_.emplace_back(std::move(t));
 }
 
+void UISystem::emitNodeVisuals(entt::entity e, int baseSort) {
+    auto& world = ctx_.world;
+    const auto& n = world.get<UINode>(e);
+
+    if (auto* bg = world.try_get<UIBackground>(e)) {
+        emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                 bg->color, bg->texture, bg->srcRect, baseSort);
+    }
+    if (auto* btn = world.try_get<UIButton>(e)) {
+        core::Color col = btn->normal;
+        if (btn->isDisabled) col = btn->disabled;
+        else if (n.pressed)  col = btn->pressed;
+        else if (n.hovered)  col = btn->hover;
+        emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                 col, {}, {}, baseSort);
+    }
+    if (auto* tog = world.try_get<UIToggle>(e)) {
+        const core::Color trackCol = tog->isOn ? tog->onColor : tog->offColor;
+        emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                 trackCol, {}, {}, baseSort);
+        const float pad  = 3.f;
+        const float side = std::max(2.f, std::min(n.screenW, n.screenH) - pad * 2.f);
+        const float ky   = n.screenY + (n.screenH - side) * 0.5f;
+        const float kx   = tog->isOn ? (n.screenX + n.screenW - side - pad)
+                                     : (n.screenX + pad);
+        emitRect(kx, ky, side, side, tog->knobColor, {}, {}, baseSort + 1);
+    }
+    if (auto* s = world.try_get<UISlider>(e)) {
+        const float trackH = std::max(3.f, n.screenH * 0.35f);
+        const float trackY = n.screenY + (n.screenH - trackH) * 0.5f;
+        emitRect(n.screenX, trackY, n.screenW, trackH,
+                 s->trackColor, {}, {}, baseSort);
+        float t = (s->max > s->min) ? (s->value - s->min) / (s->max - s->min) : 0.f;
+        t = std::clamp(t, 0.f, 1.f);
+        emitRect(n.screenX, trackY, n.screenW * t, trackH,
+                 s->fillColor, {}, {}, baseSort + 1);
+        const float hw = s->handleW;
+        const float hx = n.screenX + n.screenW * t - hw * 0.5f;
+        emitRect(hx, n.screenY, hw, n.screenH,
+                 s->handleColor, {}, {}, baseSort + 2);
+    }
+    if (auto* pb = world.try_get<UIProgressBar>(e)) {
+        emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                 pb->bgColor, {}, {}, baseSort);
+        const float t = std::clamp(pb->value, 0.f, 1.f);
+        float fx = n.screenX, fy = n.screenY, fw = n.screenW, fh = n.screenH;
+        switch (pb->direction) {
+            case UIProgressBar::Direction::LeftToRight:
+                fw = n.screenW * t; break;
+            case UIProgressBar::Direction::RightToLeft:
+                fw = n.screenW * t; fx = n.screenX + n.screenW - fw; break;
+            case UIProgressBar::Direction::TopToBottom:
+                fh = n.screenH * t; break;
+            case UIProgressBar::Direction::BottomToTop:
+                fh = n.screenH * t; fy = n.screenY + n.screenH - fh; break;
+        }
+        emitRect(fx, fy, fw, fh, pb->fillColor, {}, {}, baseSort + 1);
+    }
+    if (auto* img = world.try_get<UIImage>(e)) {
+        emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                 img->tint, img->texture, img->srcRect, baseSort);
+    }
+    if (auto* lbl = world.try_get<UILabel>(e)) {
+        emitText(*lbl, n, baseSort + 8);
+    }
+}
+
+void UISystem::buildNodeCommands(entt::entity e, int& seq, int /*parentBaseSort*/) {
+    auto& world = ctx_.world;
+    const auto& n = world.get<UINode>(e);
+    if (!n.visible) return;
+
+    const int baseSort = n.sortOrder * 16 + (seq++ & 0xFFFF);
+
+    // 1) 自身视觉先画
+    emitNodeVisuals(e, baseSort);
+
+    // 2) ScrollView：在子树外侧 push/pop 剪裁矩形
+    const bool isScroll = world.all_of<UIScrollView>(e);
+    if (isScroll) {
+        backend::PushScissorCmd ps{};
+        ps.rect    = core::Rect{ n.screenX, n.screenY, n.screenW, n.screenH };
+        ps.sortKey = baseSort + 1;
+        ps.pass    = RenderPass::Screen;
+        uiCommands_.emplace_back(ps);
+    }
+
+    // 3) 子节点：按 sortOrder 升序，稳定排序
+    struct Entry { entt::entity child; int order; };
+    std::vector<Entry> kids;
+    auto nv = world.view<UINode>();
+    for (auto [child, cn] : nv.each()) {
+        if (cn.parent == e) kids.push_back({child, cn.sortOrder});
+    }
+    std::stable_sort(kids.begin(), kids.end(),
+                     [](const Entry& a, const Entry& b) { return a.order < b.order; });
+    for (const auto& k : kids) buildNodeCommands(k.child, seq, baseSort);
+
+    if (isScroll) {
+        backend::PopScissorCmd pp{};
+        pp.sortKey = baseSort + 0xFFF;  // 保证排在所有子树命令之后
+        pp.pass    = RenderPass::Screen;
+        uiCommands_.emplace_back(pp);
+    }
+}
+
 void UISystem::buildCommands() {
     uiCommands_.clear();
     auto& world = ctx_.world;
 
-    // 收集所有可见 UINode，按 sortOrder 升序绘制（同序按实体 id 稳定）
-    struct Entry { entt::entity e; int order; };
-    std::vector<Entry> ordered;
-    {
-        auto nv = world.view<UINode>();
-        for (auto [e, n] : nv.each()) {
-            if (n.visible) ordered.push_back({e, n.sortOrder});
-        }
-    }
-    std::stable_sort(ordered.begin(), ordered.end(),
-                     [](const Entry& a, const Entry& b) { return a.order < b.order; });
-
+    // 从每个 Canvas 出发做 DFS。Canvas 的直接子节点 = parent==canvasE 的 UINode。
+    auto canvasView = world.view<UICanvas>();
     int seq = 0;
-    for (const Entry& it : ordered) {
-        const auto& n = world.get<UINode>(it.e);
-        const int baseSort = it.order * 16 + (seq++ & 0xFFFF);
-
-        // 背景
-        if (auto* bg = world.try_get<UIBackground>(it.e)) {
-            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
-                     bg->color, bg->texture, bg->srcRect, baseSort);
+    for (auto [canvasE, c] : canvasView.each()) {
+        struct Entry { entt::entity child; int order; };
+        std::vector<Entry> roots;
+        auto nv = world.view<UINode>();
+        for (auto [child, cn] : nv.each()) {
+            if (cn.parent == canvasE) roots.push_back({child, cn.sortOrder});
         }
-
-        // 按钮（自带状态色）
-        if (auto* btn = world.try_get<UIButton>(it.e)) {
-            core::Color col = btn->normal;
-            if (btn->isDisabled) col = btn->disabled;
-            else if (n.pressed)  col = btn->pressed;
-            else if (n.hovered)  col = btn->hover;
-            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
-                     col, {}, {}, baseSort);
-        }
-
-        // 开关（轨道 + 圆钮）
-        if (auto* tog = world.try_get<UIToggle>(it.e)) {
-            const core::Color trackCol = tog->isOn ? tog->onColor : tog->offColor;
-            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
-                     trackCol, {}, {}, baseSort);
-            const float pad  = 3.f;
-            const float side = std::max(2.f, std::min(n.screenW, n.screenH) - pad * 2.f);
-            const float ky   = n.screenY + (n.screenH - side) * 0.5f;
-            const float kx   = tog->isOn ? (n.screenX + n.screenW - side - pad)
-                                         : (n.screenX + pad);
-            emitRect(kx, ky, side, side, tog->knobColor, {}, {}, baseSort + 1);
-        }
-
-        // 滑动条（轨道 + 填充 + 把手）
-        if (auto* s = world.try_get<UISlider>(it.e)) {
-            const float trackH = std::max(3.f, n.screenH * 0.35f);
-            const float trackY = n.screenY + (n.screenH - trackH) * 0.5f;
-            emitRect(n.screenX, trackY, n.screenW, trackH,
-                     s->trackColor, {}, {}, baseSort);
-
-            float t = (s->max > s->min) ? (s->value - s->min) / (s->max - s->min) : 0.f;
-            t = std::clamp(t, 0.f, 1.f);
-            emitRect(n.screenX, trackY, n.screenW * t, trackH,
-                     s->fillColor, {}, {}, baseSort + 1);
-
-            const float hw = s->handleW;
-            const float hx = n.screenX + n.screenW * t - hw * 0.5f;
-            emitRect(hx, n.screenY, hw, n.screenH,
-                     s->handleColor, {}, {}, baseSort + 2);
-        }
-
-        // 进度条
-        if (auto* pb = world.try_get<UIProgressBar>(it.e)) {
-            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
-                     pb->bgColor, {}, {}, baseSort);
-            const float t = std::clamp(pb->value, 0.f, 1.f);
-            float fx = n.screenX, fy = n.screenY, fw = n.screenW, fh = n.screenH;
-            switch (pb->direction) {
-                case UIProgressBar::Direction::LeftToRight:
-                    fw = n.screenW * t; break;
-                case UIProgressBar::Direction::RightToLeft:
-                    fw = n.screenW * t; fx = n.screenX + n.screenW - fw; break;
-                case UIProgressBar::Direction::TopToBottom:
-                    fh = n.screenH * t; break;
-                case UIProgressBar::Direction::BottomToTop:
-                    fh = n.screenH * t; fy = n.screenY + n.screenH - fh; break;
-            }
-            emitRect(fx, fy, fw, fh, pb->fillColor, {}, {}, baseSort + 1);
-        }
-
-        // 图像
-        if (auto* img = world.try_get<UIImage>(it.e)) {
-            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
-                     img->tint, img->texture, img->srcRect, baseSort);
-        }
-
-        // 文本（最上层）
-        if (auto* lbl = world.try_get<UILabel>(it.e)) {
-            emitText(*lbl, n, baseSort + 8);
-        }
+        std::stable_sort(roots.begin(), roots.end(),
+                         [](const Entry& a, const Entry& b) { return a.order < b.order; });
+        for (const auto& r : roots) buildNodeCommands(r.child, seq, 0);
     }
 }
 
@@ -502,6 +654,8 @@ void UISystem::emitDrawCommands(backend::CommandBuffer& cb) const {
     for (const auto& cmd : uiCommands_) {
         if (auto* s = std::get_if<backend::DrawSpriteCmd>(&cmd))      cb.drawSprite(*s);
         else if (auto* t = std::get_if<backend::DrawTextCmd>(&cmd))   cb.drawText(*t);
+        else if (auto* ps = std::get_if<backend::PushScissorCmd>(&cmd)) cb.pushScissor(*ps);
+        else if (auto* pp = std::get_if<backend::PopScissorCmd>(&cmd))  cb.popScissor(*pp);
     }
 }
 

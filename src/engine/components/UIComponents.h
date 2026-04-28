@@ -167,6 +167,34 @@ struct UILabel {
     VAlign      valign   = VAlign::Middle;
 };
 
+// ── 滚动容器 ────────────────────────────────────────────────────────────────
+// 视口节点本身的 UINode.screenW/H 即可见区域。其直接子节点构成"内容"，会按
+// scrollX/Y 整体平移，并被裁剪到视口矩形内。
+//   - contentW/H 若 <=0，UISystem 每帧自动测量（取子节点 offset+size 的最大值）。
+//   - direction 决定哪些方向参与滚动 / 滚轮响应。
+//   - dragToScroll：在视口空白处按下拖动也能滚（不影响子节点的 Button/Slider）。
+struct UIScrollView {
+    enum class Direction { Vertical, Horizontal, Both };
+    Direction direction = Direction::Vertical;
+
+    float contentW = 0.f;
+    float contentH = 0.f;
+
+    float scrollX = 0.f;
+    float scrollY = 0.f;
+
+    float wheelSpeed   = 40.f;
+    bool  clamp        = true;
+    bool  dragToScroll = true;
+
+    // 运行时
+    bool  dragging = false;
+    float lastPx   = 0.f;
+    float lastPy   = 0.f;
+
+    std::function<void(float, float)> onScroll;   // (scrollX, scrollY)
+};
+
 // ── 拖拽 ────────────────────────────────────────────────────────────────────
 // 约束：拖拽元素假设 anchor=topLeft, pivot=(0,0)，offsetX/Y 直接当作屏幕坐标。
 //      工厂函数 makeDraggable 会强制设好这些参数。

@@ -15,6 +15,8 @@ public:
         justPressed_.clear();
         justReleased_.clear();
         frameEvents_.clear();
+        wheelDx_ = 0.f;
+        wheelDy_ = 0.f;
     }
 
     // IInputProvider::poll() 的 pollEvents 回调里调用
@@ -48,6 +50,10 @@ public:
                 pointers_[e.pointerId].y = e.y;
             }
             break;
+        case T::POINTER_WHEEL:
+            wheelDx_ += e.x;
+            wheelDy_ += e.y;
+            break;
         default: break;
         }
     }
@@ -69,6 +75,9 @@ public:
         return (id >= 0 && id < MAX_POINTERS) ? pointers_[id].y : 0.f;
     }
 
+    float wheelDeltaX() const { return wheelDx_; }
+    float wheelDeltaY() const { return wheelDy_; }
+
 private:
     std::unordered_set<int>              keysDown_;
     std::unordered_set<int>              justPressed_;
@@ -77,6 +86,9 @@ private:
 
     struct PointerState { bool down = false; float x = 0.f, y = 0.f; };
     PointerState pointers_[MAX_POINTERS] = {};
+
+    float wheelDx_ = 0.f;
+    float wheelDy_ = 0.f;
 };
 
 } // namespace engine

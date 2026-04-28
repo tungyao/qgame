@@ -9,6 +9,7 @@ struct InputRawEvent {
         POINTER_DOWN,
         POINTER_MOVE,
         POINTER_UP,
+        POINTER_WHEEL,   // x/y 复用为 wheelDx/wheelDy（单位：滚动 tick）
         KEY_DOWN,
         KEY_UP,
         GAMEPAD_BUTTON,

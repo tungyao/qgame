@@ -102,6 +102,14 @@ void Window::pollEvents(const EventCallback& cb) {
             cb(raw);
             break;
 
+        case SDL_EVENT_MOUSE_WHEEL:
+            raw.type      = InputRawEvent::Type::POINTER_WHEEL;
+            raw.pointerId = 0;
+            raw.x = e.wheel.x;   // 横向 tick
+            raw.y = e.wheel.y;   // 纵向 tick (向上为正)
+            cb(raw);
+            break;
+
         case SDL_EVENT_KEY_DOWN:
             raw.type    = InputRawEvent::Type::KEY_DOWN;
             raw.keyCode = static_cast<int>(e.key.key);

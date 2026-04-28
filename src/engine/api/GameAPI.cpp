@@ -490,6 +490,47 @@ void GameAPI::setUITextAlignment(entt::entity e, int halign) {
     }
 }
 
+// ── ScrollView ──────────────────────────────────────────────────────────────
+
+entt::entity GameAPI::createScrollView(float width, float height, int dir) {
+    entt::entity e = createUIElement();
+    setUISize(e, width, height);
+    auto& sv = ctx_.world.emplace<UIScrollView>(e);
+    sv.direction = (dir == 1) ? UIScrollView::Direction::Horizontal
+                  : (dir == 2) ? UIScrollView::Direction::Both
+                               : UIScrollView::Direction::Vertical;
+    renameEntity(ctx_.world, e, "scrollview");
+    return e;
+}
+
+void GameAPI::setScrollContentSize(entt::entity e, float w, float h) {
+    if (auto* sv = ctx_.world.try_get<UIScrollView>(e)) {
+        sv->contentW = w;
+        sv->contentH = h;
+    }
+}
+
+void GameAPI::setScrollOffset(entt::entity e, float x, float y) {
+    if (auto* sv = ctx_.world.try_get<UIScrollView>(e)) {
+        sv->scrollX = x;
+        sv->scrollY = y;
+    }
+}
+
+void GameAPI::setScrollWheelSpeed(entt::entity e, float speed) {
+    if (auto* sv = ctx_.world.try_get<UIScrollView>(e)) sv->wheelSpeed = speed;
+}
+
+void GameAPI::setScrollOnChanged(entt::entity e, std::function<void(float, float)> cb) {
+    if (auto* sv = ctx_.world.try_get<UIScrollView>(e)) sv->onScroll = std::move(cb);
+}
+
+void GameAPI::getScrollOffset(entt::entity e, float* outX, float* outY) const {
+    auto* sv = ctx_.world.try_get<UIScrollView>(e);
+    if (outX) *outX = sv ? sv->scrollX : 0.f;
+    if (outY) *outY = sv ? sv->scrollY : 0.f;
+}
+
 // ── Draggable ───────────────────────────────────────────────────────────────
 
 void GameAPI::makeDraggable(entt::entity e,

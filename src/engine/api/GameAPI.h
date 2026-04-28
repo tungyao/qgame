@@ -234,6 +234,16 @@ public:
     void setUITextColor(entt::entity e, const core::Color& color);
     void setUITextAlignment(entt::entity e, int halign);  // 0=Left, 1=Center, 2=Right
 
+    // ── ScrollView ───────────────────────────────────────────────────────────
+    // 创建一个滚动容器；其子节点（通过 setUIParent 挂在它下面）会按内部 scroll
+    // 偏移整体平移，并被裁剪到视口矩形。dir: 0=Vertical, 1=Horizontal, 2=Both。
+    entt::entity createScrollView(float width, float height, int dir = 0);
+    void setScrollContentSize(entt::entity e, float w, float h);
+    void setScrollOffset(entt::entity e, float x, float y);
+    void setScrollWheelSpeed(entt::entity e, float speed);
+    void setScrollOnChanged(entt::entity e, std::function<void(float, float)> cb);
+    void getScrollOffset(entt::entity e, float* outX, float* outY) const;
+
     // ── Draggable ────────────────────────────────────────────────────────────
     // 调用后强制 anchor=topLeft, pivot=(0,0)，offset 直接当作屏幕坐标。
     void makeDraggable(entt::entity e,
