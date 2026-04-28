@@ -82,6 +82,23 @@ private:
     // 命中过滤：检查 (px,py) 是否在 e 的所有祖先 ScrollView 视口内
     bool insideScissorAncestors(entt::entity e, float px, float py) const;
 
+    // ── ScrollBar 几何 ───────────────────────────────────────────────────────
+    // 把 UIScrollBar 节点的屏幕矩形与其 target ScrollView 的内容/视口/滚动量
+    // 折算成"主轴上的像素几何"。绘制和命中测试共用，避免两边公式漂移。
+    struct ScrollBarMetrics {
+        bool  needed     = false;   // false 表示内容装得下视口 → autoHide 时不画也不响应
+        float trackStart = 0.f;     // 滑槽起点 (主轴像素)
+        float trackLen   = 0.f;     // 滑槽长度 (主轴像素，已扣 trackPadding)
+        float thumbStart = 0.f;     // 滑块起点 (主轴像素)
+        float thumbLen   = 0.f;     // 滑块长度 (主轴像素)
+        float crossStart = 0.f;     // 厚度方向起点 (交叉轴像素)
+        float crossLen   = 0.f;     // 厚度方向长度 (交叉轴像素)
+        float contentLen = 0.f;     // target 内容主轴长度
+        float viewLen    = 0.f;     // target 视口主轴长度
+        float scroll     = 0.f;     // target 当前主轴 scroll 值
+    };
+    bool computeScrollBarMetrics(entt::entity sb, ScrollBarMetrics& out) const;
+
     // 世界相机参数（取第一个含 World layer 的相机）
     void getWorldCamera(float& camX, float& camY, float& zoom) const;
 

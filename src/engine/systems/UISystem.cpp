@@ -12,7 +12,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
+#include <unordered_map>
 
 namespace engine {
 
@@ -326,6 +328,67 @@ inline bool pointInRectXYWH(float px, float py, float x, float y, float w, float
 }
 } // namespace
 
+// ── ScrollBar 几何换算 ──────────────────────────────────────────────────────
+// 把 UIScrollBar 节点的屏幕矩形（width × height）+ target ScrollView 的状态
+// (contentW/H, screenW/H, scrollX/Y) 折算成主轴像素坐标。所有公式集中在这里：
+//   主轴长度 L = (Vertical: screenH, Horizontal: screenW) - 2 * trackPadding
+//   thumbLen  = clamp( L * V / C, minThumbSize, L )
+//   thumbStart = trackStart + (L - thumbLen) * S / max(C - V, eps)
+// C <= V 时设 needed=false，让调用方决定是否跳过（autoHide）。
+bool UISystem::computeScrollBarMetrics(entt::entity sb, ScrollBarMetrics& out) const {
+    auto& world = ctx_.world;
+    out = {};
+
+    auto* bar  = world.try_get<UIScrollBar>(sb);
+    auto* node = world.try_get<UINode>(sb);
+    if (!bar || !node) return false;
+    if (bar->target == entt::null || !world.valid(bar->target)) return false;
+    auto* sv  = world.try_get<UIScrollView>(bar->target);
+    auto* svn = world.try_get<UINode>(bar->target);
+    if (!sv || !svn) return false;
+
+    const bool vertical = (bar->orientation == UIScrollBar::Orientation::Vertical);
+
+    // 主轴 / 交叉轴几何
+    const float pad      = std::max(0.f, bar->trackPadding);
+    const float mainNode = vertical ? node->screenH : node->screenW;
+    const float crossNd  = vertical ? node->screenW : node->screenH;
+    const float trackLen = std::max(0.f, mainNode - pad * 2.f);
+    const float trackStart = (vertical ? node->screenY : node->screenX) + pad;
+    const float crossStart = vertical ? node->screenX : node->screenY;
+
+    // target 内容/视口/滚动量
+    const float C = vertical ? sv->contentH : sv->contentW;
+    const float V = vertical ? svn->screenH : svn->screenW;
+    const float S = vertical ? sv->scrollY  : sv->scrollX;
+
+    out.trackStart = trackStart;
+    out.trackLen   = trackLen;
+    out.crossStart = crossStart;
+    out.crossLen   = crossNd;
+    out.contentLen = C;
+    out.viewLen    = V;
+    out.scroll     = S;
+
+    // 内容装得下视口：不需要滚动条
+    if (C <= V + 1e-3f || trackLen <= 0.f) {
+        out.needed   = false;
+        out.thumbLen = trackLen;     // 视觉上仍当作"满滑块"，给关闭 autoHide 的场景兜底
+        out.thumbStart = trackStart;
+        return true;
+    }
+
+    float thumbLen = trackLen * (V / C);
+    thumbLen = std::clamp(thumbLen, std::min(bar->minThumbSize, trackLen), trackLen);
+
+    const float travel = std::max(1e-3f, C - V);
+    const float t      = std::clamp(S / travel, 0.f, 1.f);
+    out.thumbLen   = thumbLen;
+    out.thumbStart = trackStart + (trackLen - thumbLen) * t;
+    out.needed     = true;
+    return true;
+}
+
 bool UISystem::insideScissorAncestors(entt::entity e, float px, float py) const {
     auto& world = ctx_.world;
     entt::entity cur = world.get<UINode>(e).parent;
@@ -356,35 +419,82 @@ void UISystem::runInteraction(InputState& input) {
     const bool  justPressed  =  down && !prevPointerDown_;
     const bool  justReleased = !down &&  prevPointerDown_;
     prevPointerDown_ = down;
-    // ── 1. 命中测试（取最上层可交互节点：sortOrder 最大，相等时按 buildCommands
-    //     的稳定迭代顺序——后绘制者在上）。tiebreaker 必须与渲染一致，否则
-    //     重叠的同序节点 hover 会和视觉对不上。
-    entt::entity bestHit = entt::null;
-    int          bestOrder = std::numeric_limits<int>::min();
-    uint32_t     bestSeq   = 0;
+
+    // 先清掉 hovered 标记，hit-test 命中后再回填。
     {
         auto nv = world.view<UINode>();
+        for (auto [e, n] : nv.each()) n.hovered = false;
+    }
+
+    // ── 0. 计算"绘制排名"：DFS 顺序 == buildNodeCommands 的顺序（同级按
+    //     sortOrder 稳定排序，父在子之前）。同位置两节点重叠时，drawRank 大者
+    //     在视觉上覆盖小者，命中也归它。entt 的 view 迭代顺序与绘制顺序无关，
+    //     必须用这张映射做 tiebreak，否则 scrollbar 与 button 重叠时会把点击
+    //     穿透到下层。
+    std::unordered_map<entt::entity, uint64_t> drawRank;
+    {
         uint32_t seq = 0;
+        std::function<void(entt::entity)> dfs = [&](entt::entity e) {
+            auto* n = world.try_get<UINode>(e);
+            if (!n || !n->visible) return;
+            // 高 32 位 = layer（带偏移使负数也能比较），低 32 位 = DFS 序号。
+            const uint64_t lay = static_cast<uint64_t>(
+                static_cast<int64_t>(n->layer) + (1ll << 31));
+            drawRank[e] = (lay << 32) | seq++;
+            struct Entry { entt::entity c; int o; };
+            std::vector<Entry> kids;
+            auto nv = world.view<UINode>();
+            for (auto [c, cn] : nv.each())
+                if (cn.parent == e) kids.push_back({c, cn.sortOrder});
+            std::stable_sort(kids.begin(), kids.end(),
+                [](const Entry& a, const Entry& b) { return a.o < b.o; });
+            for (auto& k : kids) dfs(k.c);
+        };
+        auto canvasView = world.view<UICanvas>();
+        for (auto [canvasE, c] : canvasView.each()) {
+            struct Entry { entt::entity c; int o; };
+            std::vector<Entry> roots;
+            auto nv = world.view<UINode>();
+            for (auto [child, cn] : nv.each())
+                if (cn.parent == canvasE) roots.push_back({child, cn.sortOrder});
+            std::stable_sort(roots.begin(), roots.end(),
+                [](const Entry& a, const Entry& b) { return a.o < b.o; });
+            for (auto& r : roots) dfs(r.c);
+        }
+    }
+    auto rankOf = [&](entt::entity e) -> uint64_t {
+        auto it = drawRank.find(e);
+        return it == drawRank.end() ? 0ull : it->second;
+    };
+
+    // ── 1. 命中测试：在所有可交互节点里挑 drawRank 最大者（最上层）。
+    entt::entity bestHit  = entt::null;
+    uint64_t     bestRank = 0;
+    {
+        auto nv = world.view<UINode>();
         for (auto [e, n] : nv.each()) {
-            n.hovered = false;
-            const uint32_t mySeq = seq++;
             if (!n.visible || !n.interactable) continue;
             if (!pointInRect(px, py, n)) continue;
             // 如果该节点位于某个 ScrollView 子树内，命中点还必须落在那些视口里
             if (!insideScissorAncestors(e, px, py)) continue;
             // 只把真正的交互组件视作命中目标。否则贴在按钮上的 UILabel
-                      // (interactable 默认 true) 会盖住父按钮、屏幕角落的提示文字会
-                          // 偷走拖拽块附近的点击 —— 表现为"按钮命中错位"和"拖几次后无法
-                         // 再拖"。如果业务确实想让背景/标签接受 raycast，自行加上
-                         // UIButton 或调用 setUIInteractable(false) 由用户显式控制。
-               const bool hasInteractor = world.any_of<UIButton, UIToggle, UISlider, UIDraggable, UITooltip, UITextInput>(e);
+            // (interactable 默认 true) 会盖住父按钮、屏幕角落的提示文字会
+            // 偷走拖拽块附近的点击 —— 表现为"按钮命中错位"和"拖几次后无法
+            // 再拖"。如果业务确实想让背景/标签接受 raycast，自行加上
+            // UIButton 或调用 setUIInteractable(false) 由用户显式控制。
+            const bool hasInteractor = world.any_of<UIButton, UIToggle, UISlider, UIDraggable, UITooltip, UITextInput, UIScrollBar>(e);
             if (!hasInteractor) continue;
+            // 隐藏的 ScrollBar (autoHide && 内容装得下视口) 不参与命中，避免在
+            // 上方遮挡其他控件——视觉上不画的东西不应该接收点击。
+            if (auto* bar = world.try_get<UIScrollBar>(e); bar && bar->autoHide) {
+                ScrollBarMetrics m;
+                if (computeScrollBarMetrics(e, m) && !m.needed) continue;
+            }
 
-            if (bestHit == entt::null ||n.sortOrder > bestOrder || (n.sortOrder == bestOrder && mySeq >= bestSeq)) {
-                bestOrder = n.sortOrder;
-                bestSeq   = mySeq;
-                bestHit   = e;
-                break;
+            const uint64_t r = rankOf(e);
+            if (bestHit == entt::null || r >= bestRank) {
+                bestRank = r;
+                bestHit  = e;
             }
         }
     }
@@ -398,15 +508,16 @@ void UISystem::runInteraction(InputState& input) {
         const float wheelDy = input.wheelDeltaY();
 
         entt::entity scrollTarget = entt::null;
-        // 取深度最大的（即最内层）含鼠标的 ScrollView：用 sortOrder 当 tiebreak
-        int bestSO = std::numeric_limits<int>::min();
+        // 取最内层（drawRank 最大）含鼠标的 ScrollView：嵌套时由内向外覆盖。
+        uint64_t bestSvRank = 0;
         auto svv = world.view<UINode, UIScrollView>();
         for (auto [e, n, sv] : svv.each()) {
             if (!n.visible) continue;
             if (!pointInRect(px, py, n)) continue;
             if (!insideScissorAncestors(e, px, py)) continue;
-            if (n.sortOrder >= bestSO) {
-                bestSO = n.sortOrder;
+            const uint64_t r = rankOf(e);
+            if (scrollTarget == entt::null || r >= bestSvRank) {
+                bestSvRank = r;
                 scrollTarget = e;
             }
         }
@@ -472,6 +583,31 @@ void UISystem::runInteraction(InputState& input) {
         }
         if (auto* s = world.try_get<UISlider>(pressed_)) {
             s->dragging = true;
+        }
+        // ── ScrollBar 按下 ────────────────────────────────────────────────
+        // 1) 命中 thumb：进入拖动模式（drag 跟随见 §5b）
+        // 2) 命中 track 空白：根据点在 thumb 哪一侧，把 target 翻一页
+        if (auto* bar = world.try_get<UIScrollBar>(pressed_)) {
+            ScrollBarMetrics m;
+            if (computeScrollBarMetrics(pressed_, m) && m.needed) {
+                const bool vertical = (bar->orientation == UIScrollBar::Orientation::Vertical);
+                const float pmain = vertical ? py : px;
+                const bool onThumb =
+                    pmain >= m.thumbStart && pmain < m.thumbStart + m.thumbLen;
+                if (onThumb) {
+                    bar->dragging         = true;
+                    bar->dragStartPointer = pmain;
+                    bar->dragStartScroll  = m.scroll;
+                } else if (auto* sv = world.try_get<UIScrollView>(bar->target)) {
+                    // 翻页：方向由点在 thumb 之前/之后决定，步长 = 一屏视口
+                    const float dir  = (pmain < m.thumbStart) ? -1.f : 1.f;
+                    const float step = m.viewLen;
+                    if (vertical) sv->scrollY += dir * step;
+                    else          sv->scrollX += dir * step;
+                    if (sv->onScroll) sv->onScroll(sv->scrollX, sv->scrollY);
+                    // 真正的 clamp 由下一帧 layoutNode 完成 (sv->clamp 默认 true)
+                }
+            }
         }
     }
 
@@ -781,6 +917,40 @@ void UISystem::runInteraction(InputState& input) {
         }
     }
 
+    // ── 5b. ScrollBar 拖动跟随 ───────────────────────────────────────────────
+    // 把鼠标主轴位移按 (C - V) / (L - thumbLen) 比率换算成内容滚动量。
+    // 真正的 clamp 由下一帧 layoutNode 用 sv.clamp 完成 (与滚轮/dragToScroll 一致)。
+    if (down) {
+        auto sbv = world.view<UINode, UIScrollBar>();
+        for (auto [e, n, bar] : sbv.each()) {
+            if (!bar.dragging) continue;
+            ScrollBarMetrics m;
+            if (!computeScrollBarMetrics(e, m) || !m.needed) continue;
+            auto* sv = world.try_get<UIScrollView>(bar.target);
+            if (!sv) continue;
+
+            const bool vertical = (bar.orientation == UIScrollBar::Orientation::Vertical);
+            const float pmain   = vertical ? py : px;
+            const float dragRange = std::max(1e-3f, m.trackLen - m.thumbLen);
+            const float scrollRange = std::max(0.f, m.contentLen - m.viewLen);
+            const float deltaPointer = pmain - bar.dragStartPointer;
+            const float newScroll = bar.dragStartScroll
+                                  + deltaPointer * (scrollRange / dragRange);
+
+            if (vertical) {
+                if (sv->scrollY != newScroll) {
+                    sv->scrollY = newScroll;
+                    if (sv->onScroll) sv->onScroll(sv->scrollX, sv->scrollY);
+                }
+            } else {
+                if (sv->scrollX != newScroll) {
+                    sv->scrollX = newScroll;
+                    if (sv->onScroll) sv->onScroll(sv->scrollX, sv->scrollY);
+                }
+            }
+        }
+    }
+
     // ── 4. 拖拽元素跟随：直接改写 offsetX/Y（按工厂约定，此时 anchor=topLeft, pivot=0,0）
     //     offset 必须相对父节点原点存储，否则下一帧 layoutNode 会再叠一次
     //     parent 的 safeArea/screen 偏移，导致命中区相对视觉漂移。
@@ -822,24 +992,19 @@ void UISystem::runInteraction(InputState& input) {
         UIDraggable* pd = (pressed_ != entt::null) ? world.try_get<UIDraggable>(pressed_) : nullptr;
         if (down && pd && pd->dragging) {
             entt::entity newTarget = entt::null;
-            int bestSO = std::numeric_limits<int>::min();
-            uint32_t bestSeq = 0;
-            uint32_t seq = 0;
+            uint64_t bestDtRank = 0;
             auto dtv = world.view<UINode, UIDropTarget>();
             for (auto [e, n, dt] : dtv.each()) {
-                const uint32_t mySeq = seq++;
                 if (e == pressed_) continue;          // 不能投放到自己身上
                 if (!n.visible || !n.interactable) continue;
                 if (!pointInRect(px, py, n)) continue;
                 if (!insideScissorAncestors(e, px, py)) continue;
                 if (!dt.acceptedPayload.empty() && dt.acceptedPayload != pd->payload) continue;
                 if (dt.canAccept && !dt.canAccept(pressed_)) continue;
-                if (newTarget == entt::null
-                    || n.sortOrder > bestSO
-                    || (n.sortOrder == bestSO && mySeq >= bestSeq)) {
-                    bestSO = n.sortOrder;
-                    bestSeq = mySeq;
-                    newTarget = e;
+                const uint64_t r = rankOf(e);
+                if (newTarget == entt::null || r >= bestDtRank) {
+                    bestDtRank = r;
+                    newTarget  = e;
                 }
             }
             if (newTarget != currentDropTarget_) {
@@ -905,6 +1070,9 @@ void UISystem::runInteraction(InputState& input) {
         }
         if (auto* sv = world.try_get<UIScrollView>(pressed_)) {
             sv->dragging = false;
+        }
+        if (auto* bar = world.try_get<UIScrollBar>(pressed_)) {
+            bar->dragging = false;
         }
         pressed_ = entt::null;
     }
@@ -1144,6 +1312,32 @@ void UISystem::emitNodeVisuals(entt::entity e, int baseSort) {
         emitRect(hx, n.screenY, hw, n.screenH,
                  s->handleColor, {}, {}, baseSort + 2);
     }
+    if (auto* bar = world.try_get<UIScrollBar>(e)) {
+        // 视觉：track + thumb 都是纯色矩形。autoHide=true 且内容装得下时整个不画。
+        // hovered/pressed 状态：节点级 hovered_ / dragging 决定 thumb 颜色。
+        ScrollBarMetrics m;
+        const bool ok = computeScrollBarMetrics(e, m);
+        const bool draw = ok && (!bar->autoHide || m.needed);
+        if (draw) {
+            const bool vertical = (bar->orientation == UIScrollBar::Orientation::Vertical);
+            // track
+            emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
+                     bar->trackColor, {}, {}, baseSort);
+            // thumb
+            float tx, ty, tw, th;
+            if (vertical) {
+                tx = m.crossStart; ty = m.thumbStart;
+                tw = m.crossLen;   th = m.thumbLen;
+            } else {
+                tx = m.thumbStart; ty = m.crossStart;
+                tw = m.thumbLen;   th = m.crossLen;
+            }
+            core::Color tc = bar->thumbColor;
+            if (bar->dragging || (pressed_ == e)) tc = bar->thumbPressed;
+            else if (hovered_ == e)               tc = bar->thumbHover;
+            emitRect(tx, ty, tw, th, tc, {}, {}, baseSort + 1);
+        }
+    }
     if (auto* pb = world.try_get<UIProgressBar>(e)) {
         emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
                  pb->bgColor, {}, {}, baseSort);
@@ -1300,7 +1494,9 @@ void UISystem::buildNodeCommands(entt::entity e, int& seq, int /*parentBaseSort*
     const auto& n = world.get<UINode>(e);
     if (!n.visible) return;
 
-    const int baseSort = n.sortOrder * 16 + (seq++ & 0xFFFF);
+    // baseSort = layer * 2^20 + sortOrder * 16 + seq；layer 占高位 → 跨子树
+    // 重叠时大 layer 永远在上，与命中测试 (drawRank 的 layer 高 32 位) 一致。
+    const int baseSort = (n.layer << 20) + n.sortOrder * 16 + (seq++ & 0xFFFF);
 
     // 1) 自身视觉先画
     emitNodeVisuals(e, baseSort);

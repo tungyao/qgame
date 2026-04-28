@@ -1485,6 +1485,26 @@ int main(int argc, char* argv[]) {
 			api.setUISortOrder(lbl, 1);
 		}
 		// contentH 留 0 让 UISystem 自动测量
+
+		// ── ScrollBar：贴在视口右侧 8px 厚的竖条 ──────────────────────────────
+		// 与 ScrollView 同级（同 parent canvas），靠 anchor/offset 把它对齐到视口
+		// 右边缘内侧。target=scroll 让滑块自动反映 scrollY/contentH。
+		{
+			auto sb = api.createScrollBar(scroll, /*Vertical*/0,
+			                              /*thickness*/8.f, /*length*/220.f);
+			api.setUIParent(sb, canvas);
+			// 视口左下角对齐 (40, -40)，宽 240、高 220 → 右侧 = 40+240 = 280
+			// 竖滚条贴在视口内侧右边缘：x=280-8=272, y 跟视口同
+			api.setUIAnchor(sb, 0.f, 1.f, 0.f, 1.f);
+			api.setUIPivot(sb, 0.f, 1.f);
+			api.setUIOffset(sb, 40.f + 240.f - 8.f, -40.f);
+			api.setScrollBarColors(sb,
+				{ 20, 20, 25, 200 },     // track
+				{ 110, 130, 160, 220 },  // thumb
+				{ 150, 170, 200, 240 },  // hover
+				{ 200, 220, 240, 255 }); // pressed
+			api.setScrollBarTrackPadding(sb, 2.f);
+		}
 	}
 
 	// ── 世界空间血条 (跟随 player) ──────────────────────────────────────────────

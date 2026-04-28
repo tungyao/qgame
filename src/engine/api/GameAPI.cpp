@@ -277,6 +277,10 @@ void GameAPI::setUISortOrder(entt::entity e, int order) {
     if (auto* n = ctx_.world.try_get<UINode>(e)) n->sortOrder = order;
 }
 
+void GameAPI::setUILayer(entt::entity e, int layer) {
+    if (auto* n = ctx_.world.try_get<UINode>(e)) n->layer = layer;
+}
+
 void GameAPI::attachToWorld(entt::entity e, entt::entity target,
                             float offsetX, float offsetY) {
     if (!ctx_.world.all_of<UINode>(e)) return;
@@ -530,6 +534,50 @@ void GameAPI::getScrollOffset(entt::entity e, float* outX, float* outY) const {
     auto* sv = ctx_.world.try_get<UIScrollView>(e);
     if (outX) *outX = sv ? sv->scrollX : 0.f;
     if (outY) *outY = sv ? sv->scrollY : 0.f;
+}
+
+// ── ScrollBar ───────────────────────────────────────────────────────────────
+
+entt::entity GameAPI::createScrollBar(entt::entity target, int orientation,
+                                       float thickness, float length) {
+    entt::entity e = createUIElement();
+    auto& bar = ctx_.world.emplace<UIScrollBar>(e);
+    bar.orientation = (orientation == 1) ? UIScrollBar::Orientation::Horizontal
+                                         : UIScrollBar::Orientation::Vertical;
+    bar.target = target;
+    // 主轴 = length，交叉轴 = thickness
+    if (bar.orientation == UIScrollBar::Orientation::Vertical) {
+        setUISize(e, thickness, length);
+    } else {
+        setUISize(e, length, thickness);
+    }
+    renameEntity(ctx_.world, e, "scrollbar");
+    return e;
+}
+
+void GameAPI::setScrollBarColors(entt::entity e,
+                                  const core::Color& track,
+                                  const core::Color& thumb,
+                                  const core::Color& thumbHover,
+                                  const core::Color& thumbPressed) {
+    if (auto* bar = ctx_.world.try_get<UIScrollBar>(e)) {
+        bar->trackColor   = track;
+        bar->thumbColor   = thumb;
+        bar->thumbHover   = thumbHover;
+        bar->thumbPressed = thumbPressed;
+    }
+}
+
+void GameAPI::setScrollBarMinThumbSize(entt::entity e, float size) {
+    if (auto* bar = ctx_.world.try_get<UIScrollBar>(e)) bar->minThumbSize = size;
+}
+
+void GameAPI::setScrollBarTrackPadding(entt::entity e, float pad) {
+    if (auto* bar = ctx_.world.try_get<UIScrollBar>(e)) bar->trackPadding = pad;
+}
+
+void GameAPI::setScrollBarAutoHide(entt::entity e, bool enabled) {
+    if (auto* bar = ctx_.world.try_get<UIScrollBar>(e)) bar->autoHide = enabled;
 }
 
 // ── Mask / Clip ─────────────────────────────────────────────────────────────

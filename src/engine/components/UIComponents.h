@@ -78,6 +78,11 @@ struct UINode {
     bool visible      = true;
     bool interactable = true;
     int  sortOrder    = 0;        // 同层级内排序：大数后画
+    // 全局层级：跨越父子树覆盖 sortOrder 与 DFS 顺序，大数永远在上。用来手动
+    // 解决"scrollbar 与 button 重叠时点击穿透"这类跨子树覆盖问题——把要置顶
+    // 的控件 layer 设大一些即可。0 = 默认（按树形顺序）。绘制和命中共用同一
+    // 比较：先比 layer，再比同一棵 DFS 中的访问次序。
+    int  layer        = 0;
 
     // 运行时计算（屏幕像素，矩形左上角，y-down）
     float screenX = 0.f, screenY = 0.f;
@@ -235,6 +240,60 @@ struct UIScrollView {
 // 同时挂在同一节点上，scissor 仍然只 push 一次（节点自身矩形）。
 struct UIMask {
     bool enabled = true;
+};
+
+// ── 滚动条 ──────────────────────────────────────────────────────────────────
+// 把一个 UINode 标记成 ScrollView 的"滚动条"：节点自身的屏幕矩形即滑槽 (track)，
+// 内部按 target 的 contentW/H、screenW/H、scrollX/Y 自动绘制一个滑块 (thumb)。
+//
+// 主轴定义：
+//   Orientation::Vertical   主轴 = Y，节点高 = 滑槽长度，节点宽 = 滑槽厚度
+//   Orientation::Horizontal 主轴 = X，节点宽 = 滑槽长度，节点高 = 滑槽厚度
+//
+// 滑块尺寸 / 位置（设主轴长度为 L，target 的内容主轴长度为 C，视口主轴长度为 V，
+// 当前滚动量为 S；S 已被 ScrollView::clamp 夹到 [0, C-V]）：
+//   thumbLen   = clamp(L * V / C, minThumbSize, L)        // 比例反映可见占比
+//   thumbStart = (L - thumbLen) * S / (C - V)             // C<=V 时不画 (autoHide)
+//
+// 交互：
+//   - 按住 thumb 拖动：记录按下时的 (pointerMain, scroll)，每帧把鼠标主轴位移
+//     按 (C - V) / (L - thumbLen) 的比率转换成内容滚动量，写回 target.scrollX/Y
+//     并触发其 onScroll 回调（与滚轮/dragToScroll 完全一致的写入路径）。
+//   - 按 track 空白区：往鼠标方向翻一页 (一屏 = V)，鼠标在 thumb 上方=减、下方=加。
+//
+// 视觉：track + thumb 都是纯色矩形，颜色随 hover / pressed 变化。autoHide=true 时
+// 当 C <= V (内容能完全装下) 直接不渲染，但节点的 hovered/pressed 等状态仍然按
+// 普通 UINode 维护——这是为了让"出现/消失"完全跟着内容尺寸跑，不需要业务代码
+// 手动 setUIVisible。
+//
+// 该组件不主动做 layout —— 通常做法是让 ScrollBar 与 ScrollView 同级，靠 anchor
+// 把它贴到视口右侧 (Vertical) 或底部 (Horizontal)；也可以塞进同一父 LayoutGroup
+// 做"列表 + 滚动条"的整体排版。
+struct UIScrollBar {
+    enum class Orientation { Vertical, Horizontal };
+    Orientation  orientation = Orientation::Vertical;
+
+    // 关联的 UIScrollView 实体；非法/缺失时滚动条静默不画 (也不响应交互)。
+    entt::entity target = entt::null;
+
+    // 滑块最小像素尺寸：内容远大于视口时避免滑块退化成几像素难以拖动。
+    float minThumbSize = 16.f;
+
+    // 滑槽内边距：左右(或上下)留白，让滑块不顶到边。
+    float trackPadding = 0.f;
+
+    core::Color trackColor    = {  30,  30,  35, 200 };
+    core::Color thumbColor    = { 120, 120, 130, 220 };
+    core::Color thumbHover    = { 160, 160, 170, 240 };
+    core::Color thumbPressed  = { 200, 200, 210, 255 };
+
+    // 内容能完全装下视口 (contentLen <= viewportLen) 时是否不绘制
+    bool autoHide = true;
+
+    // ── 运行时 (由 UISystem 维护，业务勿手改) ──
+    bool  dragging         = false;
+    float dragStartPointer = 0.f;   // 按下时鼠标主轴像素坐标
+    float dragStartScroll  = 0.f;   // 按下时 target 的 scrollX 或 scrollY
 };
 
 // ── 工具提示 ────────────────────────────────────────────────────────────────

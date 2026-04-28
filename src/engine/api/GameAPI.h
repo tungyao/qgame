@@ -181,6 +181,9 @@ public:
     void setUIInteractable(entt::entity e, bool interactable);
     void setUIVisible(entt::entity e, bool visible);
     void setUISortOrder(entt::entity e, int order);
+    // 全局层级：跨子树覆盖 sortOrder 与树形顺序，layer 大者永远在上（绘制+命中
+    // 一致）。用于显式置顶面板/scrollbar/弹窗，避免与下层控件点击穿透。
+    void setUILayer(entt::entity e, int layer);
     // 让 UI 跟随世界实体（需要 target 含 Transform）。offset 为世界空间偏移。
     void attachToWorld(entt::entity e, entt::entity target,
                        float offsetX = 0.f, float offsetY = 0.f);
@@ -285,6 +288,24 @@ public:
     // 把任意 UI 节点变成"裁剪容器"：其子树的渲染和命中测试都被裁剪到该节点的
     // 屏幕矩形内（与 ScrollView 共用 scissor 机制）。enabled=false 可临时关闭。
     void setUIMask(entt::entity e, bool enabled = true);
+
+    // ── ScrollBar ────────────────────────────────────────────────────────────
+    // 创建一个绑定到指定 ScrollView 的滚动条节点。它本身只是普通 UINode：
+    //   - 调用方负责设置 parent / anchor / offset，决定它贴在视口的哪一侧
+    //   - 节点矩形即"滑槽"，主轴长度 = 节点对应方向的尺寸
+    //   - 滑块尺寸/位置由 ScrollView 的 contentH/W 与 scrollY/X 自动计算
+    // orientation: 0=Vertical, 1=Horizontal。thickness 为交叉轴厚度，
+    // length 为主轴长度（一般直接 = 视口对应方向的尺寸）。
+    entt::entity createScrollBar(entt::entity target, int orientation,
+                                 float thickness, float length);
+    void setScrollBarColors(entt::entity e,
+                            const core::Color& track,
+                            const core::Color& thumb,
+                            const core::Color& thumbHover,
+                            const core::Color& thumbPressed);
+    void setScrollBarMinThumbSize(entt::entity e, float size);
+    void setScrollBarTrackPadding(entt::entity e, float pad);
+    void setScrollBarAutoHide(entt::entity e, bool enabled);
 
     // ── LayoutGroup ──────────────────────────────────────────────────────────
     // 创建一个自动布局容器：其直接子节点会按 type 排成行/列/网格，子节点的
