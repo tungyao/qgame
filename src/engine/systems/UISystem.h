@@ -64,6 +64,10 @@ private:
     void applyLayoutGroup(entt::entity e, float scrollOffX, float scrollOffY);
     void runInteraction(InputState& input);
 
+    // tooltip：每帧累计悬停时间；超过 delay 时由 buildCommands 末尾绘制
+    void updateTooltip(float dt);
+    void emitTooltipIfAny();
+
     // 命令缓存构建
     void buildCommands();
     void buildNodeCommands(entt::entity e, int& seq, int parentBaseSort);
@@ -72,6 +76,8 @@ private:
                   core::Color tint, TextureHandle tex,
                   core::Rect src, int sortKey);
     void emitText(const UILabel& label, const UINode& node, int sortKey);
+    // 把一个九宫格切成 9 个 emitRect 调用（节点矩形 < 边框总和时自动夹紧避免负宽）
+    void emitNineSlice(const UINineSlice& ns, const UINode& node, int sortKey);
 
     // 命中过滤：检查 (px,py) 是否在 e 的所有祖先 ScrollView 视口内
     bool insideScissorAncestors(entt::entity e, float px, float py) const;
@@ -86,6 +92,11 @@ private:
     entt::entity hovered_ = entt::null;
     entt::entity pressed_ = entt::null;
     bool prevPointerDown_ = false;
+
+    // tooltip：跟踪当前悬停的 tooltip 触发器和累计停留时间
+    entt::entity tooltipHovered_ = entt::null;
+    float        tooltipHoverT_  = 0.f;
+    float        pointerSx_ = 0.f, pointerSy_ = 0.f;   // 上一帧鼠标屏幕像素
 
     float screenW_ = 1920.f, screenH_ = 1080.f;
 

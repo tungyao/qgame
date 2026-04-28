@@ -95,6 +95,36 @@ struct UIBackground {
     core::Rect    srcRect;          // (0,0,0,0) = 整张
 };
 
+// ── 九宫格背景 ──────────────────────────────────────────────────────────────
+// 把一张纹理切成 3×3 共 9 块：四角保持原始像素尺寸不缩放，四条边只在自己的主轴
+// 上拉伸，中心同时在两个方向拉伸。常用于对话框、面板、按钮底图——任意尺寸都
+// 不变形，只有中间填充区被拉大。
+//
+// 切分方式：纹理上由 (border.l/t/r/b) 四个像素值确定切线，整张图变成 9 个 srcRect。
+// 渲染时把节点的 screenW/H 减去四角后剩余部分给四边和中心。
+//
+//        srcRect 全图 (w,h)                      节点矩形 (W,H)
+//   ┌───┬─────────────┬───┐               ┌───┬─────────────┬───┐
+//   │TL │     T       │TR │               │TL │      T      │TR │  四角:固定
+//   ├───┼─────────────┼───┤               ├───┼─────────────┼───┤  上下边:横向拉伸
+//   │ L │   Center    │ R │  =拉伸=>      │ L │   Center    │ R │  左右边:纵向拉伸
+//   ├───┼─────────────┼───┤               ├───┼─────────────┼───┤  中心:双向拉伸
+//   │BL │     B       │BR │               │BL │      B      │BR │
+//   └───┴─────────────┴───┘               └───┴─────────────┴───┘
+//
+// fillCenter=false 可以做成"边框模式"——只画 8 块外框，中心透出底层。
+struct UINineSlice {
+    TextureHandle texture;
+    core::Rect    srcRect;            // (0,0,0,0) = 整张纹理
+    // 四向边界（源纹理像素，从 srcRect 内侧切开）
+    float         borderLeft   = 8.f;
+    float         borderTop    = 8.f;
+    float         borderRight  = 8.f;
+    float         borderBottom = 8.f;
+    core::Color   tint         = core::Color::White;
+    bool          fillCenter   = true;
+};
+
 // ── 按钮 ────────────────────────────────────────────────────────────────────
 struct UIButton {
     core::Color normal   = {200, 200, 200, 255};
@@ -193,6 +223,30 @@ struct UIScrollView {
     float lastPy   = 0.f;
 
     std::function<void(float, float)> onScroll;   // (scrollX, scrollY)
+};
+
+// ── 工具提示 ────────────────────────────────────────────────────────────────
+// 给一个 UINode 挂上 UITooltip 后，鼠标在其上停留 delay 秒就会弹出一块带文字
+// 的小面板（紧贴鼠标右下，超出屏幕时自动反向）。鼠标移开/抬起即消失。
+//
+// 实现要点：
+//   - UISystem 维护一个"当前悬停的 tooltip 触发器 + 累计停留时间"，dt>=delay 时
+//     在 buildCommands 末尾追加 tooltip 的矩形+文本命令（最大 sortKey，不进任何
+//     ScrollView 的 scissor 子树，因此不会被裁剪）。
+//   - 文本宽度用 fontSize*0.55 估算（与 emitText 保持一致）。
+//   - 想让没有交互组件(UIButton/Toggle/...)的纯标签也能触发，UISystem 在命中过滤
+//     里把 UITooltip 也算作可命中目标。
+struct UITooltip {
+    std::string text;
+    FontHandle  font;
+    float       fontSize  = 14.f;
+    float       delay     = 0.4f;     // 悬停多久后弹出
+    float       paddingX  = 8.f;
+    float       paddingY  = 6.f;
+    float       offsetX   = 14.f;     // 相对鼠标的偏移（默认右下）
+    float       offsetY   = 18.f;
+    core::Color bgColor   = { 20, 20, 25, 230 };
+    core::Color textColor = core::Color::White;
 };
 
 // ── 自动布局组 ──────────────────────────────────────────────────────────────

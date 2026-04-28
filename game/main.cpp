@@ -49,6 +49,28 @@ static std::vector<uint8_t> makeColorTileset(int tileSize, int cols, int rows) {
 	return px;
 }
 
+// 32×32 九宫格测试纹理：8 像素边框 + 16 像素中心。
+//   - 边框深色 + 1px 内描边亮色（角变化能直观看出"角不缩放、边只拉伸"）
+//   - 中心用纯色 → 拉伸到任意尺寸都不会出现颜色渐变
+static std::vector<uint8_t> makeNineSliceTexture() {
+	const int W = 32, H = 32, B = 8;
+	std::vector<uint8_t> px(W * H * 4, 0);
+	const core::Color border  = { 90, 70, 50, 255 };
+	const core::Color hilight = { 200, 170, 110, 255 };
+	const core::Color center  = { 245, 230, 200, 255 };
+	for (int y = 0; y < H; ++y)
+		for (int x = 0; x < W; ++x) {
+			const bool inBorder = (x < B || x >= W - B || y < B || y >= H - B);
+			core::Color c = inBorder ? border : center;
+			// 内沿(border 与 center 接缝处)绘一圈高亮
+			if ((x == B || x == W - B - 1) && y >= B - 1 && y <= H - B) c = hilight;
+			if ((y == B || y == H - B - 1) && x >= B - 1 && x <= W - B) c = hilight;
+			int i = (y * W + x) * 4;
+			px[i] = c.r; px[i + 1] = c.g; px[i + 2] = c.b; px[i + 3] = c.a;
+		}
+	return px;
+}
+
 static std::vector<uint8_t> makeTextTexture(const std::string& text, core::Color color) {
 	int charW = 8, charH = 16;
 	int texW = static_cast<int>(text.length()) * charW;
@@ -186,6 +208,113 @@ static void buildLayoutTest(engine::GameAPI& api, entt::entity canvas, engine::F
 			api.setUITextColor(lbl, { 240, 235, 200, 255 });
 			api.setUISortOrder(lbl, 1);
 		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NineSlice 测试：放三块尺寸不同的面板，观察四角不缩放、四边只单轴拉伸、中心填满。
+// 同时演示挂在按钮上做"高弹性按钮底图"。
+// ─────────────────────────────────────────────────────────────────────────────
+static void buildNineSliceTest(engine::GameAPI& api, entt::entity canvas,
+                               TextureHandle nsTex, engine::FontHandle font) {
+	auto makePanel = [&](float w, float h, float anchorX, float anchorY,
+	                     float pivotX, float pivotY, float offX, float offY,
+	                     const char* text) {
+		auto p = api.createUIElement();
+		api.setUIParent(p, canvas);
+		api.setUISize(p, w, h);
+		api.setUIAnchor(p, anchorX, anchorY, anchorX, anchorY);
+		api.setUIPivot(p, pivotX, pivotY);
+		api.setUIOffset(p, offX, offY);
+		// 32×32 源纹理，每边 8 像素边框（与 makeNineSliceTexture 一致）
+		api.setUINineSlice(p, nsTex, 8.f, 8.f, 8.f, 8.f);
+
+		auto lbl = api.createUIText(w, h, text);
+		api.setUIParent(lbl, p);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 14.f);
+		api.setUITextColor(lbl, { 80, 60, 40, 255 });
+		api.setUISortOrder(lbl, 1);
+	};
+
+	// 三块面板：宽窄、扁高、正方，验证拉伸正确性
+	makePanel(280.f, 90.f, 0.5f, 0.f, 0.5f, 0.f, -200.f, 80.f, "9-slice 280x90");
+	makePanel(140.f, 200.f, 0.5f, 0.f, 0.5f, 0.f, 0.f,    80.f, "9-slice 140x200");
+	makePanel(180.f, 60.f, 0.5f, 0.f, 0.5f, 0.f, 200.f,  80.f, "9-slice 180x60");
+
+	// 按钮也挂九宫格：保持四角清晰、不再用纯色块
+	{
+		auto btn = api.createButton(160.f, 50.f, []() {
+			printf("[NineSlice] panel button clicked\n");
+		});
+		api.setUIParent(btn, canvas);
+		api.setUIAnchor(btn, 0.5f, 0.f, 0.5f, 0.f);
+		api.setUIPivot(btn, 0.5f, 0.f);
+		api.setUIOffset(btn, 0.f, 200.f);
+		// UIButton 自身的纯色矩形仍会绘制（baseSort 同层），把它调成透明让
+		// NineSlice 透出来；hover/pressed 仍能改 tint。
+		api.setButtonColors(btn, { 0,0,0,0 }, { 255,255,255,40 }, { 0,0,0,80 });
+		api.setUINineSlice(btn, nsTex, 8.f, 8.f, 8.f, 8.f);
+
+		auto lbl = api.createUIText(160.f, 50.f, "9-slice Button");
+		api.setUIParent(lbl, btn);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 16.f);
+		api.setUITextColor(lbl, { 80, 60, 40, 255 });
+		api.setUISortOrder(lbl, 1);
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tooltip 测试：三种延迟、不同位置、含中文/换行的文本，以及一个无交互组件
+// 但仅靠 UITooltip 也能触发的纯标签节点（验证命中过滤已包含 UITooltip）。
+// ─────────────────────────────────────────────────────────────────────────────
+static void buildTooltipTest(engine::GameAPI& api, entt::entity canvas, engine::FontHandle font) {
+	// 1) 普通按钮：默认 0.4s 延迟
+	{
+		auto btn = api.createButton(140.f, 40.f, [](){ printf("[Tip] btn1\n"); });
+		api.setUIParent(btn, canvas);
+		api.setUIAnchor(btn, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(btn, 200.f, 660.f);
+		api.setButtonColors(btn, {80,120,80,255}, {110,160,110,255}, {60,90,60,255});
+		api.setUITooltip(btn, "Hover 0.4s to see this tooltip", font, 14.f, 0.4f);
+
+		auto lbl = api.createUIText(140.f, 40.f, "Tip A");
+		api.setUIParent(lbl, btn);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 14.f);
+		api.setUITextColor(lbl, {240,240,240,255});
+		api.setUISortOrder(lbl, 1);
+	}
+
+	// 2) 立即弹出 (delay=0)，自定义颜色
+	{
+		auto btn = api.createButton(140.f, 40.f, nullptr);
+		api.setUIParent(btn, canvas);
+		api.setUIAnchor(btn, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(btn, 350.f, 660.f);
+		api.setButtonColors(btn, {120,80,80,255}, {160,110,110,255}, {90,60,60,255});
+		api.setUITooltip(btn, "Damage: 24-32  |  Crit: 12%", font, 13.f, 0.f);
+		api.setUITooltipColors(btn, {40,20,20,235}, {255,210,180,255});
+
+		auto lbl = api.createUIText(140.f, 40.f, "Tip B (instant)");
+		api.setUIParent(lbl, btn);
+		api.setUIAnchor(lbl, 0.f, 0.f, 1.f, 1.f);
+		api.setUITextFont(lbl, font, 14.f);
+		api.setUITextColor(lbl, {240,240,240,255});
+		api.setUISortOrder(lbl, 1);
+	}
+
+	// 3) 纯标签 + UITooltip：测试无 UIButton 也能触发
+	{
+		auto lbl = api.createUIText(140.f, 28.f, "Hover me (no button)");
+		api.setUIParent(lbl, canvas);
+		api.setUIAnchor(lbl, 0.f, 0.f, 0.f, 0.f);
+		api.setUIOffset(lbl, 200.f, 710.f);
+		api.setUITextFont(lbl, font, 13.f);
+		api.setUITextColor(lbl, {180,200,255,255});
+		api.setUISize(lbl, 200.f, 28.f);
+		api.setUITooltip(lbl, "Plain label can also have a tooltip", font, 12.f, 0.6f);
 	}
 }
 
@@ -1216,6 +1345,16 @@ int main(int argc, char* argv[]) {
 
 	// ── LayoutGroup 测试（Horizontal / Vertical / Grid） ────────────────────────
 	buildLayoutTest(api, canvas, font);
+
+	// ── NineSlice 测试 ──────────────────────────────────────────────────────────
+	{
+		auto nsPx  = makeNineSliceTexture();
+		auto nsTex = api.createTextureFromMemory(nsPx.data(), 32, 32);
+		buildNineSliceTest(api, canvas, nsTex, font);
+	}
+
+	// ── Tooltip 测试 ────────────────────────────────────────────────────────────
+	buildTooltipTest(api, canvas, font);
 
 	// ── 底部提示 ─────────────────────────────────────────────────────────────────
 	{

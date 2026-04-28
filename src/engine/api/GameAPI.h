@@ -189,6 +189,27 @@ public:
     void setUIBackground(entt::entity e, const core::Color& color,
                          TextureHandle texture = {});
 
+    // ── Tooltip ──────────────────────────────────────────────────────────────
+    // 鼠标在节点上停留 delay 秒后，紧贴鼠标弹出文字面板；移开/抬起立即消失。
+    // 仅 text 必填；不填 font 时使用全局默认字体（fontSize 仍生效）。
+    void setUITooltip(entt::entity e, const char* text,
+                      FontHandle font = {}, float fontSize = 14.f,
+                      float delay = 0.4f);
+    void setUITooltipColors(entt::entity e,
+                            const core::Color& bg, const core::Color& text);
+    void clearUITooltip(entt::entity e);
+
+    // ── NineSlice ────────────────────────────────────────────────────────────
+    // 给一个 UINode 挂上九宫格背景：纹理被切成 3×3，节点缩放时只有边/中心拉伸，
+    // 四角保持原像素尺寸。常用于对话框/面板/按钮底图。
+    // border 单位是源纹理像素。srcRect 留空表示用整张纹理。
+    void setUINineSlice(entt::entity e, TextureHandle texture,
+                        float borderL, float borderT,
+                        float borderR, float borderB,
+                        const core::Color& tint = core::Color::White);
+    void setUINineSliceSrcRect(entt::entity e, float x, float y, float w, float h);
+    void setUINineSliceFillCenter(entt::entity e, bool fillCenter);
+
     // ── Button ───────────────────────────────────────────────────────────────
     entt::entity createButton(float width, float height,
                               std::function<void()> onClick = nullptr);

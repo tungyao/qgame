@@ -532,6 +532,56 @@ void GameAPI::getScrollOffset(entt::entity e, float* outX, float* outY) const {
     if (outY) *outY = sv ? sv->scrollY : 0.f;
 }
 
+// ── Tooltip ─────────────────────────────────────────────────────────────────
+
+void GameAPI::setUITooltip(entt::entity e, const char* text,
+                           FontHandle font, float fontSize, float delay) {
+    if (!ctx_.world.all_of<UINode>(e)) return;
+    auto& t = ctx_.world.get_or_emplace<UITooltip>(e);
+    t.text     = text ? text : "";
+    t.font     = font;
+    t.fontSize = fontSize;
+    t.delay    = delay;
+}
+
+void GameAPI::setUITooltipColors(entt::entity e,
+                                 const core::Color& bg, const core::Color& text) {
+    if (auto* t = ctx_.world.try_get<UITooltip>(e)) {
+        t->bgColor   = bg;
+        t->textColor = text;
+    }
+}
+
+void GameAPI::clearUITooltip(entt::entity e) {
+    if (ctx_.world.all_of<UITooltip>(e)) ctx_.world.remove<UITooltip>(e);
+}
+
+// ── NineSlice ───────────────────────────────────────────────────────────────
+
+void GameAPI::setUINineSlice(entt::entity e, TextureHandle texture,
+                             float borderL, float borderT,
+                             float borderR, float borderB,
+                             const core::Color& tint) {
+    if (!ctx_.world.all_of<UINode>(e)) return;
+    auto& ns = ctx_.world.get_or_emplace<UINineSlice>(e);
+    ns.texture      = texture;
+    ns.borderLeft   = borderL;
+    ns.borderTop    = borderT;
+    ns.borderRight  = borderR;
+    ns.borderBottom = borderB;
+    ns.tint         = tint;
+}
+
+void GameAPI::setUINineSliceSrcRect(entt::entity e, float x, float y, float w, float h) {
+    if (auto* ns = ctx_.world.try_get<UINineSlice>(e)) {
+        ns->srcRect = core::Rect{x, y, w, h};
+    }
+}
+
+void GameAPI::setUINineSliceFillCenter(entt::entity e, bool fillCenter) {
+    if (auto* ns = ctx_.world.try_get<UINineSlice>(e)) ns->fillCenter = fillCenter;
+}
+
 // ── LayoutGroup ─────────────────────────────────────────────────────────────
 
 entt::entity GameAPI::createLayoutGroup(float width, float height, int type) {

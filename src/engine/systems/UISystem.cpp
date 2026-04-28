@@ -42,7 +42,7 @@ void UISystem::ensureWhiteTexture() {
 
 // ───────────────────────────────────────────────────────────────────────────────
 
-void UISystem::update(float /*dt*/) {
+void UISystem::update(float dt) {
     ensureWhiteTexture();
 
     if (ctx_.window) {
@@ -53,6 +53,7 @@ void UISystem::update(float /*dt*/) {
     updateCanvases();
     runLayout();
     runInteraction(ctx_.inputState);
+    updateTooltip(dt);
     buildCommands();
 }
 
@@ -337,6 +338,8 @@ void UISystem::runInteraction(InputState& input) {
 
     const float px = input.pointerX(0) * screenW_;
     const float py = input.pointerY(0) * screenH_;
+    pointerSx_ = px;
+    pointerSy_ = py;
     const bool  down         = input.pointerDown(0);
     const bool  justPressed  =  down && !prevPointerDown_;
     const bool  justReleased = !down &&  prevPointerDown_;
@@ -362,7 +365,7 @@ void UISystem::runInteraction(InputState& input) {
                           // 偷走拖拽块附近的点击 —— 表现为"按钮命中错位"和"拖几次后无法
                          // 再拖"。如果业务确实想让背景/标签接受 raycast，自行加上
                          // UIButton 或调用 setUIInteractable(false) 由用户显式控制。
-               const bool hasInteractor = world.any_of<UIButton, UIToggle, UISlider, UIDraggable>(e);
+               const bool hasInteractor = world.any_of<UIButton, UIToggle, UISlider, UIDraggable, UITooltip>(e);
             if (!hasInteractor) continue;
 
             if (bestHit == entt::null ||n.sortOrder > bestOrder || (n.sortOrder == bestOrder && mySeq >= bestSeq)) {
@@ -627,6 +630,57 @@ void UISystem::emitText(const UILabel& lbl, const UINode& n, int sortKey) {
     uiCommands_.emplace_back(std::move(t));
 }
 
+void UISystem::emitNineSlice(const UINineSlice& ns, const UINode& n, int sortKey) {
+    if (!ns.texture.valid() || n.screenW <= 0.f || n.screenH <= 0.f) return;
+
+    // 解析 srcRect：空表示整张纹理
+    core::Rect src = ns.srcRect;
+    if (src.w <= 0.f || src.h <= 0.f) {
+        int tw = 1, th = 1;
+        ctx_.renderDevice().getTextureDimensions(ns.texture, tw, th);
+        src = core::Rect{0.f, 0.f, static_cast<float>(tw), static_cast<float>(th)};
+    }
+
+    // 边框宽度限制：四角横/纵和不能超过节点尺寸（否则会出现负宽）。
+    // 同样不能超过 srcRect 自身的尺寸，否则中心 src 会反向。
+    const float bl = std::max(0.f, std::min({ns.borderLeft,   n.screenW * 0.5f, src.w * 0.5f}));
+    const float br = std::max(0.f, std::min({ns.borderRight,  n.screenW - bl,    src.w - bl}));
+    const float bt = std::max(0.f, std::min({ns.borderTop,    n.screenH * 0.5f, src.h * 0.5f}));
+    const float bb = std::max(0.f, std::min({ns.borderBottom, n.screenH - bt,    src.h - bt}));
+
+    // 9 个矩形的"目标位置 / 大小"
+    const float x0 = n.screenX,                 x1 = n.screenX + bl,            x2 = n.screenX + n.screenW - br;
+    const float y0 = n.screenY,                 y1 = n.screenY + bt,            y2 = n.screenY + n.screenH - bb;
+    const float wM = std::max(0.f, n.screenW - bl - br);   // 中部宽度
+    const float hM = std::max(0.f, n.screenH - bt - bb);   // 中部高度
+
+    // 9 个矩形的"源纹理 srcRect"
+    const float sx0 = src.x,                     sx1 = src.x + bl,               sx2 = src.x + src.w - br;
+    const float sy0 = src.y,                     sy1 = src.y + bt,               sy2 = src.y + src.h - bb;
+    const float swM = std::max(0.f, src.w - bl - br);
+    const float shM = std::max(0.f, src.h - bt - bb);
+
+    auto put = [&](float dx, float dy, float dw, float dh,
+                   float sx, float sy, float sw, float sh) {
+        if (dw <= 0.f || dh <= 0.f || sw <= 0.f || sh <= 0.f) return;
+        emitRect(dx, dy, dw, dh, ns.tint, ns.texture,
+                 core::Rect{sx, sy, sw, sh}, sortKey);
+    };
+
+    // 4 个角（不缩放：dst=border, src=border）
+    put(x0, y0, bl, bt,  sx0, sy0, bl, bt);   // TL
+    put(x2, y0, br, bt,  sx2, sy0, br, bt);   // TR
+    put(x0, y2, bl, bb,  sx0, sy2, bl, bb);   // BL
+    put(x2, y2, br, bb,  sx2, sy2, br, bb);   // BR
+    // 4 条边（边框尺寸在交叉轴保持，主轴拉伸）
+    put(x1, y0, wM, bt,  sx1, sy0, swM, bt);  // T
+    put(x1, y2, wM, bb,  sx1, sy2, swM, bb);  // B
+    put(x0, y1, bl, hM,  sx0, sy1, bl,  shM); // L
+    put(x2, y1, br, hM,  sx2, sy1, br,  shM); // R
+    // 中心
+    if (ns.fillCenter) put(x1, y1, wM, hM, sx1, sy1, swM, shM);
+}
+
 void UISystem::emitNodeVisuals(entt::entity e, int baseSort) {
     auto& world = ctx_.world;
     const auto& n = world.get<UINode>(e);
@@ -634,6 +688,9 @@ void UISystem::emitNodeVisuals(entt::entity e, int baseSort) {
     if (auto* bg = world.try_get<UIBackground>(e)) {
         emitRect(n.screenX, n.screenY, n.screenW, n.screenH,
                  bg->color, bg->texture, bg->srcRect, baseSort);
+    }
+    if (auto* ns = world.try_get<UINineSlice>(e)) {
+        emitNineSlice(*ns, n, baseSort);
     }
     if (auto* btn = world.try_get<UIButton>(e)) {
         core::Color col = btn->normal;
@@ -751,6 +808,69 @@ void UISystem::buildCommands() {
                          [](const Entry& a, const Entry& b) { return a.order < b.order; });
         for (const auto& r : roots) buildNodeCommands(r.child, seq, 0);
     }
+
+    // tooltip：绘制在所有 UI 之上，且不进入任何 ScrollView 的 scissor 子树。
+    emitTooltipIfAny();
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Tooltip
+// ───────────────────────────────────────────────────────────────────────────────
+void UISystem::updateTooltip(float dt) {
+    auto& world = ctx_.world;
+    // 当前悬停节点是否带 UITooltip？
+    const bool hasTip = (hovered_ != entt::null) && world.all_of<UITooltip>(hovered_);
+    if (!hasTip) {
+        tooltipHovered_ = entt::null;
+        tooltipHoverT_  = 0.f;
+        return;
+    }
+    if (hovered_ != tooltipHovered_) {
+        // 切换到新的触发器：重新计时
+        tooltipHovered_ = hovered_;
+        tooltipHoverT_  = 0.f;
+    } else {
+        tooltipHoverT_ += dt;
+    }
+}
+
+void UISystem::emitTooltipIfAny() {
+    if (tooltipHovered_ == entt::null) return;
+    auto& world = ctx_.world;
+    auto* tip = world.try_get<UITooltip>(tooltipHovered_);
+    if (!tip || tip->text.empty()) return;
+    if (tooltipHoverT_ < tip->delay) return;
+
+    // 估算文本框尺寸（与 emitText 的近似宽度公式保持一致）
+    const float approxW = static_cast<float>(tip->text.size()) * tip->fontSize * 0.55f;
+    const float boxW = approxW + tip->paddingX * 2.f;
+    const float boxH = tip->fontSize * 1.2f + tip->paddingY * 2.f;
+
+    // 默认放在鼠标右下；超出屏幕就反向，保证完整可见
+    float x = pointerSx_ + tip->offsetX;
+    float y = pointerSy_ + tip->offsetY;
+    if (x + boxW > screenW_) x = pointerSx_ - tip->offsetX - boxW;
+    if (y + boxH > screenH_) y = pointerSy_ - tip->offsetY - boxH;
+    if (x < 0.f) x = 0.f;
+    if (y < 0.f) y = 0.f;
+
+    // sortKey 取一个非常大的值，保证在所有 UI 之上；不被 scissor 包围
+    const int kTipSort = std::numeric_limits<int>::max() - 16;
+    emitRect(x, y, boxW, boxH, tip->bgColor, {}, {}, kTipSort);
+
+    UILabel lbl;
+    lbl.text     = tip->text;
+    lbl.font     = tip->font;
+    lbl.fontSize = tip->fontSize;
+    lbl.color    = tip->textColor;
+    lbl.halign   = UILabel::HAlign::Left;
+    lbl.valign   = UILabel::VAlign::Middle;
+    UINode fake{};
+    fake.screenX = x + tip->paddingX;
+    fake.screenY = y;
+    fake.screenW = boxW - tip->paddingX * 2.f;
+    fake.screenH = boxH;
+    emitText(lbl, fake, kTipSort + 1);
 }
 
 void UISystem::emitDrawCommands(backend::CommandBuffer& cb) const {
