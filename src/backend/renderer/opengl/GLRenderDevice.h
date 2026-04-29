@@ -2,6 +2,7 @@
 #include "../IRenderDevice.h"
 #include "../../../core/containers/HandleMap.h"
 #include <SDL3/SDL.h>
+#include <array>
 #include <vector>
 
 namespace backend {
@@ -89,6 +90,10 @@ private:
         float         pxRange = 4.0f;
         bool          hasScissor = false;
         int           scissorX = 0, scissorY = 0, scissorW = 0, scissorH = 0;
+        // Region tint
+        bool          hasRegion = false;
+        TextureHandle regionTex;
+        std::array<core::Color, 16> regionTints{};
     };
 
     static constexpr int MAX_SPRITES_PER_BATCH = 2048;
@@ -122,6 +127,12 @@ private:
     unsigned int shaderProgram_ = 0;
     int          uProjLoc_      = -1;
     int          uTexLoc_       = -1;
+    int          uRegionTexLoc_ = -1;
+    int          uRegionTintsLoc_ = -1;
+    int          uHasRegionLoc_   = -1;
+
+    // 1×1 R8 dummy region 纹理（uHasRegion=0 时绑定，避免 sampler 未绑定 UB）
+    TextureHandle dummyRegionTex_{};
     
     // MSDF font shader
     unsigned int msdfShaderProgram_ = 0;

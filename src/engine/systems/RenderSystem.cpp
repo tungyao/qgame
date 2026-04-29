@@ -340,6 +340,20 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         } else {
             s.tint = sprite.tint;
         }
+
+        // Region tint：Tinting 组件 + sibling .id.png 都存在才生效。
+        if (const Tinting* tnt = ctx.world.try_get<Tinting>(ent)) {
+            TextureHandle regionTex = ctx.assetManager.regionIdTexture(sprite.texture);
+            if (regionTex.valid()) {
+                s.hasRegion = true;
+                s.regionTex = regionTex;
+                for (int i = 0; i < Tinting::MAX_REGIONS; ++i) {
+                    s.regionTints[i] = tnt->slots[i].enabled
+                        ? tnt->slots[i].color
+                        : core::Color::White;  // passthrough = 与 White 相乘
+                }
+            }
+        }
         drawables.push_back(d);
     }
 

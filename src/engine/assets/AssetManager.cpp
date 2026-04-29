@@ -28,8 +28,10 @@ void AssetManager::shutdown() {
             render_->destroyFont(e.handle);
             if (e.atlas.valid()) render_->destroyTexture(e.atlas);
         }
-        for (auto& [path, e] : texByPath_)
+        for (auto& [path, e] : texByPath_) {
+            if (e.regionId.valid()) render_->destroyTexture(e.regionId);
             render_->destroyTexture(e.handle);
+        }
     }
     if (audio_) {
         for (auto& [path, e] : sndByPath_)
@@ -71,10 +73,55 @@ TextureHandle AssetManager::loadTexture(const std::string& path) {
 
     if (!h_tex.valid()) return {};
 
+    // sibling region ID 图：<path>.id.png（约定单通道 R8，不存在则忽略）
+    TextureHandle h_region{};
+    {
+        std::filesystem::path sib = std::filesystem::path(path);
+        sib.replace_extension();        // 去掉原后缀（含 .）
+        sib += ".id.png";
+        if (std::filesystem::exists(sib)) {
+            int rw = 0, rh = 0, rch = 0;
+            // 强制读 R 通道（stbi 会按需转换）
+            unsigned char* rpix = stbi_load(sib.string().c_str(), &rw, &rh, &rch, 1);
+            if (!rpix) {
+                core::logWarn("[AssetManager] region id sibling exists but failed to load: %s",
+                              sib.string().c_str());
+            } else if (rw != w || rh != h) {
+                core::logWarn("[AssetManager] region id %s size %dx%d != base %dx%d, ignored",
+                              sib.string().c_str(), rw, rh, w, h);
+                stbi_image_free(rpix);
+            } else {
+                backend::TextureDesc rdesc{};
+                rdesc.data     = rpix;
+                rdesc.width    = rw;
+                rdesc.height   = rh;
+                rdesc.channels = 1;
+                rdesc.format   = backend::TextureFormat::R8;
+                rdesc.filter   = backend::TextureFilter::Nearest;  // ID 必须 nearest
+                h_region = render_->createTexture(rdesc);
+                stbi_image_free(rpix);
+                if (!h_region.valid()) {
+                    core::logWarn("[AssetManager] failed to create region id GPU texture: %s",
+                                  sib.string().c_str());
+                }
+            }
+        }
+    }
+
     uint32_t id = (uint32_t(h_tex.index) << 12) | h_tex.version;
-    texByPath_[path]  = {h_tex, 1};
+    texByPath_[path]  = {h_tex, 1, h_region};
     texPathById_[id]  = path;
     return h_tex;
+}
+
+TextureHandle AssetManager::regionIdTexture(TextureHandle base) const {
+    if (!base.valid()) return {};
+    uint32_t id = (uint32_t(base.index) << 12) | base.version;
+    auto pit = texPathById_.find(id);
+    if (pit == texPathById_.end()) return {};
+    auto it = texByPath_.find(pit->second);
+    if (it == texByPath_.end()) return {};
+    return it->second.regionId;
 }
 
 SoundHandle AssetManager::loadSound(const std::string& path) {
@@ -106,6 +153,7 @@ void AssetManager::releaseTexture(TextureHandle h) {
 
     auto& entry = texByPath_[pit->second];
     if (--entry.refCount <= 0) {
+        if (entry.regionId.valid()) render_->destroyTexture(entry.regionId);
         render_->destroyTexture(h);
         texByPath_.erase(pit->second);
         texPathById_.erase(id);

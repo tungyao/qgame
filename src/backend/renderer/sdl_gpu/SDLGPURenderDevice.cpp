@@ -150,6 +150,20 @@ void SDLGPURenderDevice::init() {
 
     // 5. 创建所有渲染管线 (sprite, MSDF, GPU-driven)
     createPipeline();
+
+    // 6. 1×1 R8 dummy region 纹理（无 region 时绑到 sampler 槽 1）
+    {
+        TextureDesc dd{};
+        const uint8_t zero = 0;
+        dd.data = &zero;
+        dd.width = 1;
+        dd.height = 1;
+        dd.channels = 1;
+        dd.format = TextureFormat::R8;
+        dd.filter = TextureFilter::Nearest;
+        dummyRegionTex_ = createTexture(dd);
+    }
+
     core::logInfo("SDLGPURenderDevice initialized");
 }
 
@@ -192,6 +206,12 @@ void SDLGPURenderDevice::shutdown() {
 
     // 等待所有 GPU 操作完成，避免释放正在使用的资源
     SDL_WaitForGPUIdle(device_);
+
+    // 释放 dummy region 纹理
+    if (textures_.valid(dummyRegionTex_)) {
+        destroyTexture(dummyRegionTex_);
+        dummyRegionTex_ = {};
+    }
 
     // 释放离屏渲染目标 (editor + offscreen)
     if (textures_.valid(editorRenderTarget_)) {
@@ -255,10 +275,14 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
         return {};
     }
 
-    // 1. 创建 GPU 纹理对象 — 2D, R8G8B8A8_UNORM, 仅采样使用
+    const bool isR8 = (desc.format == TextureFormat::R8);
+    const uint32_t bytesPerPixel = isR8 ? 1u : 4u;
+
+    // 1. 创建 GPU 纹理对象 — 2D, RGBA8 或 R8, 仅采样使用
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
-    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.format = isR8 ? SDL_GPU_TEXTUREFORMAT_R8_UNORM
+                       : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
     info.width = static_cast<uint32_t>(desc.width);
     info.height = static_cast<uint32_t>(desc.height);
@@ -275,7 +299,7 @@ TextureHandle SDLGPURenderDevice::createTexture(const TextureDesc& desc) {
     // 2. 通过 transfer buffer 将像素数据上传到 GPU 纹理
     //    流程: CPU data → transfer buffer (map/memcpy/unmap)
     //          → copy pass (UploadToGPUTexture) → submit
-    const size_t dataSize = static_cast<size_t>(desc.width) * static_cast<size_t>(desc.height) * 4u;
+    const size_t dataSize = static_cast<size_t>(desc.width) * static_cast<size_t>(desc.height) * bytesPerPixel;
     SDL_GPUTransferBufferCreateInfo tbInfo{};
     tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     tbInfo.size = static_cast<uint32_t>(dataSize);
@@ -863,6 +887,10 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
     uint32_t      batchIdxStart  = 0;
     int32_t       batchVertStart = 0;
 
+    bool                              currentHasRegion = false;
+    TextureHandle                     currentRegionTex{};
+    std::array<core::Color, 16>       currentRegionTints{};
+
     // Scissor 栈 (屏幕像素 / framebuffer 坐标，整数化)。每次 push 取与栈顶交集；
     // pop 回退到上一层。栈空时 hasScissor=false，绘制时不调用 SetGPUScissor。
     struct ScissorRect { int x, y, w, h; };
@@ -872,9 +900,13 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
 
     auto flush = [&]() {
         if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-            BatchSegment seg{ currentTex, batchIdxStart,
-                              static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                              batchVertStart, currentIsFont, currentPxRange };
+            BatchSegment seg{};
+            seg.tex        = currentTex;
+            seg.idxOffset  = batchIdxStart;
+            seg.idxCount   = static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart;
+            seg.vertOffset = batchVertStart;
+            seg.isFont     = currentIsFont;
+            seg.pxRange    = currentPxRange;
             seg.hasScissor = currentHasScissor;
             if (currentHasScissor) {
                 seg.scissorX = currentScissor.x;
@@ -882,20 +914,42 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
                 seg.scissorW = currentScissor.w;
                 seg.scissorH = currentScissor.h;
             }
+            seg.hasRegion   = currentHasRegion;
+            seg.regionTex   = currentRegionTex;
+            seg.regionTints = currentRegionTints;
             batches.push_back(seg);
             batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
             batchVertStart = static_cast<int32_t>(batchVerts_.size());
         }
     };
-    auto maybeFlush = [&](TextureHandle tex, bool isFont = false, float pxRange = 4.0f) {
+    auto regionStateDiffers = [&](bool hasRegion, TextureHandle regionTex,
+                                  const std::array<core::Color, 16>* tints) {
+        if (currentHasRegion != hasRegion) return true;
+        if (!hasRegion) return false;
+        if (currentRegionTex != regionTex) return true;
+        return std::memcmp(currentRegionTints.data(), tints->data(),
+                           sizeof(core::Color) * 16) != 0;
+    };
+    auto maybeFlush = [&](TextureHandle tex, bool isFont = false, float pxRange = 4.0f,
+                          bool hasRegion = false, TextureHandle regionTex = {},
+                          const std::array<core::Color, 16>* regionTints = nullptr) {
         const bool batchFull =
             (batchVerts_.size() - static_cast<size_t>(batchVertStart) >= MAX_SPRITES_PER_BATCH * 4);
+        const bool regionDiff = regionStateDiffers(hasRegion, regionTex, regionTints);
         if (!hasCurrent || tex != currentTex || batchFull ||
-            currentIsFont != isFont || (isFont && currentPxRange != pxRange)) {
+            currentIsFont != isFont || (isFont && currentPxRange != pxRange) ||
+            regionDiff) {
             flush();
             currentTex = tex;
             currentIsFont = isFont;
             currentPxRange = pxRange;
+            currentHasRegion = hasRegion;
+            currentRegionTex = regionTex;
+            if (hasRegion && regionTints) {
+                currentRegionTints = *regionTints;
+            } else {
+                currentRegionTints = {};
+            }
             hasCurrent = true;
         }
     };
@@ -921,7 +975,8 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
 
     for (const RenderCmd* cmd : cmds) {
         if (auto* s = std::get_if<DrawSpriteCmd>(cmd)) {
-            maybeFlush(s->texture);
+            maybeFlush(s->texture, false, 4.0f,
+                       s->hasRegion, s->regionTex, &s->regionTints);
             const float hw = s->srcRect.w * s->scaleX * 0.5f;
             const float hh = s->srcRect.h * s->scaleY * 0.5f;
             const float cosR = cosf(s->rotation);
@@ -1127,13 +1182,40 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
 
             if (textures_.valid(segment.tex)) {
                 TextureEntry& entry = textures_.get(segment.tex);
-                SDL_GPUTextureSamplerBinding binding{ entry.gpuTex, entry.sampler };
-                SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+                if (segment.isFont) {
+                    SDL_GPUTextureSamplerBinding binding{ entry.gpuTex, entry.sampler };
+                    SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+                } else {
+                    // Sprite pipeline: 2 个 sampler 槽 (base + region)
+                    TextureHandle rtex = (segment.hasRegion && textures_.valid(segment.regionTex))
+                        ? segment.regionTex : dummyRegionTex_;
+                    TextureEntry* rEntry = textures_.valid(rtex) ? &textures_.get(rtex) : nullptr;
+                    SDL_GPUTextureSamplerBinding bindings[2]{};
+                    bindings[0] = { entry.gpuTex, entry.sampler };
+                    bindings[1] = rEntry ? SDL_GPUTextureSamplerBinding{ rEntry->gpuTex, rEntry->sampler }
+                                         : bindings[0];
+                    SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
+                }
             }
 
             if (segment.isFont) {
                 float pxRange = segment.pxRange;
                 SDL_PushGPUFragmentUniformData(cmdBuf, 0, &pxRange, sizeof(pxRange));
+            } else {
+                // Sprite UBO: regionTints[16] (float4×16) + hasRegion (int) + 12B pad → 272B
+                struct alignas(16) TintUBO {
+                    float regionTints[16][4];
+                    int   hasRegion;
+                    int   _pad0, _pad1, _pad2;
+                } ubo{};
+                for (int i = 0; i < 16; ++i) {
+                    ubo.regionTints[i][0] = segment.regionTints[i].r / 255.f;
+                    ubo.regionTints[i][1] = segment.regionTints[i].g / 255.f;
+                    ubo.regionTints[i][2] = segment.regionTints[i].b / 255.f;
+                    ubo.regionTints[i][3] = segment.regionTints[i].a / 255.f;
+                }
+                ubo.hasRegion = segment.hasRegion ? 1 : 0;
+                SDL_PushGPUFragmentUniformData(cmdBuf, 0, &ubo, sizeof(ubo));
             }
 
             if (segment.hasScissor) {
@@ -1329,11 +1411,11 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUText
     SDL_GPUShader* fs = nullptr;
     if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
         vs = loadShader(sprite_vert_spv, sprite_vert_spv_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
-        fs = loadShader(sprite_frag_spv, sprite_frag_spv_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, SDL_GPU_SHADERFORMAT_SPIRV);
+        fs = loadShader(sprite_frag_spv, sprite_frag_spv_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_SPIRV);
 #ifdef QGAME_HAS_DXIL_SHADERS
     } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
         vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
-        fs = loadShader(sprite_frag_dxil, sprite_frag_dxil_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, SDL_GPU_SHADERFORMAT_DXIL);
+        fs = loadShader(sprite_frag_dxil, sprite_frag_dxil_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_DXIL);
 #endif
     }
     if (!vs || !fs) {

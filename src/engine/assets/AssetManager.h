@@ -31,6 +31,9 @@ public:
     void releaseAnimation(AnimationHandle h);
     void releaseFont(FontHandle h);
 
+    // 返回与 base 关联的 region ID 图（sibling "<path>.id.png"）。无则返回空 handle。
+    TextureHandle regionIdTexture(TextureHandle base) const;
+
     // 通过 handle 反查路径（SceneSerializer 序列化时用）
     const std::string& texturePath(TextureHandle h) const;
     const std::string& soundPath(SoundHandle h)    const;
@@ -47,7 +50,7 @@ private:
     backend::IRenderDevice* render_ = nullptr;
     backend::IAudioDevice*  audio_  = nullptr;
 
-    struct TexEntry { TextureHandle handle; int refCount = 0; };
+    struct TexEntry { TextureHandle handle; int refCount = 0; TextureHandle regionId; };
     struct SndEntry { SoundHandle   handle; int refCount = 0; };
     struct AnimEntry { AnimationHandle handle; int refCount = 0; AnimationClip clip; };
     struct FontEntry { FontHandle handle; TextureHandle atlas; int refCount = 0; };

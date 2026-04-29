@@ -827,6 +827,58 @@ int main(int argc, char* argv[]) {
 		api.addComponent(e, sp);
 	}
 
+	// ── Region Tint Demo：10 个不同 LUT 的角色 + 颜色平滑切换 ───────────────
+	//   sprite/char.png 是纯白可染色区域 + 黑色眼睛；sibling char.id.png 提供 region ID 图。
+	//   region IDs：1=皮肤  2=头发  3=上衣  4=裤子  5=鞋
+	struct TintPalette {
+		core::Color skin, hair, shirt, pants, shoes;
+	};
+	static const TintPalette kTintPalettes[10] = {
+		{ {255,210,170,255}, { 80, 50, 30,255}, {240,240,240,255}, { 60, 80,160,255}, { 40, 30, 20,255} },
+		{ {220,190,150,255}, { 60,100, 40,255}, { 90,140, 70,255}, { 50, 80, 30,255}, { 70, 50, 30,255} },
+		{ {255,225,200,255}, {220,120,180,255}, {255,180,210,255}, {200, 80,140,255}, {120, 60, 90,255} },
+		{ {255,200,170,255}, {180, 30, 30,255}, {220, 60, 50,255}, {120, 30, 30,255}, { 60, 20, 20,255} },
+		{ {220,200,180,255}, {120, 60,180,255}, {140, 80,200,255}, { 70, 40,120,255}, { 40, 20, 70,255} },
+		{ {255,220,180,255}, {240,200, 60,255}, {255,230, 80,255}, {200,160, 30,255}, {120, 90, 30,255} },
+		{ {230,230,255,255}, {200,200,220,255}, {220,220,240,255}, {180,180,210,255}, {140,140,170,255} },
+		{ {220,220,200,255}, { 30,140,160,255}, { 60,180,200,255}, { 30, 90,120,255}, { 20, 50, 70,255} },
+		{ {255,210,170,255}, {200, 80, 30,255}, {255,140, 50,255}, {120, 60, 30,255}, { 60, 30, 10,255} },
+		{ { 90, 70, 60,255}, { 30, 30, 40,255}, { 50, 50, 70,255}, { 20, 20, 30,255}, { 10, 10, 20,255} },
+	};
+	std::vector<entt::entity> tintDemoEntities;
+	{
+		TextureHandle charTex = api.assetManager().loadTexture("assets/sprites/char.png");
+		if (charTex.valid()) {
+			for (int i = 0; i < 10; ++i) {
+				auto e = api.spawnEntity();
+				engine::Transform tf{};
+				tf.x = 60.f + (i % 5) * 110.f;
+				tf.y = -150.f + (i / 5) * 200.f;
+				tf.scaleX = tf.scaleY = 2.5f;
+				api.addComponent(e, tf);
+
+				engine::Sprite sp{};
+				sp.texture = charTex;
+				sp.srcRect = { 0.f, 0.f, 32.f, 48.f };
+				sp.layer = 2;
+				sp.pass = engine::RenderPass::World;
+				api.addComponent(e, sp);
+
+				const TintPalette& p = kTintPalettes[i];
+				engine::Tinting tnt{};
+				tnt.slots[1] = { true, p.skin };
+				tnt.slots[2] = { true, p.hair };
+				tnt.slots[3] = { true, p.shirt };
+				tnt.slots[4] = { true, p.pants };
+				tnt.slots[5] = { true, p.shoes };
+				api.addComponent(e, tnt);
+				tintDemoEntities.push_back(e);
+			}
+		} else {
+			SDL_Log("[main] failed to load assets/sprites/char.png — Tinting demo skipped");
+		}
+	}
+
 	// ── Player (带动画) ───────────────────────────────────────────────────────
 	entt::entity player;
 	{
@@ -1893,9 +1945,38 @@ int main(int argc, char* argv[]) {
 	bool gpuDrivenEnabled = false;
 
 	float maskRunT = 0.f;
+	float tintDemoT = 0.f;
 	while (ctx.scheduler.tick()) {
 		float dt = ctx.scheduler.deltaTime();
 		auto& anim = api.getComponent<engine::AnimatorComponent>(player);
+
+		// Region Tint demo：每个 entity 在调色板间循环平滑过渡。
+		// 每段 transition 持续 kCycleSec 秒；entity i 的相位偏移 i*0.6 错峰。
+		if (!tintDemoEntities.empty()) {
+			tintDemoT += dt;
+			constexpr float kCycleSec = 2.5f;
+			auto lerpU8 = [](uint8_t a, uint8_t b, float t) -> uint8_t {
+				return static_cast<uint8_t>(int(a) + int(int(b) - int(a)) * t);
+			};
+			auto lerpColor = [&](core::Color a, core::Color b, float t) {
+				return core::Color{ lerpU8(a.r,b.r,t), lerpU8(a.g,b.g,t),
+				                    lerpU8(a.b,b.b,t), lerpU8(a.a,b.a,t) };
+			};
+			for (size_t i = 0; i < tintDemoEntities.size(); ++i) {
+				const float phase = tintDemoT / kCycleSec + static_cast<float>(i) * 0.6f;
+				const int   pIdx  = static_cast<int>(std::floor(phase));
+				float       f     = phase - static_cast<float>(pIdx);
+				f = f * f * (3.f - 2.f * f);  // smoothstep
+				const TintPalette& a = kTintPalettes[((pIdx)     % 10 + 10) % 10];
+				const TintPalette& b = kTintPalettes[((pIdx + 1) % 10 + 10) % 10];
+				auto& tnt = api.getComponent<engine::Tinting>(tintDemoEntities[i]);
+				tnt.slots[1].color = lerpColor(a.skin,  b.skin,  f);
+				tnt.slots[2].color = lerpColor(a.hair,  b.hair,  f);
+				tnt.slots[3].color = lerpColor(a.shirt, b.shirt, f);
+				tnt.slots[4].color = lerpColor(a.pants, b.pants, f);
+				tnt.slots[5].color = lerpColor(a.shoes, b.shoes, f);
+			}
+		}
 
 		// UIMask runner: 在 200 宽的面板里左右往返 (-30 → 230)，方块本身 40 宽，
 		// 所以两侧各有 ~30px 会越过边界 —— 启用 mask 时被裁掉、关闭时溢出可见。

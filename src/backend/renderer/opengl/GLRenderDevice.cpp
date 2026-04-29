@@ -38,6 +38,7 @@ static PFNGLGETUNIFORMLOCATIONPROC          s_glGetUniformLocation      = nullpt
 static PFNGLUNIFORMMATRIX4FVPROC            s_glUniformMatrix4fv        = nullptr;
 static PFNGLUNIFORM1IPROC                   s_glUniform1i               = nullptr;
 static PFNGLUNIFORM1FPROC                   s_glUniform1f               = nullptr;
+static PFNGLUNIFORM4FVPROC                  s_glUniform4fv              = nullptr;
 static PFNGLENABLEVERTEXATTRIBARRAYPROC     s_glEnableVertexAttribArray = nullptr;
 static PFNGLVERTEXATTRIBPOINTERPROC         s_glVertexAttribPointer     = nullptr;
 // GL 3.0
@@ -80,6 +81,7 @@ static PFNGLDELETESYNCPROC                  s_glDeleteSync              = nullpt
 #define glUniformMatrix4fv        s_glUniformMatrix4fv
 #define glUniform1i               s_glUniform1i
 #define glUniform1f               s_glUniform1f
+#define glUniform4fv              s_glUniform4fv
 #define glEnableVertexAttribArray s_glEnableVertexAttribArray
 #define glVertexAttribPointer     s_glVertexAttribPointer
 #define glGenVertexArrays         s_glGenVertexArrays
@@ -128,6 +130,7 @@ static bool loadGLFunctions() {
     QGAME_GL_LOAD(DeleteProgram)           QGAME_GL_LOAD(GetUniformLocation)
     QGAME_GL_LOAD(UniformMatrix4fv)        QGAME_GL_LOAD(Uniform1i)
     QGAME_GL_LOAD(Uniform1f)
+    QGAME_GL_LOAD(Uniform4fv)
     QGAME_GL_LOAD(EnableVertexAttribArray) QGAME_GL_LOAD(VertexAttribPointer)
     QGAME_GL_LOAD(GenVertexArrays)         QGAME_GL_LOAD(BindVertexArray)
     QGAME_GL_LOAD(DeleteVertexArrays)
@@ -164,9 +167,20 @@ static const char* k_fragSrc = R"(
 in vec2 vUV;
 in vec4 vColor;
 uniform sampler2D uTexture;
+uniform sampler2D uRegionTex;        // R8 region ID 图（无则绑 dummy）
+uniform vec4      uRegionTints[16];  // 每个 region ID 对应的颜色（multiply）
+uniform int       uHasRegion;        // 0 = 不染色（passthrough）
 out vec4 fragColor;
 void main() {
-    fragColor = texture(uTexture, vUV) * vColor;
+    vec4 base = texture(uTexture, vUV) * vColor;
+    if (uHasRegion != 0) {
+        float idF = texture(uRegionTex, vUV).r;     // 0..1
+        int id = int(idF * 255.0 + 0.5);
+        if (id > 0 && id < 16) {
+            base *= uRegionTints[id];
+        }
+    }
+    fragColor = base;
 }
 )";
 
@@ -236,6 +250,19 @@ void GLRenderDevice::init() {
     createShaderProgram();
     createBuffers();
 
+    // 1×1 R8 dummy region 纹理（id=0），无 region 时绑定它
+    {
+        TextureDesc dd{};
+        const uint8_t zero = 0;
+        dd.data = &zero;
+        dd.width = 1;
+        dd.height = 1;
+        dd.channels = 1;
+        dd.format = TextureFormat::R8;
+        dd.filter = TextureFilter::Nearest;
+        dummyRegionTex_ = createTexture(dd);
+    }
+
     core::logInfo("GLRenderDevice initialized");
 }
 
@@ -253,6 +280,8 @@ void GLRenderDevice::shutdown() {
 
     if (screenFbo_.fbo)    destroyFbo(screenFbo_,    screenTarget_);
     if (offscreenFbo_.fbo) destroyFbo(offscreenFbo_, offscreenTarget_);
+
+    if (dummyRegionTex_.valid()) { destroyTexture(dummyRegionTex_); dummyRegionTex_ = {}; }
 
     if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
     if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
@@ -277,9 +306,20 @@ TextureHandle GLRenderDevice::createTexture(const TextureDesc& desc) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                 desc.width, desc.height, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, desc.data);
+    if (desc.format == TextureFormat::R8) {
+        // R8 单通道：用于 region ID 图。pack alignment 改为 1 防止行对齐截断。
+        GLint prevAlign = 4;
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8,
+                     desc.width, desc.height, 0,
+                     GL_RED, GL_UNSIGNED_BYTE, desc.data);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                     desc.width, desc.height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, desc.data);
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
 
     return textures_.insert(TextureEntry{ tex, desc.width, desc.height });
@@ -466,8 +506,11 @@ void GLRenderDevice::createShaderProgram() {
     glDeleteShader(vs);
     glDeleteShader(fs);
 
-    uProjLoc_ = glGetUniformLocation(shaderProgram_, "uProj");
-    uTexLoc_  = glGetUniformLocation(shaderProgram_, "uTexture");
+    uProjLoc_        = glGetUniformLocation(shaderProgram_, "uProj");
+    uTexLoc_         = glGetUniformLocation(shaderProgram_, "uTexture");
+    uRegionTexLoc_   = glGetUniformLocation(shaderProgram_, "uRegionTex");
+    uRegionTintsLoc_ = glGetUniformLocation(shaderProgram_, "uRegionTints");
+    uHasRegionLoc_   = glGetUniformLocation(shaderProgram_, "uHasRegion");
     ASSERT_MSG(uProjLoc_ >= 0 && uTexLoc_ >= 0, "GL uniform location not found");
     
     GLuint msdfFs = compileShader(GL_FRAGMENT_SHADER, k_msdfFragSrc);
@@ -606,6 +649,11 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     uint32_t      batchIdxStart  = 0;
     int32_t       batchVertStart = 0;
 
+    // Region tint 当前批次状态
+    bool                              currentHasRegion = false;
+    TextureHandle                     currentRegionTex{};
+    std::array<core::Color, 16>       currentRegionTints{};
+
     struct ScissorRect { int x, y, w, h; };
     std::vector<ScissorRect> scissorStack;
     bool currentHasScissor = false;
@@ -613,9 +661,13 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
 
     auto flush = [&]() {
         if (static_cast<uint32_t>(batchIdx_.size()) > batchIdxStart) {
-            BatchSegment seg{ currentTex, batchIdxStart,
-                              static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart,
-                              batchVertStart, currentIsFont, currentPxRange };
+            BatchSegment seg{};
+            seg.tex        = currentTex;
+            seg.idxOffset  = batchIdxStart;
+            seg.idxCount   = static_cast<uint32_t>(batchIdx_.size()) - batchIdxStart;
+            seg.vertOffset = batchVertStart;
+            seg.isFont     = currentIsFont;
+            seg.pxRange    = currentPxRange;
             seg.hasScissor = currentHasScissor;
             if (currentHasScissor) {
                 seg.scissorX = currentScissor.x;
@@ -623,21 +675,45 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
                 seg.scissorW = currentScissor.w;
                 seg.scissorH = currentScissor.h;
             }
+            seg.hasRegion   = currentHasRegion;
+            seg.regionTex   = currentRegionTex;
+            seg.regionTints = currentRegionTints;
             batches.push_back(seg);
             batchIdxStart  = static_cast<uint32_t>(batchIdx_.size());
             batchVertStart = static_cast<int32_t>(batchVerts_.size());
         }
     };
 
-    auto maybeFlush = [&](TextureHandle tex, bool isFont = false, float pxRange = 4.0f) {
+    auto regionStateDiffers = [&](bool hasRegion, TextureHandle regionTex,
+                                  const std::array<core::Color, 16>* tints) {
+        if (currentHasRegion != hasRegion) return true;
+        if (!hasRegion) return false;
+        if (currentRegionTex != regionTex) return true;
+        // memcmp 比较 16 个 RGBA8 (64 字节)
+        return std::memcmp(currentRegionTints.data(), tints->data(),
+                           sizeof(core::Color) * 16) != 0;
+    };
+
+    auto maybeFlush = [&](TextureHandle tex, bool isFont = false, float pxRange = 4.0f,
+                          bool hasRegion = false, TextureHandle regionTex = {},
+                          const std::array<core::Color, 16>* regionTints = nullptr) {
         const bool batchFull =
             (batchVerts_.size() - static_cast<size_t>(batchVertStart) >= MAX_SPRITES_PER_BATCH * 4);
+        const bool regionDiff = regionStateDiffers(hasRegion, regionTex, regionTints);
         if (!hasCurrent || tex != currentTex || batchFull ||
-            currentIsFont != isFont || (isFont && currentPxRange != pxRange)) {
+            currentIsFont != isFont || (isFont && currentPxRange != pxRange) ||
+            regionDiff) {
             flush();
             currentTex = tex;
             currentIsFont = isFont;
             currentPxRange = pxRange;
+            currentHasRegion = hasRegion;
+            currentRegionTex = regionTex;
+            if (hasRegion && regionTints) {
+                currentRegionTints = *regionTints;
+            } else {
+                currentRegionTints = {};
+            }
             hasCurrent = true;
         }
     };
@@ -664,7 +740,8 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
 
     for (const RenderCmd* cmd : cmds) {
         if (auto* s = std::get_if<DrawSpriteCmd>(cmd)) {
-            maybeFlush(s->texture);
+            maybeFlush(s->texture, false, 4.0f,
+                       s->hasRegion, s->regionTex, &s->regionTints);
             const float hw = s->srcRect.w * s->scaleX * 0.5f;
             const float hh = s->srcRect.h * s->scaleY * 0.5f;
             const float cosR = cosf(s->rotation);
@@ -846,6 +923,8 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     glUseProgram(shaderProgram_);
     glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
     glUniform1i(uTexLoc_, 0);
+    if (uRegionTexLoc_ >= 0) glUniform1i(uRegionTexLoc_, 1);
+    if (uHasRegionLoc_ >= 0) glUniform1i(uHasRegionLoc_, 0);
     glActiveTexture(GL_TEXTURE0);
 
     bool scissorEnabled = false;
@@ -859,6 +938,27 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
             glUseProgram(shaderProgram_);
             glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
             glUniform1i(uTexLoc_, 0);
+            if (uRegionTexLoc_ >= 0) glUniform1i(uRegionTexLoc_, 1);
+            if (uHasRegionLoc_ >= 0) glUniform1i(uHasRegionLoc_, seg.hasRegion ? 1 : 0);
+            if (uRegionTintsLoc_ >= 0) {
+                // 把 16 个 RGBA8 转成 16 个 vec4
+                float tintsF[16 * 4];
+                for (int i = 0; i < 16; ++i) {
+                    tintsF[i*4 + 0] = seg.regionTints[i].r / 255.f;
+                    tintsF[i*4 + 1] = seg.regionTints[i].g / 255.f;
+                    tintsF[i*4 + 2] = seg.regionTints[i].b / 255.f;
+                    tintsF[i*4 + 3] = seg.regionTints[i].a / 255.f;
+                }
+                glUniform4fv(uRegionTintsLoc_, 16, tintsF);
+            }
+            // 绑 region 纹理到 TEXTURE1（无则用 dummy，避免 sampler 未绑定 UB）
+            glActiveTexture(GL_TEXTURE1);
+            TextureHandle rtex = (seg.hasRegion && textures_.valid(seg.regionTex))
+                ? seg.regionTex : dummyRegionTex_;
+            if (textures_.valid(rtex)) {
+                glBindTexture(GL_TEXTURE_2D, textures_.get(rtex).glTex);
+            }
+            glActiveTexture(GL_TEXTURE0);
         }
 
         if (seg.hasScissor) {

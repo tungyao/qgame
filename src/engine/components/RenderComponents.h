@@ -123,6 +123,21 @@ struct Sprite {
     bool          gpuDirty = true;
 };
 
+// 按 region ID 给 Sprite 分区染色。Sprite 对应的 base texture 必须有 sibling
+// "<path>.id.png"（AssetManager 自动加载）才会生效。
+//
+// region ID 0 = 背景/不染色；ID 1..MAX_REGIONS-1 = 可染色部位。
+// 多源叠加（基础 + 装备覆盖 + 状态 buff）请在 game 层合并后写入 slots，
+// 引擎不维护多 Tinting 组件链。
+struct Tinting {
+    static constexpr int MAX_REGIONS = 16;
+    struct Slot {
+        bool        enabled = false;          // false = 该 region passthrough（不改变颜色）
+        core::Color color   = core::Color::White;  // 与 baseColor 相乘
+    };
+    std::array<Slot, MAX_REGIONS> slots{};
+};
+
 inline float getSortKey(const Transform& tf, const Sprite& spr) {
     if (spr.ySort) {
         return tf.y + spr.sortOrder * 0.001f;

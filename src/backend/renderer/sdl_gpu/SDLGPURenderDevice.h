@@ -3,6 +3,7 @@
 #include "../../shared/ResourceHandle.h"
 #include "../../../core/containers/HandleMap.h"
 #include <SDL3/SDL_gpu.h>
+#include <array>
 #include <vector>
 
 struct SDL_Window;
@@ -107,6 +108,10 @@ private:
         // 该 batch 绘制时生效的 scissor (屏幕像素，左上原点)；w<=0 表示无裁剪。
         bool          hasScissor = false;
         int           scissorX = 0, scissorY = 0, scissorW = 0, scissorH = 0;
+        // Region tint
+        bool          hasRegion = false;
+        TextureHandle regionTex;
+        std::array<core::Color, 16> regionTints{};
     };
     // 将像素空间 (0,0)-(w,h) 映射到 NDC 的正交投影矩阵（列主序）
     void buildOrthoMatrix(float w, float h, float out[16]);
@@ -123,6 +128,9 @@ private:
     SDL_GPUGraphicsPipeline* msdfPipeline_       = nullptr;
     SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* gpuDrivenPipeline_  = nullptr;
+
+    // 1×1 R8 dummy region 纹理（无 region 时绑定，避免 sampler 缺失）
+    TextureHandle dummyRegionTex_{};
     SDL_GPUBuffer*           gpuDrivenQuadIndexBuf_ = nullptr;
     SDL_GPUShaderFormat      shaderFormat_       = SDL_GPU_SHADERFORMAT_DXIL;
 

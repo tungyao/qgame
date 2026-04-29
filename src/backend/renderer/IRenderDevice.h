@@ -8,6 +8,7 @@
 namespace backend {
 
 enum class TextureFilter { Nearest, Linear };
+enum class TextureFormat { RGBA8, R8 };
 
 enum class BufferUsage : uint32_t {
     Vertex   = 1 << 0,
@@ -32,6 +33,7 @@ struct TextureDesc {
     const void* data = nullptr;
     bool mips = false;
     TextureFilter filter = TextureFilter::Nearest;
+    TextureFormat format = TextureFormat::RGBA8;
 };
 
 struct ShaderDesc {

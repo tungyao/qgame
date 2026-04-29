@@ -65,6 +65,12 @@ struct DrawSpriteCmd {
     bool                 ySort = false;
     core::Color          tint  = core::Color::White;
     engine::RenderPass   pass  = engine::RenderPass::World;
+
+    // Region ID 染色（Tinting 组件 + sibling .id.png）。
+    // hasRegion=false 时 regionTex/regionTints 应被后端忽略。
+    bool                 hasRegion = false;
+    TextureHandle        regionTex;
+    std::array<core::Color, engine::Tinting::MAX_REGIONS> regionTints{};
 };
 
 struct DrawTileCmd {
