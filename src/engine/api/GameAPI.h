@@ -123,6 +123,9 @@ public:
     void          releaseTexture(TextureHandle h);
     FontHandle    loadFont(const char* assetPath);
     void          releaseFont(FontHandle h);
+    bool          loadAssetManifest(const char* path);
+    TextureHandle loadTextureById(const char* assetId);
+    FontHandle    loadFontById(const char* assetId);
     AssetManager& assetManager();
 
     // 从内存像素数据上传纹理（RGBA8，测试/程序化纹理用）

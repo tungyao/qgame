@@ -94,9 +94,9 @@ endif()
 
 if(BUILD_TESTS)
     add_subdirectory(tests/hello_compute)
+    add_subdirectory(tests/asset_manifest_demo)
 endif()
 
 #if(BUILD_EDITOR)
 #   add_subdirectory(editor)
 #endif()
-

@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../components/AnimatorComponent.h"
 #include "../components/FontData.h"
@@ -25,6 +26,15 @@ public:
     // path 是 ttf 路径；实际加载 sibling "<path>.font"（编译阶段预烘焙，本地阶段手工生成）。
     FontHandle    loadFont(const std::string& path);
 
+    // Phase 1 resource pipeline: manifest + stable asset IDs.
+    bool loadManifest(const std::string& path);
+    bool hasAsset(const std::string& id) const;
+    TextureHandle loadTextureById(const std::string& id);
+    SoundHandle   loadSoundById(const std::string& id);
+    AnimationHandle loadAnimationById(const std::string& id);
+    FontHandle    loadFontById(const std::string& id);
+    std::vector<std::string> assetIds() const;
+
     // 引用计数 -1，归零时销毁 GPU 资源
     void releaseTexture(TextureHandle h);
     void releaseSound(SoundHandle h);
@@ -47,6 +57,21 @@ public:
     AnimationHandle registerAnimation(const std::string& name, const AnimationClip& clip);
 
 private:
+    enum class AssetType {
+        Texture,
+        Sound,
+        Animation,
+        Font,
+        Unknown
+    };
+
+    struct AssetRecord {
+        std::string id;
+        AssetType   type = AssetType::Unknown;
+        std::string source;
+        std::string baked;
+    };
+
     backend::IRenderDevice* render_ = nullptr;
     backend::IAudioDevice*  audio_  = nullptr;
 
@@ -59,6 +84,8 @@ private:
     std::unordered_map<std::string, SndEntry> sndByPath_;
     std::unordered_map<std::string, AnimEntry> animByPath_;
     std::unordered_map<std::string, FontEntry> fontByPath_;
+    std::unordered_map<std::string, AssetRecord> assetsById_;
+    std::string manifestDir_;
 
     // 反查表
     std::unordered_map<uint32_t, std::string> texPathById_;
@@ -68,6 +95,9 @@ private:
 
     static const std::string kEmpty_;
     static uint32_t nextAnimIndex_;
+
+    static AssetType parseAssetType(const std::string& type);
+    std::string resolveManifestPath(const AssetRecord& rec) const;
 };
 
 } // namespace engine

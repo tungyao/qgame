@@ -1,8 +1,8 @@
 #include "GameAPI.h"
 #include "../runtime/EngineContext.h"
-#include "../scene/SceneSerializer.h"
 #include "../components/RenderComponents.h"
 #include "../components/UIComponents.h"
+#include "../systems/SceneSystem.h"
 #include "../systems/UISystem.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../backend/audio/AudioCommandQueue.h"
@@ -108,15 +108,15 @@ std::vector<entt::entity> GameAPI::overlapCircle(float centerX, float centerY, f
 // ── Scene ────────────────────────────────────────────────────────────────────
 
 bool GameAPI::loadScene(const char* path) {
-    return SceneSerializer::loadScene(ctx_.world, ctx_.assetManager, path);
+    return ctx_.systems.get<SceneSystem>().loadScene(path);
 }
 
 bool GameAPI::saveScene(const char* path) {
-    return SceneSerializer::saveScene(ctx_.world, ctx_.assetManager, path);
+    return ctx_.systems.get<SceneSystem>().saveScene(path);
 }
 
 void GameAPI::unloadScene() {
-    ctx_.world.clear();
+    ctx_.systems.get<SceneSystem>().unloadScene();
 }
 
 // ── Asset ─────────────────────────────────────────────────────────────────────
@@ -135,6 +135,18 @@ FontHandle GameAPI::loadFont(const char* path) {
 
 void GameAPI::releaseFont(FontHandle h) {
     ctx_.assetManager.releaseFont(h);
+}
+
+bool GameAPI::loadAssetManifest(const char* path) {
+    return ctx_.assetManager.loadManifest(path);
+}
+
+TextureHandle GameAPI::loadTextureById(const char* assetId) {
+    return ctx_.assetManager.loadTextureById(assetId);
+}
+
+FontHandle GameAPI::loadFontById(const char* assetId) {
+    return ctx_.assetManager.loadFontById(assetId);
 }
 
 AssetManager& GameAPI::assetManager() {

@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 
 namespace engine {
 
@@ -45,6 +46,133 @@ void AssetManager::shutdown() {
     fontPathById_.clear();
     animByPath_.clear();
     animPathById_.clear();
+    assetsById_.clear();
+    manifestDir_.clear();
+}
+
+AssetManager::AssetType AssetManager::parseAssetType(const std::string& type) {
+    if (type == "texture") return AssetType::Texture;
+    if (type == "sound" || type == "audio") return AssetType::Sound;
+    if (type == "animation") return AssetType::Animation;
+    if (type == "font") return AssetType::Font;
+    return AssetType::Unknown;
+}
+
+std::string AssetManager::resolveManifestPath(const AssetRecord& rec) const {
+    const std::string& raw = !rec.baked.empty() ? rec.baked : rec.source;
+    if (raw.empty()) return {};
+
+    std::filesystem::path p(raw);
+    if (p.is_absolute() || manifestDir_.empty()) return p.lexically_normal().string();
+
+    const std::filesystem::path fromManifest = std::filesystem::path(manifestDir_) / p;
+    if (std::filesystem::exists(fromManifest)) {
+        return fromManifest.lexically_normal().string();
+    }
+
+    return p.lexically_normal().string();
+}
+
+bool AssetManager::loadManifest(const std::string& path) {
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        core::logError("[AssetManager] failed to open manifest: %s", path.c_str());
+        return false;
+    }
+
+    nlohmann::json j;
+    try {
+        ifs >> j;
+    } catch (const std::exception& e) {
+        core::logError("[AssetManager] manifest parse error in %s: %s", path.c_str(), e.what());
+        return false;
+    }
+
+    if (!j.contains("assets") || !j["assets"].is_array()) {
+        core::logError("[AssetManager] manifest missing assets array: %s", path.c_str());
+        return false;
+    }
+
+    manifestDir_ = std::filesystem::path(path).parent_path().string();
+    assetsById_.clear();
+
+    for (const auto& item : j["assets"]) {
+        AssetRecord rec{};
+        rec.id     = item.value("id", std::string{});
+        rec.type   = parseAssetType(item.value("type", std::string{}));
+        rec.source = item.value("source", std::string{});
+        rec.baked  = item.value("baked", std::string{});
+
+        if (rec.id.empty()) {
+            core::logWarn("[AssetManager] manifest asset without id ignored: %s", path.c_str());
+            continue;
+        }
+        if (rec.type == AssetType::Unknown) {
+            core::logWarn("[AssetManager] manifest asset %s has unknown type", rec.id.c_str());
+            continue;
+        }
+        if (rec.source.empty() && rec.baked.empty()) {
+            core::logWarn("[AssetManager] manifest asset %s has no source/baked path", rec.id.c_str());
+            continue;
+        }
+        if (assetsById_.find(rec.id) != assetsById_.end()) {
+            core::logWarn("[AssetManager] duplicate manifest asset id replaced: %s", rec.id.c_str());
+        }
+
+        assetsById_[rec.id] = std::move(rec);
+    }
+
+    core::logInfo("[AssetManager] loaded manifest %s (%zu assets)",
+                  path.c_str(), assetsById_.size());
+    return true;
+}
+
+bool AssetManager::hasAsset(const std::string& id) const {
+    return assetsById_.find(id) != assetsById_.end();
+}
+
+std::vector<std::string> AssetManager::assetIds() const {
+    std::vector<std::string> ids;
+    ids.reserve(assetsById_.size());
+    for (const auto& [id, _] : assetsById_) ids.push_back(id);
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+TextureHandle AssetManager::loadTextureById(const std::string& id) {
+    auto it = assetsById_.find(id);
+    if (it == assetsById_.end() || it->second.type != AssetType::Texture) {
+        core::logError("[AssetManager] texture asset id not found: %s", id.c_str());
+        return {};
+    }
+    return loadTexture(resolveManifestPath(it->second));
+}
+
+SoundHandle AssetManager::loadSoundById(const std::string& id) {
+    auto it = assetsById_.find(id);
+    if (it == assetsById_.end() || it->second.type != AssetType::Sound) {
+        core::logError("[AssetManager] sound asset id not found: %s", id.c_str());
+        return {};
+    }
+    return loadSound(resolveManifestPath(it->second));
+}
+
+AnimationHandle AssetManager::loadAnimationById(const std::string& id) {
+    auto it = assetsById_.find(id);
+    if (it == assetsById_.end() || it->second.type != AssetType::Animation) {
+        core::logError("[AssetManager] animation asset id not found: %s", id.c_str());
+        return {};
+    }
+    return loadAnimation(resolveManifestPath(it->second));
+}
+
+FontHandle AssetManager::loadFontById(const std::string& id) {
+    auto it = assetsById_.find(id);
+    if (it == assetsById_.end() || it->second.type != AssetType::Font) {
+        core::logError("[AssetManager] font asset id not found: %s", id.c_str());
+        return {};
+    }
+    return loadFont(resolveManifestPath(it->second));
 }
 
 TextureHandle AssetManager::loadTexture(const std::string& path) {

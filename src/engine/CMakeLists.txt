@@ -8,6 +8,7 @@ add_library(engine SHARED
     systems/AudioSystem.cpp
     systems/PhysicsSystem.cpp
     systems/InputSystem.cpp
+    systems/SceneSystem.cpp
     systems/AnimatorSystem.cpp
     systems/TweenSystem.cpp
     systems/UISystem.cpp

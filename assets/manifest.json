@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "id": "texture.demo.character",
+      "type": "texture",
+      "source": "sprites/char.png"
+    },
+    {
+      "id": "texture.demo.spritesheet",
+      "type": "texture",
+      "source": "test_spritesheet.png"
+    },
+    {
+      "id": "font.demo.main",
+      "type": "font",
+      "source": "fonts/DejaVuSans.ttf"
+    },
+    {
+      "id": "animation.demo.test",
+      "type": "animation",
+      "source": "test_anim.json"
+    }
+  ]
+}
