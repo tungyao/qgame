@@ -17,6 +17,10 @@ namespace engine {
 const std::string AssetManager::kEmpty_;
 uint32_t AssetManager::nextAnimIndex_ = 1;
 
+uint32_t AssetManager::makeHandleKey(uint32_t index, uint32_t version) {
+    return (index << 12) | (version & 0xFFFu);
+}
+
 void AssetManager::init(backend::IRenderDevice* render, backend::IAudioDevice* audio) {
     render_ = render;
     audio_  = audio;
@@ -48,6 +52,14 @@ void AssetManager::shutdown() {
     animPathById_.clear();
     assetsById_.clear();
     manifestDir_.clear();
+    textureIdByPath_.clear();
+    soundIdByPath_.clear();
+    animationIdByPath_.clear();
+    fontIdByPath_.clear();
+    textureAssetIdByHandle_.clear();
+    soundAssetIdByHandle_.clear();
+    animationAssetIdByHandle_.clear();
+    fontAssetIdByHandle_.clear();
 }
 
 AssetManager::AssetType AssetManager::parseAssetType(const std::string& type) {
@@ -73,6 +85,46 @@ std::string AssetManager::resolveManifestPath(const AssetRecord& rec) const {
     return p.lexically_normal().string();
 }
 
+void AssetManager::indexManifestRecord(const AssetRecord& rec) {
+    const std::string resolved = resolveManifestPath(rec);
+    if (resolved.empty()) return;
+
+    // Runtime lookups are indexed by the resolved baked path. Later pack/VFS
+    // support can map the same stable ID to a virtual path without changing
+    // game-facing APIs or scene files.
+    switch (rec.type) {
+        case AssetType::Texture:   textureIdByPath_[resolved] = rec.id; break;
+        case AssetType::Sound:     soundIdByPath_[resolved] = rec.id; break;
+        case AssetType::Animation: animationIdByPath_[resolved] = rec.id; break;
+        case AssetType::Font:      fontIdByPath_[resolved] = rec.id; break;
+        default: break;
+    }
+}
+
+const std::string& AssetManager::assetIdForPath(AssetType type, const std::string& path) const {
+    const std::string normalized = std::filesystem::path(path).lexically_normal().string();
+    switch (type) {
+        case AssetType::Texture: {
+            auto it = textureIdByPath_.find(normalized);
+            return (it != textureIdByPath_.end()) ? it->second : kEmpty_;
+        }
+        case AssetType::Sound: {
+            auto it = soundIdByPath_.find(normalized);
+            return (it != soundIdByPath_.end()) ? it->second : kEmpty_;
+        }
+        case AssetType::Animation: {
+            auto it = animationIdByPath_.find(normalized);
+            return (it != animationIdByPath_.end()) ? it->second : kEmpty_;
+        }
+        case AssetType::Font: {
+            auto it = fontIdByPath_.find(normalized);
+            return (it != fontIdByPath_.end()) ? it->second : kEmpty_;
+        }
+        default:
+            return kEmpty_;
+    }
+}
+
 bool AssetManager::loadManifest(const std::string& path) {
     std::ifstream ifs(path);
     if (!ifs.is_open()) {
@@ -95,6 +147,10 @@ bool AssetManager::loadManifest(const std::string& path) {
 
     manifestDir_ = std::filesystem::path(path).parent_path().string();
     assetsById_.clear();
+    textureIdByPath_.clear();
+    soundIdByPath_.clear();
+    animationIdByPath_.clear();
+    fontIdByPath_.clear();
 
     for (const auto& item : j["assets"]) {
         AssetRecord rec{};
@@ -119,6 +175,7 @@ bool AssetManager::loadManifest(const std::string& path) {
             core::logWarn("[AssetManager] duplicate manifest asset id replaced: %s", rec.id.c_str());
         }
 
+        indexManifestRecord(rec);
         assetsById_[rec.id] = std::move(rec);
     }
 
@@ -145,7 +202,9 @@ TextureHandle AssetManager::loadTextureById(const std::string& id) {
         core::logError("[AssetManager] texture asset id not found: %s", id.c_str());
         return {};
     }
-    return loadTexture(resolveManifestPath(it->second));
+    TextureHandle h = loadTexture(resolveManifestPath(it->second));
+    if (h.valid()) textureAssetIdByHandle_[makeHandleKey(h.index, h.version)] = id;
+    return h;
 }
 
 SoundHandle AssetManager::loadSoundById(const std::string& id) {
@@ -154,7 +213,9 @@ SoundHandle AssetManager::loadSoundById(const std::string& id) {
         core::logError("[AssetManager] sound asset id not found: %s", id.c_str());
         return {};
     }
-    return loadSound(resolveManifestPath(it->second));
+    SoundHandle h = loadSound(resolveManifestPath(it->second));
+    if (h.valid()) soundAssetIdByHandle_[makeHandleKey(h.index, h.version)] = id;
+    return h;
 }
 
 AnimationHandle AssetManager::loadAnimationById(const std::string& id) {
@@ -163,7 +224,9 @@ AnimationHandle AssetManager::loadAnimationById(const std::string& id) {
         core::logError("[AssetManager] animation asset id not found: %s", id.c_str());
         return {};
     }
-    return loadAnimation(resolveManifestPath(it->second));
+    AnimationHandle h = loadAnimation(resolveManifestPath(it->second));
+    if (h.valid()) animationAssetIdByHandle_[makeHandleKey(h.index, h.version)] = id;
+    return h;
 }
 
 FontHandle AssetManager::loadFontById(const std::string& id) {
@@ -172,13 +235,18 @@ FontHandle AssetManager::loadFontById(const std::string& id) {
         core::logError("[AssetManager] font asset id not found: %s", id.c_str());
         return {};
     }
-    return loadFont(resolveManifestPath(it->second));
+    FontHandle h = loadFont(resolveManifestPath(it->second));
+    if (h.valid()) fontAssetIdByHandle_[makeHandleKey(h.index, h.version)] = id;
+    return h;
 }
 
 TextureHandle AssetManager::loadTexture(const std::string& path) {
     auto it = texByPath_.find(path);
     if (it != texByPath_.end()) {
         it->second.refCount++;
+        if (const std::string& assetId = assetIdForPath(AssetType::Texture, path); !assetId.empty()) {
+            textureAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
+        }
         return it->second.handle;
     }
 
@@ -236,15 +304,18 @@ TextureHandle AssetManager::loadTexture(const std::string& path) {
         }
     }
 
-    uint32_t id = (uint32_t(h_tex.index) << 12) | h_tex.version;
+    uint32_t id = makeHandleKey(h_tex.index, h_tex.version);
     texByPath_[path]  = {h_tex, 1, h_region};
     texPathById_[id]  = path;
+    if (const std::string& assetId = assetIdForPath(AssetType::Texture, path); !assetId.empty()) {
+        textureAssetIdByHandle_[id] = assetId;
+    }
     return h_tex;
 }
 
 TextureHandle AssetManager::regionIdTexture(TextureHandle base) const {
     if (!base.valid()) return {};
-    uint32_t id = (uint32_t(base.index) << 12) | base.version;
+    uint32_t id = makeHandleKey(base.index, base.version);
     auto pit = texPathById_.find(id);
     if (pit == texPathById_.end()) return {};
     auto it = texByPath_.find(pit->second);
@@ -256,6 +327,9 @@ SoundHandle AssetManager::loadSound(const std::string& path) {
     auto it = sndByPath_.find(path);
     if (it != sndByPath_.end()) {
         it->second.refCount++;
+        if (const std::string& assetId = assetIdForPath(AssetType::Sound, path); !assetId.empty()) {
+            soundAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
+        }
         return it->second.handle;
     }
 
@@ -267,15 +341,18 @@ SoundHandle AssetManager::loadSound(const std::string& path) {
         return {};
     }
 
-    uint32_t id = (uint32_t(h_snd.index) << 12) | h_snd.version;
+    uint32_t id = makeHandleKey(h_snd.index, h_snd.version);
     sndByPath_[path]  = {h_snd, 1};
     sndPathById_[id]  = path;
+    if (const std::string& assetId = assetIdForPath(AssetType::Sound, path); !assetId.empty()) {
+        soundAssetIdByHandle_[id] = assetId;
+    }
     return h_snd;
 }
 
 void AssetManager::releaseTexture(TextureHandle h) {
     if (!h.valid() || !render_) return;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto pit = texPathById_.find(id);
     if (pit == texPathById_.end()) return;
 
@@ -285,12 +362,13 @@ void AssetManager::releaseTexture(TextureHandle h) {
         render_->destroyTexture(h);
         texByPath_.erase(pit->second);
         texPathById_.erase(id);
+        textureAssetIdByHandle_.erase(id);
     }
 }
 
 void AssetManager::releaseSound(SoundHandle h) {
     if (!h.valid() || !audio_) return;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto pit = sndPathById_.find(id);
     if (pit == sndPathById_.end()) return;
 
@@ -299,6 +377,7 @@ void AssetManager::releaseSound(SoundHandle h) {
         audio_->unloadSound(h);
         sndByPath_.erase(pit->second);
         sndPathById_.erase(id);
+        soundAssetIdByHandle_.erase(id);
     }
 }
 
@@ -307,6 +386,9 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
     auto it = animByPath_.find(path);
     if (it != animByPath_.end()) {
         it->second.refCount++;
+        if (const std::string& assetId = assetIdForPath(AssetType::Animation, path); !assetId.empty()) {
+            animationAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
+        }
         return it->second.handle;
     }
 
@@ -441,15 +523,18 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
     AnimationHandle h;
     h.index = nextAnimIndex_++;
     h.version = 1;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     animByPath_[path] = {h, 1, std::move(clip)};
     animPathById_[id] = path;
+    if (const std::string& assetId = assetIdForPath(AssetType::Animation, path); !assetId.empty()) {
+        animationAssetIdByHandle_[id] = assetId;
+    }
     return h;
 }
 
 void AssetManager::releaseAnimation(AnimationHandle h) {
     if (!h.valid()) return;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto pit = animPathById_.find(id);
     if (pit == animPathById_.end()) return;
 
@@ -458,19 +543,20 @@ void AssetManager::releaseAnimation(AnimationHandle h) {
         if (entry.clip.texture.valid()) releaseTexture(entry.clip.texture);
         animByPath_.erase(pit->second);
         animPathById_.erase(id);
+        animationAssetIdByHandle_.erase(id);
     }
 }
 
 const std::string& AssetManager::animationPath(AnimationHandle h) const {
     if (!h.valid()) return kEmpty_;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto it = animPathById_.find(id);
     return (it != animPathById_.end()) ? it->second : kEmpty_;
 }
 
 const AnimationClip* AssetManager::getAnimationClip(AnimationHandle h) const {
     if (!h.valid()) return nullptr;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto pit = animPathById_.find(id);
     if (pit == animPathById_.end()) return nullptr;
     auto it = animByPath_.find(pit->second);
@@ -483,7 +569,7 @@ AnimationHandle AssetManager::registerAnimation(const std::string& name, const A
     h.index = nextAnimIndex_++;
     h.version = 1;
     
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     animByPath_[name] = {h, 1, clip};
     animPathById_[id] = name;
     return h;
@@ -491,22 +577,49 @@ AnimationHandle AssetManager::registerAnimation(const std::string& name, const A
 
 const std::string& AssetManager::texturePath(TextureHandle h) const {
     if (!h.valid()) return kEmpty_;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto it = texPathById_.find(id);
     return (it != texPathById_.end()) ? it->second : kEmpty_;
 }
 
 const std::string& AssetManager::soundPath(SoundHandle h) const {
     if (!h.valid()) return kEmpty_;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto it = sndPathById_.find(id);
     return (it != sndPathById_.end()) ? it->second : kEmpty_;
+}
+
+const std::string& AssetManager::textureAssetId(TextureHandle h) const {
+    if (!h.valid()) return kEmpty_;
+    auto it = textureAssetIdByHandle_.find(makeHandleKey(h.index, h.version));
+    return (it != textureAssetIdByHandle_.end()) ? it->second : kEmpty_;
+}
+
+const std::string& AssetManager::soundAssetId(SoundHandle h) const {
+    if (!h.valid()) return kEmpty_;
+    auto it = soundAssetIdByHandle_.find(makeHandleKey(h.index, h.version));
+    return (it != soundAssetIdByHandle_.end()) ? it->second : kEmpty_;
+}
+
+const std::string& AssetManager::animationAssetId(AnimationHandle h) const {
+    if (!h.valid()) return kEmpty_;
+    auto it = animationAssetIdByHandle_.find(makeHandleKey(h.index, h.version));
+    return (it != animationAssetIdByHandle_.end()) ? it->second : kEmpty_;
+}
+
+const std::string& AssetManager::fontAssetId(FontHandle h) const {
+    if (!h.valid()) return kEmpty_;
+    auto it = fontAssetIdByHandle_.find(makeHandleKey(h.index, h.version));
+    return (it != fontAssetIdByHandle_.end()) ? it->second : kEmpty_;
 }
 
 FontHandle AssetManager::loadFont(const std::string& path) {
     auto it = fontByPath_.find(path);
     if (it != fontByPath_.end()) {
         it->second.refCount++;
+        if (const std::string& assetId = assetIdForPath(AssetType::Font, path); !assetId.empty()) {
+            fontAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
+        }
         return it->second.handle;
     }
     if (!render_) return {};
@@ -539,15 +652,18 @@ FontHandle AssetManager::loadFont(const std::string& path) {
         return {};
     }
 
-    uint32_t id = (uint32_t(fh.index) << 12) | fh.version;
+    uint32_t id = makeHandleKey(fh.index, fh.version);
     fontByPath_[path]  = {fh, atlasTex, 1};
     fontPathById_[id]  = path;
+    if (const std::string& assetId = assetIdForPath(AssetType::Font, path); !assetId.empty()) {
+        fontAssetIdByHandle_[id] = assetId;
+    }
     return fh;
 }
 
 void AssetManager::releaseFont(FontHandle h) {
     if (!h.valid() || !render_) return;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto pit = fontPathById_.find(id);
     if (pit == fontPathById_.end()) return;
 
@@ -557,12 +673,13 @@ void AssetManager::releaseFont(FontHandle h) {
         if (entry.atlas.valid()) render_->destroyTexture(entry.atlas);
         fontByPath_.erase(pit->second);
         fontPathById_.erase(id);
+        fontAssetIdByHandle_.erase(id);
     }
 }
 
 const std::string& AssetManager::fontPath(FontHandle h) const {
     if (!h.valid()) return kEmpty_;
-    uint32_t id = (uint32_t(h.index) << 12) | h.version;
+    uint32_t id = makeHandleKey(h.index, h.version);
     auto it = fontPathById_.find(id);
     return (it != fontPathById_.end()) ? it->second : kEmpty_;
 }

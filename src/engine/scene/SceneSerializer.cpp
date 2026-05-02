@@ -2,6 +2,7 @@
 #include "../assets/AssetManager.h"
 #include "../components/RenderComponents.h"
 #include "../components/PhysicsComponents.h"
+#include "../components/TextComponent.h"
 #include "../../core/Logger.h"
 #include "../../platform/FileSystem.h"
 
@@ -46,8 +47,7 @@ static Transform transformFromJson(const json& j) {
 }
 
 static json spriteToJson(const Sprite& s, AssetManager& mgr) {
-    return {
-        {"tex",    mgr.texturePath(s.texture)},
+    json j = {
         {"srcX",   s.srcRect.x},  {"srcY",  s.srcRect.y},
         {"srcW",   s.srcRect.w},  {"srcH",  s.srcRect.h},
         {"layer",  s.layer},
@@ -55,11 +55,20 @@ static json spriteToJson(const Sprite& s, AssetManager& mgr) {
         {"tintB",  (int)s.tint.b}, {"tintA", (int)s.tint.a},
         {"pivX",   s.pivotX}, {"pivY",  s.pivotY}
     };
+    // Phase 3: scene files prefer stable IDs. The legacy path field remains
+    // present as a migration fallback so old tools can still inspect the file.
+    if (const std::string& id = mgr.textureAssetId(s.texture); !id.empty()) {
+        j["assetId"] = id;
+    }
+    j["tex"] = mgr.texturePath(s.texture);
+    return j;
 }
 static Sprite spriteFromJson(const json& j, AssetManager& mgr) {
     Sprite s;
+    std::string texId = j.value("assetId", "");
     std::string texPath = j.value("tex", "");
-    if (!texPath.empty()) s.texture = mgr.loadTexture(texPath);
+    if (!texId.empty()) s.texture = mgr.loadTextureById(texId);
+    if (!s.texture.valid() && !texPath.empty()) s.texture = mgr.loadTexture(texPath);
     s.srcRect = core::Rect{j.value("srcX", 0.f), j.value("srcY", 0.f),
                            j.value("srcW", 0.f), j.value("srcH", 0.f)};
     s.layer   = j.value("layer", 0);
@@ -78,6 +87,9 @@ static json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
     j["h"]    = tm.height;
     j["ts"]   = tm.tileSize;
     j["cols"] = tm.tilesetCols;
+    if (const std::string& id = mgr.textureAssetId(tm.tileset); !id.empty()) {
+        j["assetId"] = id;
+    }
     j["tex"]  = mgr.texturePath(tm.tileset);
     for (int l = 0; l < TileMap::MAX_LAYERS; ++l)
         j["layers"][l] = tm.layers[l];
@@ -89,8 +101,10 @@ static TileMap tilemapFromJson(const json& j, AssetManager& mgr) {
     tm.height      = j.value("h",    0);
     tm.tileSize    = j.value("ts",   16);
     tm.tilesetCols = j.value("cols", 1);
+    std::string texId = j.value("assetId", "");
     std::string texPath = j.value("tex", "");
-    if (!texPath.empty()) tm.tileset = mgr.loadTexture(texPath);
+    if (!texId.empty()) tm.tileset = mgr.loadTextureById(texId);
+    if (!tm.tileset.valid() && !texPath.empty()) tm.tileset = mgr.loadTexture(texPath);
     if (j.contains("layers")) {
         for (int l = 0; l < TileMap::MAX_LAYERS; ++l) {
             if (l < (int)j["layers"].size())
@@ -137,6 +151,48 @@ static Collider colliderFromJson(const json& j) {
     return c;
 }
 
+static json textToJson(const TextComponent& t, AssetManager& mgr) {
+    json j = {
+        {"text", t.text},
+        {"fontSize", t.fontSize},
+        {"layer", t.layer},
+        {"sortOrder", t.sortOrder},
+        {"ySort", t.ySort},
+        {"pass", static_cast<int>(t.pass)},
+        {"visible", t.visible},
+        {"colorR", (int)t.color.r}, {"colorG", (int)t.color.g},
+        {"colorB", (int)t.color.b}, {"colorA", (int)t.color.a}
+    };
+    // Font ID serialization is deliberately symmetric with Sprite/TileMap:
+    // scenes stay stable when fonts move or when Phase 5 packs them into a bundle.
+    if (const std::string& id = mgr.fontAssetId(t.font); !id.empty()) {
+        j["fontId"] = id;
+    }
+    j["font"] = mgr.fontPath(t.font);
+    return j;
+}
+
+static TextComponent textFromJson(const json& j, AssetManager& mgr) {
+    TextComponent t;
+    t.text      = j.value("text", std::string{});
+    t.fontSize  = j.value("fontSize", 16.f);
+    t.layer     = j.value("layer", 10);
+    t.sortOrder = j.value("sortOrder", 0);
+    t.ySort     = j.value("ySort", false);
+    t.pass      = static_cast<RenderPass>(j.value("pass", static_cast<int>(RenderPass::UI)));
+    t.visible   = j.value("visible", true);
+    t.color     = core::Color{(uint8_t)j.value("colorR", 255),
+                              (uint8_t)j.value("colorG", 255),
+                              (uint8_t)j.value("colorB", 255),
+                              (uint8_t)j.value("colorA", 255)};
+
+    std::string fontId = j.value("fontId", "");
+    std::string fontPath = j.value("font", "");
+    if (!fontId.empty()) t.font = mgr.loadFontById(fontId);
+    if (!t.font.valid() && !fontPath.empty()) t.font = mgr.loadFont(fontPath);
+    return t;
+}
+
 // ── Save ──────────────────────────────────────────────────────────────────────
 
 bool SceneSerializer::saveScene(entt::registry& reg,
@@ -165,6 +221,8 @@ bool SceneSerializer::saveScene(entt::registry& reg,
             je["RigidBody"] = rigidBodyToJson(*c);
         if (auto* c = reg.try_get<Collider>(e))
             je["Collider"] = colliderToJson(*c);
+        if (auto* c = reg.try_get<TextComponent>(e))
+            je["TextComponent"] = textToJson(*c, mgr);
 
         entities.push_back(std::move(je));
     }
@@ -226,6 +284,8 @@ bool SceneSerializer::loadScene(entt::registry& reg,
             reg.emplace<RigidBody>(e, rigidBodyFromJson(je["RigidBody"]));
         if (je.contains("Collider"))
             reg.emplace<Collider>(e, colliderFromJson(je["Collider"]));
+        if (je.contains("TextComponent"))
+            reg.emplace<TextComponent>(e, textFromJson(je["TextComponent"], mgr));
     }
 
     core::logInfo("[SceneSerializer] loaded %zu entities from %s",

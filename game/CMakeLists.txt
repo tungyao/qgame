@@ -8,6 +8,14 @@ target_link_libraries(game
     PRIVATE stb_image
 )
 
+# Keep game builds attached to the same baked asset root as tests. Game code can
+# load QGAME_BAKED_MANIFEST directly, and later pack builds can redefine only
+# this compile definition.
+if(TARGET qgame_assets)
+    add_dependencies(game qgame_assets)
+    target_compile_definitions(game PRIVATE QGAME_BAKED_MANIFEST="${QGAME_BAKED_MANIFEST}")
+endif()
+
 # 让游戏可执行文件能在自身目录旁找到 engine/SDL3 共享库
 if(APPLE)
     set_target_properties(game PROPERTIES

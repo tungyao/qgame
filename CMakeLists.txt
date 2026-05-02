@@ -3,6 +3,8 @@ project(StarEngine CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
 # ── 编译选项 ─────────────────────────────────────────────────────────────────
 if(MSVC)
     add_compile_options(
@@ -82,6 +84,29 @@ add_subdirectory(src/core)
 add_subdirectory(src/platform)
 add_subdirectory(src/backend)
 add_subdirectory(src/engine)
+
+# ── Resource pipeline ─────────────────────────────────────────────────────────
+# Phase 2/4: compile the developer-authored manifest into a build-owned baked
+# asset root. Runtime code still loads a manifest file; future pack/VFS support
+# can replace this target's output without touching GameAPI or SceneSerializer.
+set(QGAME_SOURCE_MANIFEST "${CMAKE_SOURCE_DIR}/assets/manifest.json")
+set(QGAME_BAKED_ASSET_DIR "${CMAKE_BINARY_DIR}/assets")
+set(QGAME_BAKED_MANIFEST "${QGAME_BAKED_ASSET_DIR}/manifest.baked.json")
+if(Python3_Interpreter_FOUND AND EXISTS "${QGAME_SOURCE_MANIFEST}")
+    add_custom_target(qgame_assets ALL
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_SOURCE_DIR}/tools/resource_compiler.py"
+                --manifest "${QGAME_SOURCE_MANIFEST}"
+                --out-dir "${QGAME_BAKED_ASSET_DIR}"
+                --cache "${QGAME_BAKED_ASSET_DIR}/.assetcache.json"
+        BYPRODUCTS "${QGAME_BAKED_MANIFEST}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Compiling QGame assets"
+        VERBATIM
+    )
+else()
+    message(WARNING "Python3 or assets/manifest.json not found; qgame_assets target disabled")
+endif()
 
 # ── 可选目标 ──────────────────────────────────────────────────────────────────
 option(BUILD_EDITOR "Build editor" OFF)

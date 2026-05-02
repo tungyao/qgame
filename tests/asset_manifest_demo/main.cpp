@@ -11,6 +11,10 @@
 #include <engine/runtime/EngineConfig.h>
 #include <engine/runtime/EngineContext.h>
 
+#ifndef QGAME_DEMO_MANIFEST
+#define QGAME_DEMO_MANIFEST "assets/manifest.json"
+#endif
+
 namespace {
 
 bool hasArg(int argc, char** argv, const char* name) {
@@ -60,7 +64,7 @@ int main(int argc, char** argv) {
     ctx.init(cfg);
     engine::GameAPI api{ctx};
 
-    const bool manifestOk = api.loadAssetManifest("assets/manifest.json");
+    const bool manifestOk = api.loadAssetManifest(QGAME_DEMO_MANIFEST);
     TextureHandle character = api.loadTextureById("texture.demo.character");
     engine::FontHandle font = api.loadFontById("font.demo.main");
 

@@ -36,6 +36,8 @@ public:
 
     // ── Audio（Month 4 实现）──────────────────────────────────────────────
     SoundHandle loadSound(const char* assetPath);
+    SoundHandle loadSoundById(const char* assetId);
+    void        releaseSound(SoundHandle h);
     void        playSound(SoundHandle h, float vol = 1.f);
     void        stopSound(SoundHandle h);
     void        playMusic(const char* assetPath, bool loop = true);
@@ -126,6 +128,9 @@ public:
     bool          loadAssetManifest(const char* path);
     TextureHandle loadTextureById(const char* assetId);
     FontHandle    loadFontById(const char* assetId);
+    AnimationHandle loadAnimation(const char* assetPath);
+    AnimationHandle loadAnimationById(const char* assetId);
+    void          releaseAnimation(AnimationHandle h);
     AssetManager& assetManager();
 
     // 从内存像素数据上传纹理（RGBA8，测试/程序化纹理用）

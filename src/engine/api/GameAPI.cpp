@@ -30,7 +30,15 @@ void GameAPI::destroyEntity(entt::entity e) {
 // ── Audio ────────────────────────────────────────────────────────────────────
 
 SoundHandle GameAPI::loadSound(const char* path) {
-    return ctx_.audioDevice().loadSound(path);
+    return ctx_.assetManager.loadSound(path ? path : "");
+}
+
+SoundHandle GameAPI::loadSoundById(const char* assetId) {
+    return ctx_.assetManager.loadSoundById(assetId ? assetId : "");
+}
+
+void GameAPI::releaseSound(SoundHandle h) {
+    ctx_.assetManager.releaseSound(h);
 }
 
 void GameAPI::playSound(SoundHandle h, float vol) {
@@ -147,6 +155,18 @@ TextureHandle GameAPI::loadTextureById(const char* assetId) {
 
 FontHandle GameAPI::loadFontById(const char* assetId) {
     return ctx_.assetManager.loadFontById(assetId);
+}
+
+AnimationHandle GameAPI::loadAnimation(const char* path) {
+    return ctx_.assetManager.loadAnimation(path ? path : "");
+}
+
+AnimationHandle GameAPI::loadAnimationById(const char* assetId) {
+    return ctx_.assetManager.loadAnimationById(assetId ? assetId : "");
+}
+
+void GameAPI::releaseAnimation(AnimationHandle h) {
+    ctx_.assetManager.releaseAnimation(h);
 }
 
 AssetManager& GameAPI::assetManager() {
