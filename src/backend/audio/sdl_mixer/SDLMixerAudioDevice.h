@@ -19,6 +19,7 @@ public:
     void shutdown() override;
 
     SoundHandle loadSound(const char* path)                     override;
+    SoundHandle loadSoundFromMemory(const void* data, size_t size, const char* debugName) override;
     void        unloadSound(SoundHandle h)                      override;
     void        playSound(SoundHandle h, float vol = 1.f)       override;
     void        stopSound(SoundHandle h)                        override;

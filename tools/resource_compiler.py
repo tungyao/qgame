@@ -24,11 +24,14 @@ import os
 import shutil
 import subprocess
 import sys
+import struct
 from pathlib import Path
 from typing import Any
 
 
-TOOL_VERSION = 1
+TOOL_VERSION = 2
+PACK_MAGIC = b"QPAK"
+PACK_VERSION = 1
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -106,13 +109,52 @@ def copy_if_needed(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def region_id_sibling_path(path: Path) -> Path:
+    return path.with_suffix("").with_name(path.with_suffix("").name + ".id.png")
+
+
+def pack_path_uri(pack_id: str, rel_path: str) -> str:
+    return f"pak://{pack_id}/{rel_path}"
+
+
+def write_pack(pack_path: Path, out_dir: Path, rel_paths: list[str]) -> None:
+    pack_path.parent.mkdir(parents=True, exist_ok=True)
+    entries: list[dict[str, Any]] = []
+    offset = 0
+    unique_paths = sorted(set(rel_paths))
+
+    with pack_path.open("wb") as f:
+        for rel in unique_paths:
+            src = out_dir / Path(rel)
+            if not src.exists():
+                raise RuntimeError(f"pack input missing: {src}")
+            data = src.read_bytes()
+            f.write(data)
+            entries.append({
+                "path": rel,
+                "offset": offset,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+            offset += len(data)
+
+        index = {
+            "version": PACK_VERSION,
+            "files": entries,
+        }
+        index_bytes = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        f.write(index_bytes)
+        f.write(struct.pack("<Q", len(index_bytes)))
+        f.write(PACK_MAGIC)
+
+
 def copy_region_id_sibling(src: Path, dst: Path) -> None:
     # AssetManager auto-loads "<texture>.id.png"; keep that convention intact
     # in the baked output so region tinting works without extra manifest syntax.
-    src_id = src.with_suffix("").with_name(src.with_suffix("").name + ".id.png")
+    src_id = region_id_sibling_path(src)
     if not src_id.exists():
         return
-    dst_id = dst.with_suffix("").with_name(dst.with_suffix("").name + ".id.png")
+    dst_id = region_id_sibling_path(dst)
     copy_if_needed(src_id, dst_id)
 
 
@@ -132,6 +174,25 @@ def maybe_copy_animation_image(src_json: Path, dst_json: Path) -> list[Path]:
         copy_region_id_sibling(src_img, dst_img)
         deps.append(src_img)
     return deps
+
+
+def animation_output_paths(src_json: Path, dst_json: Path) -> list[Path]:
+    outputs = [dst_json]
+    try:
+        data = read_json(src_json)
+    except Exception:
+        return outputs
+    image = data.get("meta", {}).get("image")
+    if not image:
+        return outputs
+    src_img = (src_json.parent / image).resolve()
+    dst_img = dst_json.parent / image
+    if src_img.exists():
+        outputs.append(dst_img)
+        src_id = region_id_sibling_path(src_img)
+        if src_id.exists():
+            outputs.append(region_id_sibling_path(dst_img))
+    return outputs
 
 
 def run_font_bake(args: argparse.Namespace, src_font: Path, dst_font_source: Path, deps: list[Path]) -> None:
@@ -210,7 +271,7 @@ def compile_asset(
 
     # Discover dependency set before cache comparison where possible.
     if asset_type == "texture":
-        sibling = src.with_suffix("").with_name(src.with_suffix("").name + ".id.png")
+        sibling = region_id_sibling_path(src)
         if sibling.exists():
             deps.append(sibling)
     elif asset_type == "animation":
@@ -223,7 +284,13 @@ def compile_asset(
     digest = dependency_hash(deps, extra)
     previous = cache.get("assets", {}).get(key, {})
     outputs = [dst]
-    if asset_type == "font":
+    if asset_type == "texture":
+        sibling = region_id_sibling_path(src)
+        if sibling.exists():
+            outputs.append(region_id_sibling_path(dst))
+    elif asset_type == "animation":
+        outputs = animation_output_paths(src, dst)
+    elif asset_type == "font":
         outputs.append(Path(str(dst) + ".font"))
 
     cache_hit = previous.get("hash") == digest and all(p.exists() for p in outputs)
@@ -253,8 +320,27 @@ def compile_asset(
     }
 
     baked = dict(record)
-    baked["baked"] = normalize_rel(rel_src)
+    baked_rel = normalize_rel(rel_src)
+    baked["baked"] = pack_path_uri(args.pack_id, baked_rel) if args.pack else baked_rel
+    baked["_packOutputs"] = cache["assets"][key]["outputs"]
     return baked
+
+
+def collect_pack_outputs(records: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for record in records:
+        for rel in record.get("_packOutputs", []):
+            paths.append(str(rel))
+    return paths
+
+
+def strip_internal_fields(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for record in records:
+        clean = dict(record)
+        clean.pop("_packOutputs", None)
+        result.append(clean)
+    return result
 
 
 def main() -> int:
@@ -265,6 +351,8 @@ def main() -> int:
     parser.add_argument("--msdf-atlas-gen", default="", help="Optional msdf-atlas-gen executable")
     parser.add_argument("--font-size", type=int, default=32)
     parser.add_argument("--font-pxrange", type=int, default=4)
+    parser.add_argument("--pack", default="", help="Optional output .qpak path")
+    parser.add_argument("--pack-id", default="main", help="Pack id used in pak:// URIs")
     args = parser.parse_args()
 
     manifest = Path(args.manifest).resolve()
@@ -282,11 +370,25 @@ def main() -> int:
         for record in source["assets"]
     ]
 
+    if args.pack:
+        pack_path = Path(args.pack).resolve()
+        write_pack(pack_path, out_dir, collect_pack_outputs(baked_assets))
+
     baked_manifest = {
         "version": source.get("version", 1),
         "pipelineVersion": TOOL_VERSION,
-        "assets": baked_assets,
+        "assets": strip_internal_fields(baked_assets),
     }
+    if args.pack:
+        try:
+            pack_rel = pack_path.relative_to(out_dir)
+        except ValueError:
+            pack_rel = pack_path
+        baked_manifest["packs"] = [{
+            "id": args.pack_id,
+            "path": normalize_rel(pack_rel),
+        }]
+
     write_json(out_dir / "manifest.baked.json", baked_manifest)
     write_json(cache_path, cache)
     print(f"[resource_compiler] wrote {out_dir / 'manifest.baked.json'} ({len(baked_assets)} assets)")

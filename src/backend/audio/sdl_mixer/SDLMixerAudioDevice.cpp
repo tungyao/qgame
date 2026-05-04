@@ -66,6 +66,24 @@ SoundHandle SDLMixerAudioDevice::loadSound(const char* path) {
     return h;
 }
 
+SoundHandle SDLMixerAudioDevice::loadSoundFromMemory(const void* data, size_t size, const char* debugName) {
+    if (!initialized_ || !data || size == 0) return {};
+    SDL_IOStream* io = SDL_IOFromConstMem(data, size);
+    if (!io) {
+        core::logError("SDL_IOFromConstMem(%s) failed: %s", debugName, SDL_GetError());
+        return {};
+    }
+    MIX_Audio* audio = MIX_LoadAudio_IO(mixer_, io, /*predecode=*/true, /*closeio=*/true);
+    if (!audio) {
+        core::logError("MIX_LoadAudio_IO(%s) failed: %s", debugName, SDL_GetError());
+        return {};
+    }
+    SoundHandle h{nextHandleIdx_++, 1};
+    soundEntries_[h.index] = SoundEntry{audio, {}};
+    core::logInfo("Loaded sound %s from memory -> handle %u", debugName, h.index);
+    return h;
+}
+
 void SDLMixerAudioDevice::unloadSound(SoundHandle h) {
     if (!initialized_) return;
     auto it = soundEntries_.find(h.index);

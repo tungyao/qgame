@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <cstring>
+#include <iterator>
 
 namespace engine {
 
@@ -19,6 +21,73 @@ uint32_t AssetManager::nextAnimIndex_ = 1;
 
 uint32_t AssetManager::makeHandleKey(uint32_t index, uint32_t version) {
     return (index << 12) | (version & 0xFFFu);
+}
+
+bool AssetManager::isPackPath(const std::string& path) {
+    return path.rfind("pak://", 0) == 0;
+}
+
+bool AssetManager::splitPackPath(const std::string& path, std::string& outPackId, std::string& outFile) {
+    if (!isPackPath(path)) return false;
+    const size_t start = 6;
+    const size_t slash = path.find('/', start);
+    if (slash == std::string::npos || slash == start || slash + 1 >= path.size()) return false;
+    outPackId = path.substr(start, slash - start);
+    outFile = path.substr(slash + 1);
+    std::replace(outFile.begin(), outFile.end(), '\\', '/');
+    return true;
+}
+
+std::string AssetManager::normalizeAssetPath(const std::string& path) {
+    if (isPackPath(path)) {
+        const size_t hash = path.find('#');
+        const std::string pathOnly = hash == std::string::npos ? path : path.substr(0, hash);
+        const std::string suffix = hash == std::string::npos ? std::string{} : path.substr(hash);
+        std::string packId, file;
+        if (!splitPackPath(pathOnly, packId, file)) return path;
+        return "pak://" + packId + "/" + file + suffix;
+    }
+    return std::filesystem::path(path).lexically_normal().string();
+}
+
+std::string AssetManager::siblingRegionIdPath(const std::string& path) {
+    if (isPackPath(path)) {
+        std::string packId, file;
+        if (!splitPackPath(path, packId, file)) return {};
+        const size_t slash = file.find_last_of('/');
+        const size_t dot = file.find_last_of('.');
+        const bool hasExt = dot != std::string::npos && (slash == std::string::npos || dot > slash);
+        const std::string base = hasExt ? file.substr(0, dot) : file;
+        return "pak://" + packId + "/" + base + ".id.png";
+    }
+    std::filesystem::path sib = std::filesystem::path(path);
+    sib.replace_extension();
+    sib += ".id.png";
+    return sib.lexically_normal().string();
+}
+
+std::string AssetManager::parentAssetPath(const std::string& path) {
+    if (isPackPath(path)) {
+        std::string packId, file;
+        if (!splitPackPath(path, packId, file)) return {};
+        const size_t slash = file.find_last_of('/');
+        if (slash == std::string::npos) return "pak://" + packId + "/";
+        return "pak://" + packId + "/" + file.substr(0, slash + 1);
+    }
+    return std::filesystem::path(path).parent_path().string();
+}
+
+std::string AssetManager::joinAssetPath(const std::string& baseDir, const std::string& child) {
+    if (child.empty()) return baseDir;
+    if (isPackPath(child) || std::filesystem::path(child).is_absolute()) {
+        return normalizeAssetPath(child);
+    }
+    if (isPackPath(baseDir)) {
+        std::string base = baseDir;
+        if (!base.empty() && base.back() != '/') base += '/';
+        return normalizeAssetPath(base + child);
+    }
+    return (std::filesystem::path(baseDir) / child).lexically_normal().string();
 }
 
 void AssetManager::init(backend::IRenderDevice* render, backend::IAudioDevice* audio) {
@@ -51,6 +120,7 @@ void AssetManager::shutdown() {
     animByPath_.clear();
     animPathById_.clear();
     assetsById_.clear();
+    packsById_.clear();
     manifestDir_.clear();
     textureIdByPath_.clear();
     soundIdByPath_.clear();
@@ -60,6 +130,102 @@ void AssetManager::shutdown() {
     soundAssetIdByHandle_.clear();
     animationAssetIdByHandle_.clear();
     fontAssetIdByHandle_.clear();
+}
+
+bool AssetManager::mountPack(const std::string& id, const std::string& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.is_open()) {
+        core::logError("[AssetManager] failed to open pack %s: %s", id.c_str(), path.c_str());
+        return false;
+    }
+
+    ifs.seekg(0, std::ios::end);
+    const std::streamoff fileSize = ifs.tellg();
+    if (fileSize < 12) {
+        core::logError("[AssetManager] pack too small: %s", path.c_str());
+        return false;
+    }
+
+    char magic[4] = {};
+    ifs.seekg(fileSize - 4);
+    ifs.read(magic, 4);
+    if (std::memcmp(magic, "QPAK", 4) != 0) {
+        core::logError("[AssetManager] bad pack magic: %s", path.c_str());
+        return false;
+    }
+
+    uint64_t indexSize = 0;
+    ifs.seekg(fileSize - 12);
+    ifs.read(reinterpret_cast<char*>(&indexSize), sizeof(indexSize));
+    if (indexSize == 0 || indexSize > static_cast<uint64_t>(fileSize - 12)) {
+        core::logError("[AssetManager] invalid pack index size: %s", path.c_str());
+        return false;
+    }
+
+    std::string indexJson(indexSize, '\0');
+    ifs.seekg(fileSize - 12 - static_cast<std::streamoff>(indexSize));
+    ifs.read(indexJson.data(), static_cast<std::streamsize>(indexJson.size()));
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(indexJson);
+    } catch (const std::exception& e) {
+        core::logError("[AssetManager] pack index parse error in %s: %s", path.c_str(), e.what());
+        return false;
+    }
+
+    MountedPack pack{};
+    pack.path = path;
+    for (const auto& item : j.value("files", nlohmann::json::array())) {
+        PackEntry e{};
+        std::string rel = item.value("path", std::string{});
+        e.offset = item.value("offset", uint64_t{0});
+        e.size = item.value("size", uint64_t{0});
+        e.sha256 = item.value("sha256", std::string{});
+        if (!rel.empty()) {
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            pack.files[rel] = std::move(e);
+        }
+    }
+
+    core::logInfo("[AssetManager] mounted pack %s: %s (%zu files)",
+                  id.c_str(), path.c_str(), pack.files.size());
+    packsById_[id] = std::move(pack);
+    return true;
+}
+
+bool AssetManager::readAssetBytes(const std::string& path, std::vector<uint8_t>& out) const {
+    out.clear();
+    if (isPackPath(path)) {
+        std::string packId, file;
+        if (!splitPackPath(path, packId, file)) return false;
+        auto pit = packsById_.find(packId);
+        if (pit == packsById_.end()) return false;
+        auto fit = pit->second.files.find(file);
+        if (fit == pit->second.files.end()) return false;
+
+        std::ifstream ifs(pit->second.path, std::ios::binary);
+        if (!ifs.is_open()) return false;
+        out.resize(static_cast<size_t>(fit->second.size));
+        ifs.seekg(static_cast<std::streamoff>(fit->second.offset));
+        ifs.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
+        return static_cast<size_t>(ifs.gcount()) == out.size();
+    }
+
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.is_open()) return false;
+    out.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    return true;
+}
+
+bool AssetManager::assetPathExists(const std::string& path) const {
+    if (isPackPath(path)) {
+        std::string packId, file;
+        if (!splitPackPath(path, packId, file)) return false;
+        auto pit = packsById_.find(packId);
+        return pit != packsById_.end() && pit->second.files.find(file) != pit->second.files.end();
+    }
+    return std::filesystem::exists(path);
 }
 
 AssetManager::AssetType AssetManager::parseAssetType(const std::string& type) {
@@ -73,6 +239,7 @@ AssetManager::AssetType AssetManager::parseAssetType(const std::string& type) {
 std::string AssetManager::resolveManifestPath(const AssetRecord& rec) const {
     const std::string& raw = !rec.baked.empty() ? rec.baked : rec.source;
     if (raw.empty()) return {};
+    if (isPackPath(raw)) return normalizeAssetPath(raw);
 
     std::filesystem::path p(raw);
     if (p.is_absolute() || manifestDir_.empty()) return p.lexically_normal().string();
@@ -102,7 +269,7 @@ void AssetManager::indexManifestRecord(const AssetRecord& rec) {
 }
 
 const std::string& AssetManager::assetIdForPath(AssetType type, const std::string& path) const {
-    const std::string normalized = std::filesystem::path(path).lexically_normal().string();
+    const std::string normalized = normalizeAssetPath(path);
     switch (type) {
         case AssetType::Texture: {
             auto it = textureIdByPath_.find(normalized);
@@ -147,10 +314,24 @@ bool AssetManager::loadManifest(const std::string& path) {
 
     manifestDir_ = std::filesystem::path(path).parent_path().string();
     assetsById_.clear();
+    packsById_.clear();
     textureIdByPath_.clear();
     soundIdByPath_.clear();
     animationIdByPath_.clear();
     fontIdByPath_.clear();
+
+    if (j.contains("packs") && j["packs"].is_array()) {
+        for (const auto& item : j["packs"]) {
+            const std::string id = item.value("id", std::string{});
+            const std::string rawPath = item.value("path", std::string{});
+            if (id.empty() || rawPath.empty()) continue;
+            std::filesystem::path packPath(rawPath);
+            if (!packPath.is_absolute() && !manifestDir_.empty()) {
+                packPath = std::filesystem::path(manifestDir_) / packPath;
+            }
+            mountPack(id, packPath.lexically_normal().string());
+        }
+    }
 
     for (const auto& item : j["assets"]) {
         AssetRecord rec{};
@@ -241,10 +422,11 @@ FontHandle AssetManager::loadFontById(const std::string& id) {
 }
 
 TextureHandle AssetManager::loadTexture(const std::string& path) {
-    auto it = texByPath_.find(path);
+    const std::string cachePath = normalizeAssetPath(path);
+    auto it = texByPath_.find(cachePath);
     if (it != texByPath_.end()) {
         it->second.refCount++;
-        if (const std::string& assetId = assetIdForPath(AssetType::Texture, path); !assetId.empty()) {
+        if (const std::string& assetId = assetIdForPath(AssetType::Texture, cachePath); !assetId.empty()) {
             textureAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
         }
         return it->second.handle;
@@ -253,9 +435,16 @@ TextureHandle AssetManager::loadTexture(const std::string& path) {
     if (!render_) return {};
 
     int w, h, ch;
-    unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    std::vector<uint8_t> fileBytes;
+    if (!readAssetBytes(cachePath, fileBytes)) {
+        core::logError("[AssetManager] failed to read texture: %s", cachePath.c_str());
+        return {};
+    }
+    unsigned char* pixels = stbi_load_from_memory(fileBytes.data(),
+                                                  static_cast<int>(fileBytes.size()),
+                                                  &w, &h, &ch, 4);
     if (!pixels) {
-        core::logError("[AssetManager] failed to load texture: %s", path.c_str());
+        core::logError("[AssetManager] failed to load texture: %s", cachePath.c_str());
         return {};
     }
 
@@ -272,19 +461,23 @@ TextureHandle AssetManager::loadTexture(const std::string& path) {
     // sibling region ID 图：<path>.id.png（约定单通道 R8，不存在则忽略）
     TextureHandle h_region{};
     {
-        std::filesystem::path sib = std::filesystem::path(path);
-        sib.replace_extension();        // 去掉原后缀（含 .）
-        sib += ".id.png";
-        if (std::filesystem::exists(sib)) {
+        const std::string sib = siblingRegionIdPath(cachePath);
+        if (assetPathExists(sib)) {
             int rw = 0, rh = 0, rch = 0;
-            // 强制读 R 通道（stbi 会按需转换）
-            unsigned char* rpix = stbi_load(sib.string().c_str(), &rw, &rh, &rch, 1);
+            std::vector<uint8_t> regionBytes;
+            unsigned char* rpix = nullptr;
+            if (readAssetBytes(sib, regionBytes)) {
+                // 强制读 R 通道（stbi 会按需转换）
+                rpix = stbi_load_from_memory(regionBytes.data(),
+                                             static_cast<int>(regionBytes.size()),
+                                             &rw, &rh, &rch, 1);
+            }
             if (!rpix) {
                 core::logWarn("[AssetManager] region id sibling exists but failed to load: %s",
-                              sib.string().c_str());
+                              sib.c_str());
             } else if (rw != w || rh != h) {
                 core::logWarn("[AssetManager] region id %s size %dx%d != base %dx%d, ignored",
-                              sib.string().c_str(), rw, rh, w, h);
+                              sib.c_str(), rw, rh, w, h);
                 stbi_image_free(rpix);
             } else {
                 backend::TextureDesc rdesc{};
@@ -298,16 +491,16 @@ TextureHandle AssetManager::loadTexture(const std::string& path) {
                 stbi_image_free(rpix);
                 if (!h_region.valid()) {
                     core::logWarn("[AssetManager] failed to create region id GPU texture: %s",
-                                  sib.string().c_str());
+                                  sib.c_str());
                 }
             }
         }
     }
 
     uint32_t id = makeHandleKey(h_tex.index, h_tex.version);
-    texByPath_[path]  = {h_tex, 1, h_region};
-    texPathById_[id]  = path;
-    if (const std::string& assetId = assetIdForPath(AssetType::Texture, path); !assetId.empty()) {
+    texByPath_[cachePath]  = {h_tex, 1, h_region};
+    texPathById_[id]  = cachePath;
+    if (const std::string& assetId = assetIdForPath(AssetType::Texture, cachePath); !assetId.empty()) {
         textureAssetIdByHandle_[id] = assetId;
     }
     return h_tex;
@@ -324,27 +517,47 @@ TextureHandle AssetManager::regionIdTexture(TextureHandle base) const {
 }
 
 SoundHandle AssetManager::loadSound(const std::string& path) {
-    auto it = sndByPath_.find(path);
+    const std::string cachePath = normalizeAssetPath(path);
+    auto it = sndByPath_.find(cachePath);
     if (it != sndByPath_.end()) {
         it->second.refCount++;
-        if (const std::string& assetId = assetIdForPath(AssetType::Sound, path); !assetId.empty()) {
+        if (const std::string& assetId = assetIdForPath(AssetType::Sound, cachePath); !assetId.empty()) {
             soundAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
         }
         return it->second.handle;
     }
 
     if (!audio_) return {};
+    if (isPackPath(cachePath)) {
+        std::vector<uint8_t> soundBytes;
+        if (!readAssetBytes(cachePath, soundBytes)) {
+            core::logError("[AssetManager] failed to read sound: %s", cachePath.c_str());
+            return {};
+        }
+        SoundHandle h_snd = audio_->loadSoundFromMemory(soundBytes.data(), soundBytes.size(), cachePath.c_str());
+        if (!h_snd.valid()) {
+            core::logError("[AssetManager] failed to load sound: %s", cachePath.c_str());
+            return {};
+        }
+        uint32_t id = makeHandleKey(h_snd.index, h_snd.version);
+        sndByPath_[cachePath] = {h_snd, 1};
+        sndPathById_[id] = cachePath;
+        if (const std::string& assetId = assetIdForPath(AssetType::Sound, cachePath); !assetId.empty()) {
+            soundAssetIdByHandle_[id] = assetId;
+        }
+        return h_snd;
+    }
 
-    SoundHandle h_snd = audio_->loadSound(path.c_str());
+    SoundHandle h_snd = audio_->loadSound(cachePath.c_str());
     if (!h_snd.valid()) {
-        core::logError("[AssetManager] failed to load sound: %s", path.c_str());
+        core::logError("[AssetManager] failed to load sound: %s", cachePath.c_str());
         return {};
     }
 
     uint32_t id = makeHandleKey(h_snd.index, h_snd.version);
-    sndByPath_[path]  = {h_snd, 1};
-    sndPathById_[id]  = path;
-    if (const std::string& assetId = assetIdForPath(AssetType::Sound, path); !assetId.empty()) {
+    sndByPath_[cachePath]  = {h_snd, 1};
+    sndPathById_[id]  = cachePath;
+    if (const std::string& assetId = assetIdForPath(AssetType::Sound, cachePath); !assetId.empty()) {
         soundAssetIdByHandle_[id] = assetId;
     }
     return h_snd;
@@ -383,36 +596,37 @@ void AssetManager::releaseSound(SoundHandle h) {
 
 // 解析 Aseprite JSON (Array 格式)。path 形如 "anim/player.json" 或 "anim/player.json#walk"
 AnimationHandle AssetManager::loadAnimation(const std::string& path) {
-    auto it = animByPath_.find(path);
+    const std::string cachePath = normalizeAssetPath(path);
+    auto it = animByPath_.find(cachePath);
     if (it != animByPath_.end()) {
         it->second.refCount++;
-        if (const std::string& assetId = assetIdForPath(AssetType::Animation, path); !assetId.empty()) {
+        if (const std::string& assetId = assetIdForPath(AssetType::Animation, cachePath); !assetId.empty()) {
             animationAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
         }
         return it->second.handle;
     }
 
     // 拆分 path 和 tag
-    std::string filePath = path;
+    std::string filePath = cachePath;
     std::string tagName;
-    if (auto hash = path.find('#'); hash != std::string::npos) {
-        filePath = path.substr(0, hash);
-        tagName  = path.substr(hash + 1);
+    if (auto hash = cachePath.find('#'); hash != std::string::npos) {
+        filePath = cachePath.substr(0, hash);
+        tagName  = cachePath.substr(hash + 1);
     }
 
     AnimationClip clip;
     clip.name = tagName.empty() ? filePath : tagName;
     clip.loop = true;
 
-    std::ifstream ifs(filePath);
-    if (!ifs.is_open()) {
-        core::logError("[AssetManager] failed to open animation file: %s", filePath.c_str());
+    std::vector<uint8_t> jsonBytes;
+    if (!readAssetBytes(filePath, jsonBytes)) {
+        core::logError("[AssetManager] failed to read animation file: %s", filePath.c_str());
         return {};
     }
 
     nlohmann::json j;
     try {
-        ifs >> j;
+        j = nlohmann::json::parse(jsonBytes.begin(), jsonBytes.end());
     } catch (const std::exception& e) {
         core::logError("[AssetManager] json parse error: %s", e.what());
         return {};
@@ -512,11 +726,11 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
 
     // 4) 加载 spritesheet 贴图 (meta.image 相对 JSON 文件目录)
     if (j.contains("meta") && j["meta"].contains("image")) {
-        std::filesystem::path dir = std::filesystem::path(filePath).parent_path();
-        std::filesystem::path img = dir / j["meta"]["image"].get<std::string>();
-        clip.texture = loadTexture(img.string());
+        std::string dir = parentAssetPath(filePath);
+        std::string img = joinAssetPath(dir, j["meta"]["image"].get<std::string>());
+        clip.texture = loadTexture(img);
         if (!clip.texture.valid()) {
-            core::logWarn("[AssetManager] failed to load spritesheet: %s", img.string().c_str());
+            core::logWarn("[AssetManager] failed to load spritesheet: %s", img.c_str());
         }
     }
 
@@ -524,9 +738,9 @@ AnimationHandle AssetManager::loadAnimation(const std::string& path) {
     h.index = nextAnimIndex_++;
     h.version = 1;
     uint32_t id = makeHandleKey(h.index, h.version);
-    animByPath_[path] = {h, 1, std::move(clip)};
-    animPathById_[id] = path;
-    if (const std::string& assetId = assetIdForPath(AssetType::Animation, path); !assetId.empty()) {
+    animByPath_[cachePath] = {h, 1, std::move(clip)};
+    animPathById_[id] = cachePath;
+    if (const std::string& assetId = assetIdForPath(AssetType::Animation, cachePath); !assetId.empty()) {
         animationAssetIdByHandle_[id] = assetId;
     }
     return h;
@@ -614,22 +828,25 @@ const std::string& AssetManager::fontAssetId(FontHandle h) const {
 }
 
 FontHandle AssetManager::loadFont(const std::string& path) {
-    auto it = fontByPath_.find(path);
+    const std::string cachePath = normalizeAssetPath(path);
+    auto it = fontByPath_.find(cachePath);
     if (it != fontByPath_.end()) {
         it->second.refCount++;
-        if (const std::string& assetId = assetIdForPath(AssetType::Font, path); !assetId.empty()) {
+        if (const std::string& assetId = assetIdForPath(AssetType::Font, cachePath); !assetId.empty()) {
             fontAssetIdByHandle_[makeHandleKey(it->second.handle.index, it->second.handle.version)] = assetId;
         }
         return it->second.handle;
     }
     if (!render_) return {};
 
-    const std::string binPath = path + ".font";
+    const std::string binPath = cachePath + ".font";
     FontData data{};
     std::vector<uint8_t> atlas;
-    if (!loadFontFile(binPath, data, atlas)) {
+    std::vector<uint8_t> fontBytes;
+    if (!readAssetBytes(binPath, fontBytes)
+        || !loadFontBytes(fontBytes.data(), fontBytes.size(), binPath, data, atlas)) {
         core::logError("[AssetManager] failed to load font: %s (expected baked file %s)",
-                       path.c_str(), binPath.c_str());
+                       cachePath.c_str(), binPath.c_str());
         return {};
     }
 
@@ -641,7 +858,7 @@ FontHandle AssetManager::loadFont(const std::string& path) {
     desc.filter   = backend::TextureFilter::Linear;  // MSDF 必须线性
     TextureHandle atlasTex = render_->createTexture(desc);
     if (!atlasTex.valid()) {
-        core::logError("[AssetManager] failed to create font atlas texture: %s", path.c_str());
+        core::logError("[AssetManager] failed to create font atlas texture: %s", cachePath.c_str());
         return {};
     }
     data.texture = atlasTex;
@@ -653,9 +870,9 @@ FontHandle AssetManager::loadFont(const std::string& path) {
     }
 
     uint32_t id = makeHandleKey(fh.index, fh.version);
-    fontByPath_[path]  = {fh, atlasTex, 1};
-    fontPathById_[id]  = path;
-    if (const std::string& assetId = assetIdForPath(AssetType::Font, path); !assetId.empty()) {
+    fontByPath_[cachePath]  = {fh, atlasTex, 1};
+    fontPathById_[id]  = cachePath;
+    if (const std::string& assetId = assetIdForPath(AssetType::Font, cachePath); !assetId.empty()) {
         fontAssetIdByHandle_[id] = assetId;
     }
     return fh;

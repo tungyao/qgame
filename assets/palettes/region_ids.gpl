@@ -1,0 +1,23 @@
+GIMP Palette
+Name: QGame Region IDs
+Columns: 8
+#
+# Aseprite region marker palette.
+# Region_00_None is background / no tint.
+# Region_01..Region_15 map to Tinting slots 1..15 after baking.
+  0   0   0	Region_00_None
+255   0   0	Region_01
+  0 200   0	Region_02
+  0  96 255	Region_03
+255 216   0	Region_04
+255   0 255	Region_05
+  0 224 224	Region_06
+255 128   0	Region_07
+128   0 255	Region_08
+128 255   0	Region_09
+  0 160 255	Region_10
+255  96 160	Region_11
+160  96   0	Region_12
+  0 128 128	Region_13
+ 64  64 192	Region_14
+224 224 224	Region_15

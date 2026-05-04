@@ -1,5 +1,6 @@
 #pragma once
 #include "../shared/ResourceHandle.h"
+#include <cstddef>
 
 namespace backend {
 
@@ -11,6 +12,7 @@ public:
     virtual void shutdown() = 0;
 
     virtual SoundHandle loadSound(const char* path)               = 0;
+    virtual SoundHandle loadSoundFromMemory(const void* data, size_t size, const char* debugName) = 0;
     virtual void        unloadSound(SoundHandle)                   = 0;
     virtual void        playSound(SoundHandle, float vol = 1.f)   = 0;
     virtual void        stopSound(SoundHandle)                     = 0;

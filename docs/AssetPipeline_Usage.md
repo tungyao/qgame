@@ -1,6 +1,6 @@
 # Asset Pipeline 使用文档
 
-> 覆盖已落地 Phase 1-4：manifest + 稳定 asset ID、资源编译/烘焙、场景 asset ID 序列化、增量缓存。
+> 覆盖已落地 Phase 1-5：manifest + 稳定 asset ID、资源编译/烘焙、场景 asset ID 序列化、增量缓存、QPAK 打包/挂载。
 > 源码：`src/engine/assets/AssetManager.*`、`tools/resource_compiler.py`、`src/engine/scene/SceneSerializer.cpp`。
 
 ---
@@ -16,8 +16,9 @@
 7. [纹理 region ID](#7-纹理-region-id)
 8. [动画资源](#8-动画资源)
 9. [增量构建](#9-增量构建)
-10. [限制与约定](#10-限制与约定)
-11. [后续 Phase 预留接口](#11-后续-phase-预留接口)
+10. [QPAK 打包](#10-qpak-打包)
+11. [限制与约定](#11-限制与约定)
+12. [后续 Phase 预留接口](#12-后续-phase-预留接口)
 
 ---
 
@@ -39,6 +40,7 @@ AnimationHandle clip = api.loadAnimationById("animation.demo.test");
 - Phase 2：`tools/resource_compiler.py` 生成 baked manifest 和 baked asset root
 - Phase 3：场景保存优先写 asset ID，路径字段只做兼容回退
 - Phase 4：资源编译器用依赖 hash 做增量跳过
+- Phase 5：资源编译器生成 `.qpak`，运行时按 `pak://` 虚拟路径读取
 
 ---
 
@@ -104,7 +106,8 @@ ID 不要包含文件扩展名，也不要直接编码目录结构。目录可�
 python3 tools/resource_compiler.py \
   --manifest assets/manifest.json \
   --out-dir build/assets \
-  --cache build/assets/.assetcache.json
+  --cache build/assets/.assetcache.json \
+  --pack build/assets/main.qpak
 ```
 
 输出：
@@ -112,6 +115,7 @@ python3 tools/resource_compiler.py \
 ```text
 build/assets/
 ├── manifest.baked.json
+├── main.qpak
 ├── .assetcache.json
 ├── fonts/DejaVuSans.ttf
 ├── fonts/DejaVuSans.ttf.font
@@ -125,13 +129,19 @@ build/assets/
 ```json
 {
   "version": 1,
-  "pipelineVersion": 1,
+  "pipelineVersion": 2,
+  "packs": [
+    {
+      "id": "main",
+      "path": "main.qpak"
+    }
+  ],
   "assets": [
     {
       "id": "font.demo.main",
       "type": "font",
       "source": "fonts/DejaVuSans.ttf",
-      "baked": "fonts/DejaVuSans.ttf"
+      "baked": "pak://main/fonts/DejaVuSans.ttf"
     }
   ]
 }
@@ -359,25 +369,16 @@ cmake --build build --target asset_manifest_demo
 
 ---
 
-## 10. 限制与约定
+## 10. QPAK 打包
 
-- 当前没有 `.pak` 打包，baked asset root 仍是散文件。
-- 当前没有运行时热更新，修改资源后需要重新运行 `qgame_assets` 并重启程序。
-- 当前没有自动删除 stale 输出文件。删除 manifest 记录后，旧 baked 文件可能仍留在 `build/assets`。
-- `AssetManager` 当前以路径作为缓存 key。Phase 5 接 pack/VFS 时，推荐让 baked path 变成虚拟路径。
-- 场景保存 asset ID 依赖 handle 反查。资源必须来自已加载 manifest，或者路径能匹配 manifest 解析后的路径。
-- 字体运行时仍要求 `path + ".font"`，所以 baked manifest 的 font `baked` 指向 `.ttf` 路径，而不是 `.font` 路径。
+CMake 默认会让 `qgame_assets` 同时生成：
 
----
+```text
+build/assets/manifest.baked.json
+build/assets/main.qpak
+```
 
-## 11. 后续 Phase 预留接口
-
-### Phase 5：打包与挂载
-
-推荐方向：
-
-- `resource_compiler.py` 增加 `--pack out.pak`
-- `manifest.baked.json` 的 `baked` 字段改为虚拟路径：
+打包后的 manifest 会包含 `packs` 列表，并把每个资源的 `baked` 字段写成：
 
 ```json
 {
@@ -387,7 +388,52 @@ cmake --build build --target asset_manifest_demo
 }
 ```
 
-运行时只需要让 `AssetManager::resolveManifestPath()` 或底层文件系统理解虚拟路径。
+运行时只需要照常加载 baked manifest：
+
+```cpp
+api.loadAssetManifest(QGAME_BAKED_MANIFEST);
+TextureHandle tex = api.loadTextureById("texture.demo.character");
+```
+
+`AssetManager` 会在读取 manifest 时自动 mount `main.qpak`。当前支持从 QPAK 读取：
+
+- `texture`，包括 sibling `*.id.png`
+- `font`，读取 `*.ttf.font`
+- `animation`，包括 Aseprite JSON 的 `meta.image`
+- `sound` / `audio`，通过 SDL_mixer 内存加载
+
+QPAK 文件格式很小：
+
+```text
+[file blobs][json index][uint64 index_size]["QPAK"]
+```
+
+index 记录虚拟路径、offset、size 和 sha256。当前没有压缩和加密，目标是先把运行时路径从散文件切到 pack/VFS。
+
+---
+
+## 11. 限制与约定
+
+- 当前没有运行时热更新，修改资源后需要重新运行 `qgame_assets` 并重启程序。
+- 当前没有自动删除 stale 输出文件。删除 manifest 记录后，旧 baked 文件可能仍留在 `build/assets`。
+- QPAK 当前不做压缩、加密、分块读取缓存或版本兼容迁移。
+- `GameAPI::playMusic(path)` 仍是直接路径 API；音乐流如果要走 pack，后续建议接入 AssetManager 或增加 stream asset ID。
+- `AssetManager` 当前以路径作为缓存 key。pack 模式下 key 是 `pak://...` 虚拟路径。
+- 场景保存 asset ID 依赖 handle 反查。资源必须来自已加载 manifest，或者路径能匹配 manifest 解析后的路径。
+- 字体运行时仍要求 `path + ".font"`，所以 baked manifest 的 font `baked` 指向 `.ttf` 路径，而不是 `.font` 路径。
+
+---
+
+## 12. 后续 Phase 预留接口
+
+### Pack/VFS 后续增强
+
+推荐方向：
+
+- QPAK 压缩：按文件或按 block 压缩
+- 多 pack mount：base/game/dlc/mod 分层覆盖
+- pack index 校验：加载时可选择验证 sha256
+- 文件系统抽象：让 `FileSystem`、Audio stream、编辑器预览共用同一套 VFS
 
 ### Phase 6：热更新 / 编辑器集成
 

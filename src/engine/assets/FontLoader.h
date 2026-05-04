@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <cstddef>
 #include <cstdint>
 #include "../components/FontData.h"
 
@@ -33,5 +34,11 @@ namespace engine {
 bool loadFontFile(const std::string& path,
                   FontData& outData,
                   std::vector<uint8_t>& outAtlasRGBA);
+
+bool loadFontBytes(const uint8_t* bytes,
+                   size_t size,
+                   const std::string& debugName,
+                   FontData& outData,
+                   std::vector<uint8_t>& outAtlasRGBA);
 
 } // namespace engine

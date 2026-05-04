@@ -2,6 +2,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <cstdint>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../components/AnimatorComponent.h"
 #include "../components/FontData.h"
@@ -85,6 +86,17 @@ private:
         std::string baked;
     };
 
+    struct PackEntry {
+        uint64_t offset = 0;
+        uint64_t size = 0;
+        std::string sha256;
+    };
+
+    struct MountedPack {
+        std::string path;
+        std::unordered_map<std::string, PackEntry> files;
+    };
+
     backend::IRenderDevice* render_ = nullptr;
     backend::IAudioDevice*  audio_  = nullptr;
 
@@ -98,6 +110,7 @@ private:
     std::unordered_map<std::string, AnimEntry> animByPath_;
     std::unordered_map<std::string, FontEntry> fontByPath_;
     std::unordered_map<std::string, AssetRecord> assetsById_;
+    std::unordered_map<std::string, MountedPack> packsById_;
     std::string manifestDir_;
 
     // handle -> path 反查表。key 使用 Handle 的 20-bit index + 12-bit version，
@@ -126,9 +139,18 @@ private:
 
     static AssetType parseAssetType(const std::string& type);
     static uint32_t makeHandleKey(uint32_t index, uint32_t version);
+    static bool isPackPath(const std::string& path);
+    static bool splitPackPath(const std::string& path, std::string& outPackId, std::string& outFile);
+    static std::string normalizeAssetPath(const std::string& path);
+    static std::string siblingRegionIdPath(const std::string& path);
+    static std::string parentAssetPath(const std::string& path);
+    static std::string joinAssetPath(const std::string& baseDir, const std::string& child);
     std::string resolveManifestPath(const AssetRecord& rec) const;
     void indexManifestRecord(const AssetRecord& rec);
     const std::string& assetIdForPath(AssetType type, const std::string& path) const;
+    bool mountPack(const std::string& id, const std::string& path);
+    bool readAssetBytes(const std::string& path, std::vector<uint8_t>& out) const;
+    bool assetPathExists(const std::string& path) const;
 };
 
 } // namespace engine

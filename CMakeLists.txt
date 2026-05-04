@@ -92,6 +92,7 @@ add_subdirectory(src/engine)
 set(QGAME_SOURCE_MANIFEST "${CMAKE_SOURCE_DIR}/assets/manifest.json")
 set(QGAME_BAKED_ASSET_DIR "${CMAKE_BINARY_DIR}/assets")
 set(QGAME_BAKED_MANIFEST "${QGAME_BAKED_ASSET_DIR}/manifest.baked.json")
+set(QGAME_ASSET_PACK "${QGAME_BAKED_ASSET_DIR}/main.qpak")
 if(Python3_Interpreter_FOUND AND EXISTS "${QGAME_SOURCE_MANIFEST}")
     add_custom_target(qgame_assets ALL
         COMMAND ${Python3_EXECUTABLE}
@@ -99,7 +100,9 @@ if(Python3_Interpreter_FOUND AND EXISTS "${QGAME_SOURCE_MANIFEST}")
                 --manifest "${QGAME_SOURCE_MANIFEST}"
                 --out-dir "${QGAME_BAKED_ASSET_DIR}"
                 --cache "${QGAME_BAKED_ASSET_DIR}/.assetcache.json"
-        BYPRODUCTS "${QGAME_BAKED_MANIFEST}"
+                --pack "${QGAME_ASSET_PACK}"
+                --pack-id "main"
+        BYPRODUCTS "${QGAME_BAKED_MANIFEST}" "${QGAME_ASSET_PACK}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Compiling QGame assets"
         VERBATIM
@@ -118,8 +121,10 @@ if(BUILD_GAME)
 endif()
 
 if(BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests/hello_compute)
     add_subdirectory(tests/asset_manifest_demo)
+    add_subdirectory(tests/asset_pack_smoke)
 endif()
 
 #if(BUILD_EDITOR)
