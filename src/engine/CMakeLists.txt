@@ -15,6 +15,7 @@ add_library(engine SHARED
     input/SDLInputProvider.cpp
     assets/AssetManager.cpp
     assets/FontLoader.cpp
+    prefabs/PlayerPrefab.cpp
     scene/SceneSerializer.cpp
     resources/GPUDrivenRenderer.cpp
 )

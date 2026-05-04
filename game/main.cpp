@@ -8,6 +8,7 @@
 #include <engine/components/TextComponent.h>
 #include <engine/components/UIComponents.h>
 #include <engine/components/TweenComponent.h>
+#include <engine/prefabs/PlayerPrefab.h>
 #include <engine/systems/RenderSystem.h>
 #include <SDL3/SDL.h>
 #include <vector>
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+
 
 static std::vector<uint8_t> makeCheckerboard(int w, int h, int cellSize, core::Color a, core::Color b) {
 	std::vector<uint8_t> px(w * h * 4);
@@ -689,8 +691,17 @@ int main(int argc, char* argv[]) {
 	}
 	engine::EngineContext ctx;
 	ctx.init(cfg);
+
 	engine::GameAPI api{ ctx };
 
+	const bool manifestOk = api.loadAssetManifest(QGAME_BAKED_MANIFEST);
+	TextureHandle character = api.loadTextureById("texture.demo.character");
+	engine::FontHandle font = api.loadFontById("font.demo.main");
+	AnimationHandle playerAnim  = api.loadAnimationById("animation.demo.test");
+	if (!manifestOk || !character.valid() || !font.valid() || !playerAnim.valid()) {
+		printf("[Assets] failed to load baked QPAK manifest or demo assets\n");
+		return 1;
+	}
 	// ── 上传程序化纹理 ────────────────────────────────────────────────────────
 	auto checkerPx = makeCheckerboard(64, 64, 8, { 255,100,100,255 }, { 100,100,255,255 });
 	TextureHandle spriteTex = api.createTextureFromMemory(checkerPx.data(), 64, 64);
@@ -703,12 +714,6 @@ int main(int argc, char* argv[]) {
 
 	auto stoppedPx = makeTextTexture("Stopped", { 255, 100, 100, 255 });
 	TextureHandle stoppedTex = api.createTextureFromMemory(stoppedPx.data(), 56, 16);
-
-	// ── 字体 ───────────────────────────────────────────────────────────────────
-	engine::FontHandle font = api.loadFont("assets/fonts/DejaVuSans.ttf");
-
-	// ── 动画 ───────────────────────────────────────────────────────────────────
-	AnimationHandle playerAnim = api.assetManager().loadAnimation("assets/test_anim.json");
 
 	// Phase 1 测试：构造一个 one-shot "attack" clip，复用 spriteTex
 	AnimationHandle attackAnim;
@@ -882,16 +887,33 @@ int main(int argc, char* argv[]) {
 	// ── Player (带动画) ───────────────────────────────────────────────────────
 	entt::entity player;
 	{
-		player = api.spawnEntity();
-		api.addComponent(player, engine::Transform{ 640.f, 300.f });
-		engine::Sprite sp{};
-		sp.texture = spriteTex;
-		sp.srcRect = { 0.f, 0.f, 32.f, 32.f };
-		sp.layer = 3;
-		sp.pass = engine::RenderPass::World;
-		sp.tint = { 255, 255, 100, 255 };
-		sp.ySort = true;
-		api.addComponent(player, sp);
+		// Prefab smoke test:
+		// createPlayer 是“代码工厂式预制体”的最小样例。它把玩家最常见的
+		// Transform/Sprite/TextComponent 组合集中到一个 C++ 函数里，game 层
+		// 只传入当前场景关心的坐标、纹理、字体和颜色。
+		engine::prefabs::PlayerPrefabDesc desc{};
+		desc.x = 640.f;
+		desc.y = 300.f;
+		desc.texture = spriteTex;
+		desc.srcW = 32.f;
+		desc.srcH = 32.f;
+		desc.font = font;
+		desc.label = "Prefab Player";
+		desc.labelFontSize = 20.f;
+		desc.spriteLayer = 3;
+		desc.textLayer = 20;
+		desc.spriteTint = { 255, 255, 100, 255 };
+		desc.textColor = { 255, 230, 120, 255 };
+		player = engine::prefabs::createPlayer(api, desc);
+
+		// 这段输出就是 game 侧测试：如果后续有人改坏 prefab 组成，
+		// 启动 game 时能第一时间看到哪个基础组件缺了。
+		const bool prefabOk =
+			api.hasComponent<engine::Transform>(player) &&
+			api.hasComponent<engine::Sprite>(player) &&
+			api.hasComponent<engine::TextComponent>(player);
+		printf("[PrefabTest] createPlayer components: %s\n", prefabOk ? "OK" : "FAILED");
+
 		engine::AnimatorComponent anim{};
 		anim.currentAnim = playerAnim;
 		anim.playing = false;
@@ -1326,11 +1348,11 @@ int main(int argc, char* argv[]) {
 
 	if (CREATE_MANY_SPRITES) {
 		printf("\n");
-		printf("╔════════════════════════════════════════════════════════════════╗\n");
-		printf("║         GPU-Driven 2D Rendering Architecture Test              ║\n");
-		printf("╠════════════════════════════════════════════════════════════════╣\n");
-		printf("║  Creating %4d sprites in a grid for stress testing...        ║\n", SPRITE_GRID_SIZE * SPRITE_GRID_SIZE);
-		printf("╚════════════════════════════════════════════════════════════════╝\n");
+		printf("+----------------------------------------------------------------+\n");
+		printf("|         GPU-Driven 2D Rendering Architecture Test              |\n");
+		printf("+----------------------------------------------------------------+\n");
+		printf("|  Creating %4d sprites in a grid for stress testing...        |\n", SPRITE_GRID_SIZE * SPRITE_GRID_SIZE);
+		printf("+----------------------------------------------------------------+\n");
 
 		auto smallPx = makeCheckerboard(16, 16, 4, { 200, 200, 100, 255 }, { 100, 100, 200, 255 });
 		smallTex = api.createTextureFromMemory(smallPx.data(), 16, 16);
@@ -1364,17 +1386,17 @@ int main(int argc, char* argv[]) {
 		}
 
 		printf("\n");
-		printf("┌─────────────────────────────────────────────────────────────────┐\n");
-		printf("│  GPU-Driven Rendering - Controls                               │\n");
-		printf("├─────────────────────────────────────────────────────────────────┤\n");
-		printf("│  G       : Toggle GPU/CPU rendering mode                       │\n");
-		printf("│  Arrows  : Move camera (view sprites outside viewport)         │\n");
-		printf("│  WASD    : Move player sprite                                  │\n");
-		printf("│  ESC     : Quit                                                │\n");
-		printf("├─────────────────────────────────────────────────────────────────┤\n");
-		printf("│  Current: %d sprites created                              │\n", SPRITE_GRID_SIZE * SPRITE_GRID_SIZE);
-		printf("│  Tip: Move camera to see GPU culling in action!                │\n");
-		printf("└─────────────────────────────────────────────────────────────────┘\n\n");
+		printf("+-----------------------------------------------------------------+\n");
+		printf("|  GPU-Driven Rendering - Controls                               |\n");
+		printf("+-----------------------------------------------------------------+\n");
+		printf("|  G       : Toggle GPU/CPU rendering mode                       |\n");
+		printf("|  Arrows  : Move camera (view sprites outside viewport)         |\n");
+		printf("|  WASD    : Move player sprite                                  |\n");
+		printf("|  ESC     : Quit                                                |\n");
+		printf("+-----------------------------------------------------------------+\n");
+		printf("|  Current: %d sprites created                              |\n", SPRITE_GRID_SIZE * SPRITE_GRID_SIZE);
+		printf("|  Tip: Move camera to see GPU culling in action!                |\n");
+		printf("+-----------------------------------------------------------------+\n\n");
 	}
 
 	// ── GPU-driven 状态与性能显示 ─────────────────────────────────────────────
@@ -1541,16 +1563,16 @@ int main(int argc, char* argv[]) {
 	// UI System v2 测试
 	// ═══════════════════════════════════════════════════════════════════════════
 	printf("\n");
-	printf("╔════════════════════════════════════════════════════════════════╗\n");
-	printf("║                  UI System v2 Test                             ║\n");
-	printf("╠════════════════════════════════════════════════════════════════╣\n");
-	printf("║  - Click button to trigger callback                            ║\n");
-	printf("║  - Drag slider to change volume                                ║\n");
-	printf("║  - Toggle the switch                                           ║\n");
-	printf("║  - Watch progress bar animate                                  ║\n");
-	printf("║  - Drag the red square anywhere                                ║\n");
-	printf("║  - Player entity has a world-anchored health bar               ║\n");
-	printf("╚════════════════════════════════════════════════════════════════╝\n\n");
+	printf("+----------------------------------------------------------------+\n");
+	printf("|                  UI System v2 Test                             |\n");
+	printf("+----------------------------------------------------------------+\n");
+	printf("|  - Click button to trigger callback                            |\n");
+	printf("|  - Drag slider to change volume                                |\n");
+	printf("|  - Toggle the switch                                           |\n");
+	printf("|  - Watch progress bar animate                                  |\n");
+	printf("|  - Drag the red square anywhere                                |\n");
+	printf("|  - Player entity has a world-anchored health bar               |\n");
+	printf("+----------------------------------------------------------------+\n\n");
 
 	auto canvas = api.createCanvas(1280, 720);
 
@@ -2152,23 +2174,23 @@ int main(int argc, char* argv[]) {
 				renderSystem.setGPUDrivenEnabled(gpuDrivenEnabled);
 
 				printf("\n");
-				printf("╔════════════════════════════════════════════════════════════════╗\n");
-				printf("║  Rendering Mode: %-45s  ║\n",
+				printf("+----------------------------------------------------------------+\n");
+				printf("|  Rendering Mode: %-45s  |\n",
 					gpuDrivenEnabled ? "GPU-DRIVEN (Fast)" : "CPU-DRIVEN (Traditional)");
-				printf("╠════════════════════════════════════════════════════════════════╣\n");
+				printf("+----------------------------------------------------------------+\n");
 				if (gpuDrivenEnabled) {
-					printf("║  ✓ GPU Culling:  Parallel O(n/64) on GPU                      ║\n");
-					printf("║  ✓ GPU Sorting:  Radix Sort O(n) on GPU                       ║\n");
-					printf("║  ✓ Draw Calls:   1-10 (batched)                               ║\n");
-					printf("║  ✓ CPU Time:     < 0.5ms                                      ║\n");
+					printf("|  + GPU Culling:  Parallel O(n/64) on GPU                      |\n");
+					printf("|  + GPU Sorting:  Radix Sort O(n) on GPU                       |\n");
+					printf("|  + Draw Calls:   1-10 (batched)                               |\n");
+					printf("|  + CPU Time:     < 0.5ms                                      |\n");
 				}
 				else {
-					printf("║  • CPU Culling:  Linear O(n) scan                             ║\n");
-					printf("║  • CPU Sorting:  QuickSort O(n log n)                         ║\n");
-					printf("║  • Draw Calls:   10-100+ (texture switches)                   ║\n");
-					printf("║  • CPU Time:     5-20ms (depends on sprite count)             ║\n");
+					printf("|  - CPU Culling:  Linear O(n) scan                             |\n");
+					printf("|  - CPU Sorting:  QuickSort O(n log n)                         |\n");
+					printf("|  - Draw Calls:   10-100+ (texture switches)                   |\n");
+					printf("|  - CPU Time:     5-20ms (depends on sprite count)             |\n");
 				}
-				printf("╚════════════════════════════════════════════════════════════════╝\n\n");
+				printf("+----------------------------------------------------------------+\n\n");
 			}
 
 			// 更新状态文本
