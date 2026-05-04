@@ -24,6 +24,11 @@ public:
     void shutdown()   override;
 
     // IRenderDevice
+    const RendererCapabilities& capabilities() const override { return capabilities_; }
+    const RenderFrameStats& frameStats() const override { return frameStats_; }
+    RenderFrameStats& mutableFrameStats() override { return frameStats_; }
+    void resetFrameStats() override { frameStats_ = RenderFrameStats{}; }
+
     TextureHandle createTexture(const TextureDesc&) override;
     void          destroyTexture(TextureHandle)     override;
     ShaderHandle  createShader(const ShaderDesc&)  override;
@@ -138,6 +143,12 @@ private:
     SDL_GPUBuffer*           vertexBuf_ = nullptr;
     SDL_GPUBuffer*           indexBuf_  = nullptr;
     SDL_GPUTransferBuffer*   transferBuf_ = nullptr;
+
+    // Capabilities are populated from resources we actually created, not from
+    // optimistic API assumptions. This keeps fallback decisions deterministic
+    // across Vulkan/Metal/D3D12 SDL_GPU drivers.
+    RendererCapabilities     capabilities_{};
+    RenderFrameStats         frameStats_{};
 
     // UBO (projection matrix) — 通过 PushUniformData 传递（更简单）
     // SDL3 GPU API 支持 SDL_PushGPUVertexUniformData

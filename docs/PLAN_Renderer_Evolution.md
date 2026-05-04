@@ -2,6 +2,7 @@
 
 > 目标：从当前的"CPU 录制 + Pass 分桶"演进到"GPU-Driven + Compute-First"，为 2D 光追与 GPU 计算（物理/粒子/AI）打底。
 > 原则：**数据导向、CPU/GPU 对称、Pass 即节点、保留软件 fallback**。
+> GPU 性能专项计划见：`docs/PLAN_GPU_Performance_Roadmap.md`。该计划明确 OpenGL/CPU-batch 仅作为 fallback 与正确性测试，不作为性能优化目标。
 
 ---
 

@@ -4,11 +4,74 @@
 #include "CommandBuffer.h"
 #include "../shared/ResourceHandle.h"
 #include "../../engine/components/FontData.h"
+#include <cstdint>
 
 namespace backend {
 
 enum class TextureFilter { Nearest, Linear };
 enum class TextureFormat { RGBA8, R8 };
+
+// 后端能力是渲染路径选择的唯一事实来源。上层不要通过 dynamic_cast
+// 猜测设备类型，而是根据这些标志决定是否启用 GPU-driven、compute、
+// indirect draw 等高级路径。
+struct RendererCapabilities {
+    // Compute/storage are the foundation for GPU culling, GPU sorting, and
+    // compute lighting. They do not imply a specific high-level renderer.
+    bool supportsCompute = false;
+    bool supportsStorageBuffer = false;
+    bool supportsStorageTexture = false;
+
+    // High-level path switches. A backend may support compute but still fail
+    // the specialized sprite pipeline, in which case RenderSystem must fall
+    // back to CPU-batch rendering.
+    bool supportsGPUDrivenSprite = false;
+    bool supportsIndirectDraw = false;
+
+    // Binding/diagnostic capabilities that unlock later stages without
+    // changing the public rendering model.
+    bool supportsTextureArray = false;
+    bool supportsTimestampQuery = false;
+};
+
+enum class RenderPath : uint8_t {
+    Unknown = 0,
+    SDLGPU_GPUDriven,
+    SDLGPU_CPUBatch,
+    OpenGL_CPUBatch
+};
+
+inline const char* renderPathName(RenderPath path) {
+    switch (path) {
+        case RenderPath::SDLGPU_GPUDriven: return "SDL_GPU_GPUDriven";
+        case RenderPath::SDLGPU_CPUBatch:  return "SDL_GPU_CPUBatch";
+        case RenderPath::OpenGL_CPUBatch:  return "OpenGL_CPUBatch";
+        case RenderPath::Unknown:
+        default:                           return "Unknown";
+    }
+}
+
+// 每帧统计只记录“路径与成本信号”，不承载策略逻辑。它是后续
+// upload queue、GPU culling、indirect draw 的回归仪表盘。
+struct RenderFrameStats {
+    RenderPath path = RenderPath::Unknown;
+    const char* fallbackReason = nullptr; // 指向静态字符串，避免每帧分配。
+
+    // Scene scale observed by RenderSystem.
+    uint32_t spriteCount = 0;
+    uint32_t visibleSpriteCount = 0;
+
+    // Backend submission shape. GPU batches count GPU-driven instance batches;
+    // draw calls includes both CPU-batch and GPU-driven draw submissions.
+    uint32_t gpuDrawBatchCount = 0;
+    uint32_t drawCallCount = 0;
+    uint32_t computeDispatchCount = 0;
+    uint32_t textureBindCount = 0;
+
+    // Upload pressure is the first target for the next stage: frame upload
+    // queue + staging/ring buffers should drive these numbers down.
+    uint64_t uploadBytes = 0;
+    uint32_t uploadCallCount = 0;
+};
 
 enum class BufferUsage : uint32_t {
     Vertex   = 1 << 0,
@@ -73,6 +136,11 @@ struct ComputePipelineDesc {
 
 class IRenderDevice : public IBackendSystem {
 public:
+    virtual const RendererCapabilities& capabilities() const = 0;
+    virtual const RenderFrameStats& frameStats() const = 0;
+    virtual RenderFrameStats& mutableFrameStats() = 0;
+    virtual void resetFrameStats() = 0;
+
     virtual TextureHandle createTexture(const TextureDesc&) = 0;
     virtual void destroyTexture(TextureHandle) = 0;
     virtual ShaderHandle createShader(const ShaderDesc&) = 0;

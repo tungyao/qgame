@@ -65,7 +65,21 @@ namespace engine {
 		ctx_.renderDevice().endFrame();
 
 		if (frameCount_ > 0 && frameCount_ % 300 == 0 && dt > 0.0f) {
-			core::logInfo("frame %llu  fps %.1f", static_cast<unsigned long long>(frameCount_), 1.0f / dt);
+			const backend::RenderFrameStats& rs = ctx_.renderDevice().frameStats();
+			core::logInfo(
+				"frame %llu  fps %.1f  render=%s sprites=%u visible=%u draws=%u gpuBatches=%u uploads=%u/%lluB compute=%u%s%s",
+				static_cast<unsigned long long>(frameCount_),
+				1.0f / dt,
+				backend::renderPathName(rs.path),
+				rs.spriteCount,
+				rs.visibleSpriteCount,
+				rs.drawCallCount,
+				rs.gpuDrawBatchCount,
+				rs.uploadCallCount,
+				static_cast<unsigned long long>(rs.uploadBytes),
+				rs.computeDispatchCount,
+				rs.fallbackReason ? " fallback=" : "",
+				rs.fallbackReason ? rs.fallbackReason : "");
 		}
 
 		++frameCount_;

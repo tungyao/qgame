@@ -21,6 +21,11 @@ public:
     void shutdown()   override;
 
     // IRenderDevice — 资源
+    const RendererCapabilities& capabilities() const override { return capabilities_; }
+    const RenderFrameStats& frameStats() const override { return frameStats_; }
+    RenderFrameStats& mutableFrameStats() override { return frameStats_; }
+    void resetFrameStats() override { frameStats_ = RenderFrameStats{}; }
+
     TextureHandle createTexture(const TextureDesc&) override;
     void          destroyTexture(TextureHandle)     override;
     ShaderHandle  createShader(const ShaderDesc&)  override;
@@ -122,6 +127,12 @@ private:
     SDL_Window*     window_    = nullptr;
 	bool		   debug_ = false;
     SDL_GLContext   glContext_ = nullptr;
+
+    // OpenGL is intentionally treated as the correctness fallback for the GPU
+    // roadmap. We keep capabilities conservative so new performance paths do
+    // not accidentally depend on this backend.
+    RendererCapabilities capabilities_{};
+    RenderFrameStats     frameStats_{};
 
     // Shader program
     unsigned int shaderProgram_ = 0;

@@ -129,12 +129,39 @@ void RenderSystem::update(float /*dt*/) {
     syncEntitiesToGPU();
     spriteBuffer_.advanceFrame();
     spriteBuffer_.uploadDirty();
-    
-    if (gpuRenderer_.isInitialized() && gpuRenderer_.hasCullingPipeline()) {
+
+    backend::IRenderDevice& dev = ctx_.renderDevice();
+    backend::RenderFrameStats& stats = dev.mutableFrameStats();
+    stats.spriteCount = spriteBuffer_.activeCount();
+
+    // Route selection is capability driven. The CPU-batch path remains a
+    // correctness fallback; all performance work should make this branch less
+    // frequent rather than faster.
+    const backend::RendererCapabilities& caps = dev.capabilities();
+    const bool canUseGPUDriven =
+        caps.supportsGPUDrivenSprite &&
+        gpuRenderer_.isInitialized() &&
+        gpuRenderer_.hasCullingPipeline();
+
+    if (canUseGPUDriven) {
+        stats.path = backend::RenderPath::SDLGPU_GPUDriven;
+        stats.fallbackReason = nullptr;
         static bool logged = false;
         if (!logged) { core::logInfo("[GPU-driven] using GPU-driven path"); logged = true; }
         buildCommandBufferGPUDriven();
     } else {
+        stats.path = caps.supportsStorageBuffer
+            ? backend::RenderPath::SDLGPU_CPUBatch
+            : backend::RenderPath::OpenGL_CPUBatch;
+        if (!caps.supportsGPUDrivenSprite) {
+            stats.fallbackReason = "gpu-driven sprite pipeline unavailable";
+        } else if (!gpuRenderer_.isInitialized()) {
+            stats.fallbackReason = "gpu-driven renderer not initialized";
+        } else if (!gpuRenderer_.hasCullingPipeline()) {
+            stats.fallbackReason = "compute culling pipeline unavailable";
+        } else {
+            stats.fallbackReason = "gpu-driven path disabled";
+        }
         buildCommandBuffer();
     }
 }
@@ -454,6 +481,9 @@ void RenderSystem::buildCommandBuffer() {
                     }
                 }
             }
+            if (std::holds_alternative<backend::DrawSpriteCmd>(cmd)) {
+                dev.mutableFrameStats().visibleSpriteCount++;
+            }
             filtered.push_back(&cmd);
         }
 
@@ -639,6 +669,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                   });
 
         const uint32_t visibleCount = static_cast<uint32_t>(visibles.size());
+        dev.mutableFrameStats().visibleSpriteCount += visibleCount;
         std::vector<uint32_t> visibleIndices(visibleCount);
         std::vector<backend::IRenderDevice::GPUDrawBatch> batches;
         batches.reserve(8);

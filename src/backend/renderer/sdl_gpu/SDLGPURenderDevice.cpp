@@ -151,6 +151,21 @@ void SDLGPURenderDevice::init() {
     // 5. 创建所有渲染管线 (sprite, MSDF, GPU-driven)
     createPipeline();
 
+    // Capability policy for the SDL_GPU backend:
+    // - Storage buffers and compute are part of the intended mainline path.
+    // - GPU-driven sprite rendering is enabled only when its pipeline and
+    //   static quad index buffer were actually created.
+    // - Indirect, storage texture, texture array, and timestamp query stay
+    //   conservative until each feature has a real conformance test.
+    capabilities_.supportsCompute = true;
+    capabilities_.supportsStorageBuffer = true;
+    capabilities_.supportsStorageTexture = false;
+    capabilities_.supportsGPUDrivenSprite = (gpuDrivenPipeline_ != nullptr &&
+                                             gpuDrivenQuadIndexBuf_ != nullptr);
+    capabilities_.supportsIndirectDraw = false;
+    capabilities_.supportsTextureArray = false;
+    capabilities_.supportsTimestampQuery = false;
+
     // 6. 1×1 R8 dummy region 纹理（无 region 时绑到 sampler 槽 1）
     {
         TextureDesc dd{};
@@ -175,6 +190,7 @@ void SDLGPURenderDevice::beginFrame() {
     if (!device_) {
         return;
     }
+    resetFrameStats();
 
     // 从 GPU 设备获取一个新的 command buffer (本帧所有 GPU 命令都录制到这里)
     gpuCmdBuf_ = SDL_AcquireGPUCommandBuffer(device_);
@@ -518,6 +534,8 @@ void SDLGPURenderDevice::unmapBuffer(BufferHandle h) {
 // uploadToBuffer: CPU → transfer (map/memcpy/unmap) → GPU (copy pass)
 void SDLGPURenderDevice::uploadToBuffer(BufferHandle h, const void* data, size_t size, size_t offset) {
     if (!buffers_.valid(h) || !data || size == 0) return;
+    frameStats_.uploadBytes += static_cast<uint64_t>(size);
+    frameStats_.uploadCallCount++;
     BufferEntry& entry = buffers_.get(h);
     if (offset + size > entry.size) {
         core::logError("uploadToBuffer: out of bounds (offset=%zu, size=%zu, bufferSize=%zu)", offset, size, entry.size);
@@ -867,6 +885,7 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             }
 
             SDL_DispatchGPUCompute(computePass, d->groupCountX, d->groupCountY, d->groupCountZ);
+            frameStats_.computeDispatchCount++;
             SDL_EndGPUComputePass(computePass);
         }
         else if (auto* b = std::get_if<BarrierCmd>(cmd)) {
@@ -1123,6 +1142,8 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
         memcpy(mapped, batchVerts_.data(), vSize);
         memcpy(mapped + vSize, batchIdx_.data(), iSize);
         SDL_UnmapGPUTransferBuffer(device_, transferBuf_);
+        frameStats_.uploadBytes += static_cast<uint64_t>(vSize + iSize);
+        frameStats_.uploadCallCount++;
 
         SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmdBuf);
         SDL_GPUTransferBufferLocation vSrc{ transferBuf_, 0 };
@@ -1195,6 +1216,10 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
                     bindings[1] = rEntry ? SDL_GPUTextureSamplerBinding{ rEntry->gpuTex, rEntry->sampler }
                                          : bindings[0];
                     SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
+                    frameStats_.textureBindCount += 2;
+                }
+                if (segment.isFont) {
+                    frameStats_.textureBindCount++;
                 }
             }
 
@@ -1234,6 +1259,7 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             }
 
             SDL_DrawGPUIndexedPrimitives(pass, segment.idxCount, 1, segment.idxOffset, segment.vertOffset, 0);
+            frameStats_.drawCallCount++;
         }
     }
 
@@ -1784,9 +1810,12 @@ void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
             SDL_GPUTextureSamplerBinding tb{ te.gpuTex, te.sampler };
             SDL_BindGPUFragmentSamplers(pass, 0, &tb, 1);
             currentTex = batch.texture;
+            frameStats_.textureBindCount++;
         }
 
         SDL_DrawGPUIndexedPrimitives(pass, 6, batch.instanceCount, 0, 0, batch.firstInstance);
+        frameStats_.gpuDrawBatchCount++;
+        frameStats_.drawCallCount++;
     }
 
     SDL_EndGPURenderPass(pass);

@@ -250,6 +250,17 @@ void GLRenderDevice::init() {
     createShaderProgram();
     createBuffers();
 
+    // OpenGL is a correctness/reference backend for this roadmap. Keep these
+    // capabilities intentionally conservative so advanced GPU features only
+    // activate through the SDL_GPU path until explicitly ported and tested.
+    capabilities_.supportsCompute = false;
+    capabilities_.supportsStorageBuffer = false;
+    capabilities_.supportsStorageTexture = false;
+    capabilities_.supportsGPUDrivenSprite = false;
+    capabilities_.supportsIndirectDraw = false;
+    capabilities_.supportsTextureArray = false;
+    capabilities_.supportsTimestampQuery = false;
+
     // 1×1 R8 dummy region 纹理（id=0），无 region 时绑定它
     {
         TextureDesc dd{};
@@ -268,6 +279,7 @@ void GLRenderDevice::init() {
 
 void GLRenderDevice::beginFrame() {
     // Nothing to do — GL has no explicit frame acquire
+    resetFrameStats();
 }
 
 void GLRenderDevice::endFrame() {
@@ -902,6 +914,10 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
     glBufferData(GL_ELEMENT_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(batchIdx_.size() * sizeof(uint16_t)),
                  batchIdx_.data(), GL_STREAM_DRAW);
+    frameStats_.uploadBytes +=
+        static_cast<uint64_t>(batchVerts_.size() * sizeof(SpriteVertex)) +
+        static_cast<uint64_t>(batchIdx_.size() * sizeof(uint16_t));
+    frameStats_.uploadCallCount++;
 
     float proj[16];
     float view[16];
@@ -957,6 +973,7 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
                 ? seg.regionTex : dummyRegionTex_;
             if (textures_.valid(rtex)) {
                 glBindTexture(GL_TEXTURE_2D, textures_.get(rtex).glTex);
+                frameStats_.textureBindCount++;
             }
             glActiveTexture(GL_TEXTURE0);
         }
@@ -979,6 +996,7 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
 
         if (textures_.valid(seg.tex)) {
             glBindTexture(GL_TEXTURE_2D, textures_.get(seg.tex).glTex);
+            frameStats_.textureBindCount++;
         }
         glDrawElementsBaseVertex(
             GL_TRIANGLES,
@@ -987,6 +1005,7 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
             reinterpret_cast<const void*>(seg.idxOffset * sizeof(uint16_t)),
             seg.vertOffset
         );
+        frameStats_.drawCallCount++;
     }
     if (scissorEnabled) glDisable(GL_SCISSOR_TEST);
 
