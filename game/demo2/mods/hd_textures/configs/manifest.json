@@ -1,0 +1,11 @@
+{
+  "configs": [
+    {
+      "id": "config.mod.hd_textures.demo2",
+      "value": {
+        "label": "data mod config loaded",
+        "bonus": 42
+      }
+    }
+  ]
+}

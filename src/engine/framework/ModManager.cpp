@@ -1,13 +1,23 @@
 #include "ModManager.h"
 
+#include "ConfigRegistry.h"
+#include "GameContext.h"
+#include "PrefabRegistry.h"
+#include "SceneManager.h"
 #include "../assets/AssetManager.h"
-#include "../../core/Logger.h"
 
 #include <algorithm>
 #include <filesystem>
 #include <queue>
 #include <set>
-#include <unordered_set>
+
+#if defined(_WIN32)
+    #include <windows.h>
+#else
+    #include <dlfcn.h>
+#endif
+
+#include "../../core/Logger.h"
 
 namespace engine {
 
@@ -24,7 +34,111 @@ std::filesystem::path resolveRelativeTo(const std::filesystem::path& baseDir,
     return (baseDir / p).lexically_normal();
 }
 
+void modLogInfo(const char* message) {
+    core::logInfo("[NativeMod] %s", message ? message : "");
+}
+
+void modLogWarn(const char* message) {
+    core::logWarn("[NativeMod] %s", message ? message : "");
+}
+
+void modLogError(const char* message) {
+    core::logError("[NativeMod] %s", message ? message : "");
+}
+
+bool modLoadAssetManifest(QGameModContext* ctx, const char* path) {
+    if (!ctx || !ctx->userData || !path) return false;
+    auto* game = static_cast<GameContext*>(ctx->userData);
+    return game->assets.loadManifestOverlay(path, "native");
+}
+
+bool modRegisterScene(QGameModContext* ctx, const char* id, const char* path) {
+    if (!ctx || !ctx->userData || !id || !path) return false;
+    auto* game = static_cast<GameContext*>(ctx->userData);
+    return game->scenes && game->scenes->registerScene(id, path);
+}
+
+bool modRegisterSceneManifest(QGameModContext* ctx, const char* path) {
+    if (!ctx || !ctx->userData || !path) return false;
+    auto* game = static_cast<GameContext*>(ctx->userData);
+    return game->scenes && game->scenes->registerManifest(path);
+}
+
+bool modRegisterPrefabManifest(QGameModContext* ctx, const char* path) {
+    if (!ctx || !ctx->userData || !path) return false;
+    auto* game = static_cast<GameContext*>(ctx->userData);
+    return game->prefabs && game->prefabs->registerManifest(path);
+}
+
+bool modRegisterConfigManifest(QGameModContext* ctx, const char* path) {
+    if (!ctx || !ctx->userData || !path) return false;
+    auto* game = static_cast<GameContext*>(ctx->userData);
+    return game->configs && game->configs->registerManifest(path);
+}
+
+QGameLogAPI gLogApi{modLogInfo, modLogWarn, modLogError};
+QGameAssetManagerAPI gAssetApi{modLoadAssetManifest};
+QGameSceneRegistryAPI gSceneApi{modRegisterScene, modRegisterSceneManifest};
+QGamePrefabRegistryAPI gPrefabApi{modRegisterPrefabManifest};
+QGameConfigRegistryAPI gConfigApi{modRegisterConfigManifest};
+
 } // namespace
+
+ModManager::NativeLibrary::~NativeLibrary() {
+    close();
+}
+
+ModManager::NativeLibrary::NativeLibrary(NativeLibrary&& other) noexcept
+    : handle(other.handle) {
+    other.handle = nullptr;
+}
+
+ModManager::NativeLibrary&
+ModManager::NativeLibrary::operator=(NativeLibrary&& other) noexcept {
+    if (this == &other) return *this;
+    close();
+    handle = other.handle;
+    other.handle = nullptr;
+    return *this;
+}
+
+bool ModManager::NativeLibrary::open(const std::string& path) {
+    close();
+#if defined(_WIN32)
+    handle = LoadLibraryA(path.c_str());
+    if (!handle) {
+        core::logError("[ModManager] failed to load native mod library: %s", path.c_str());
+        return false;
+    }
+#else
+    handle = dlopen(path.c_str(), RTLD_NOW);
+    if (!handle) {
+        core::logError("[ModManager] failed to load native mod library %s: %s",
+                       path.c_str(), dlerror());
+        return false;
+    }
+#endif
+    return true;
+}
+
+void* ModManager::NativeLibrary::symbol(const char* name) const {
+    if (!handle) return nullptr;
+#if defined(_WIN32)
+    return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle), name));
+#else
+    return dlsym(handle, name);
+#endif
+}
+
+void ModManager::NativeLibrary::close() {
+    if (!handle) return;
+#if defined(_WIN32)
+    FreeLibrary(static_cast<HMODULE>(handle));
+#else
+    dlclose(handle);
+#endif
+    handle = nullptr;
+}
 
 bool ModManager::scanMods(const std::string& modsDir) {
     discovered_.clear();
@@ -196,6 +310,116 @@ bool ModManager::mountGameAssetsAndMods(AssetManager& assets,
     }
 
     return true;
+}
+
+bool ModManager::mountDataForMod(GameContext& ctx, const LoadedMod& mod) {
+    const std::filesystem::path modRoot(mod.rootDir);
+    const std::string sourceName = "mod:" + mod.manifest.id;
+
+    for (const std::string& manifest : mod.manifest.sceneManifests) {
+        if (!ctx.scenes) {
+            core::logError("[ModManager] scene manifest requires SceneManager: %s", sourceName.c_str());
+            return false;
+        }
+        const std::filesystem::path path = resolveRelativeTo(modRoot, manifest);
+        if (!ctx.scenes->registerManifest(normalizePath(path))) return false;
+    }
+
+    for (const std::string& manifest : mod.manifest.prefabManifests) {
+        if (!ctx.prefabs) {
+            core::logError("[ModManager] prefab manifest requires PrefabRegistry: %s", sourceName.c_str());
+            return false;
+        }
+        const std::filesystem::path path = resolveRelativeTo(modRoot, manifest);
+        if (!ctx.prefabs->registerManifest(normalizePath(path))) return false;
+    }
+
+    for (const std::string& manifest : mod.manifest.configManifests) {
+        if (!ctx.configs) {
+            core::logError("[ModManager] config manifest requires ConfigRegistry: %s", sourceName.c_str());
+            return false;
+        }
+        const std::filesystem::path path = resolveRelativeTo(modRoot, manifest);
+        if (!ctx.configs->registerManifest(normalizePath(path))) return false;
+    }
+
+    return true;
+}
+
+bool ModManager::mountDataMods(GameContext& ctx) {
+    for (const LoadedMod& mod : mountedMods_) {
+        if (!mountDataForMod(ctx, mod)) return false;
+    }
+    return true;
+}
+
+bool ModManager::mountGameAndMods(GameContext& ctx,
+                                  const std::string& gameManifestPath,
+                                  const GameManifest& gameManifest) {
+    if (!mountGameAssetsAndMods(ctx.assets, gameManifestPath, gameManifest)) {
+        return false;
+    }
+    return mountDataMods(ctx);
+}
+
+bool ModManager::loadNativeMod(GameContext& ctx, const LoadedMod& mod) {
+    if (mod.manifest.type != ModType::Native) return true;
+
+    const std::filesystem::path libraryPath =
+        resolveRelativeTo(std::filesystem::path(mod.rootDir), mod.manifest.library);
+
+    NativeMod native{};
+    native.mod = mod;
+    if (!native.library.open(normalizePath(libraryPath))) {
+        return false;
+    }
+
+    native.init = reinterpret_cast<QGameModInitFn>(native.library.symbol("qgame_mod_init"));
+    native.shutdown = reinterpret_cast<QGameModShutdownFn>(native.library.symbol("qgame_mod_shutdown"));
+    if (!native.init || !native.shutdown) {
+        core::logError("[ModManager] native mod missing qgame_mod_init/qgame_mod_shutdown: %s",
+                       mod.manifest.id.c_str());
+        return false;
+    }
+
+    native.context.apiVersion = QGAME_MOD_API_VERSION;
+    native.context.userData = &ctx;
+    native.context.assets = &gAssetApi;
+    native.context.scenes = &gSceneApi;
+    native.context.prefabs = &gPrefabApi;
+    native.context.configs = &gConfigApi;
+    native.context.log = &gLogApi;
+
+    if (!native.init(&native.context)) {
+        core::logError("[ModManager] qgame_mod_init failed: %s", mod.manifest.id.c_str());
+        return false;
+    }
+
+    core::logInfo("[ModManager] initialized native mod: %s", mod.manifest.id.c_str());
+    nativeMods_.push_back(std::move(native));
+    return true;
+}
+
+bool ModManager::loadNativeMods(GameContext& ctx) {
+    shutdownNativeMods();
+    for (const LoadedMod& mod : mountedMods_) {
+        if (!loadNativeMod(ctx, mod)) {
+            shutdownNativeMods();
+            return false;
+        }
+    }
+    return true;
+}
+
+void ModManager::shutdownNativeMods() {
+    for (int i = static_cast<int>(nativeMods_.size()) - 1; i >= 0; --i) {
+        NativeMod& mod = nativeMods_[static_cast<size_t>(i)];
+        if (mod.shutdown) {
+            mod.shutdown(&mod.context);
+            core::logInfo("[ModManager] shutdown native mod: %s", mod.mod.manifest.id.c_str());
+        }
+    }
+    nativeMods_.clear();
 }
 
 } // namespace engine

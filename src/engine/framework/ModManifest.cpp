@@ -24,6 +24,36 @@ bool parseModType(const std::string& text, ModType& out) {
     return false;
 }
 
+bool readStringList(const json& root,
+                    const char* singleName,
+                    const char* arrayName,
+                    std::vector<std::string>& out,
+                    const std::string& path) {
+    if (root.contains(singleName)) {
+        if (!root[singleName].is_string()) {
+            core::logError("[ModManifest] %s must be a string: %s", singleName, path.c_str());
+            return false;
+        }
+        out.push_back(root[singleName].get<std::string>());
+    }
+
+    if (root.contains(arrayName)) {
+        if (!root[arrayName].is_array()) {
+            core::logError("[ModManifest] %s must be an array: %s", arrayName, path.c_str());
+            return false;
+        }
+        for (const auto& item : root[arrayName]) {
+            if (!item.is_string()) {
+                core::logError("[ModManifest] %s entry must be a string: %s", arrayName, path.c_str());
+                return false;
+            }
+            out.push_back(item.get<std::string>());
+        }
+    }
+
+    return true;
+}
+
 } // namespace
 
 bool ModManifestLoader::loadFromFile(const std::string& path, ModManifest& out) {
@@ -49,6 +79,15 @@ bool ModManifestLoader::loadFromFile(const std::string& path, ModManifest& out) 
     parsed.priority = root.value("priority", 0);
     parsed.assetManifest = root.value("assetManifest", "");
     parsed.library = root.value("library", "");
+
+    if (!readStringList(root, "sceneManifest", "sceneManifests",
+                        parsed.sceneManifests, path) ||
+        !readStringList(root, "prefabManifest", "prefabManifests",
+                        parsed.prefabManifests, path) ||
+        !readStringList(root, "configManifest", "configManifests",
+                        parsed.configManifests, path)) {
+        return false;
+    }
 
     const std::string typeText = root.value("type", "data");
     if (!parseModType(typeText, parsed.type)) {

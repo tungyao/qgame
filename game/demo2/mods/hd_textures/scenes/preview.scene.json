@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "entities": [
+    {
+      "prefab": "prefab.mod.hd_textures.preview",
+      "components": {
+        "Transform": { "x": 690.0, "y": 285.0, "rot": 0.0, "sx": 3.5, "sy": 3.5 }
+      }
+    }
+  ]
+}

@@ -9,8 +9,12 @@
 #include <engine/api/GameAPI.h>
 #include <engine/components/RenderComponents.h>
 #include <engine/components/TextComponent.h>
+#include <engine/framework/ConfigRegistry.h>
+#include <engine/framework/GameContext.h>
 #include <engine/framework/GameManifest.h>
 #include <engine/framework/ModManager.h>
+#include <engine/framework/PrefabRegistry.h>
+#include <engine/framework/SceneManager.h>
 #include <engine/runtime/EngineConfig.h>
 #include <engine/runtime/EngineContext.h>
 
@@ -66,6 +70,11 @@ int main(int argc, char** argv) {
     engine::EngineContext ctx;
     ctx.init(cfg);
     engine::GameAPI api{ctx};
+    engine::GameContext gameCtx{ctx};
+    engine::ConfigRegistry configs{gameCtx};
+    engine::PrefabRegistry prefabs{gameCtx};
+    engine::SceneManager scenes{gameCtx};
+    gameCtx.api = &api;
 
     engine::GameManifest manifest;
     const bool gameManifestOk =
@@ -74,11 +83,14 @@ int main(int argc, char** argv) {
     engine::ModManager mods;
     const bool modMountOk =
         gameManifestOk &&
-        mods.mountGameAssetsAndMods(ctx.assetManager, QGAME_DEMO2_GAME_MANIFEST, manifest);
+        mods.mountGameAndMods(gameCtx, QGAME_DEMO2_GAME_MANIFEST, manifest);
 
     TextureHandle character = api.loadTextureById("texture.demo.character");
     engine::FontHandle font = api.loadFontById("font.demo.main");
     const auto chain = ctx.assetManager.assetOverrideChain("texture.demo.character");
+    const bool prefabOk = prefabs.hasPrefab("prefab.mod.hd_textures.preview");
+    const bool sceneOk = scenes.hasScene("scene.mod.hd_textures.preview");
+    const engine::ConfigDesc* demoConfig = configs.findConfig("config.mod.hd_textures.demo2");
 
     auto worldCam = api.spawnEntity();
     api.addComponent(worldCam, engine::Transform{0.f, 0.f});
@@ -128,6 +140,13 @@ int main(int argc, char** argv) {
              chain.size() > 1 ? core::Color{120, 210, 255, 255} : core::Color{255, 190, 120, 255});
     makeText(api, font, "winner path: " + path, 32.f, 148.f, 13.f,
              core::Color{185, 195, 210, 255});
+    makeText(api, font,
+             std::string("data mod: prefab ") + (prefabOk ? "OK" : "missing") +
+                 " | scene " + (sceneOk ? "OK" : "missing") +
+                 " | config bonus " + (demoConfig ? std::to_string(demoConfig->value.value("bonus", 0)) : "missing"),
+             32.f, 176.f, 15.f,
+             prefabOk && sceneOk && demoConfig ? core::Color{150, 235, 210, 255}
+                                               : core::Color{255, 130, 110, 255});
     makeText(api, font, "ESC closes. Pass --opengl to force OpenGL, --auto-exit for smoke tests.",
              32.f, 500.f, 14.f, core::Color{165, 175, 190, 255});
 

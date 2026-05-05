@@ -26,6 +26,9 @@ struct ModManifest {
     ModType type = ModType::Data;
     int priority = 0;
     std::string assetManifest;
+    std::vector<std::string> sceneManifests;
+    std::vector<std::string> prefabManifests;
+    std::vector<std::string> configManifests;
     std::string library;
     std::vector<std::string> dependencies;
 

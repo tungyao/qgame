@@ -1,6 +1,7 @@
 add_library(engine SHARED
     runtime/EngineContext.cpp
     runtime/FrameScheduler.cpp
+    framework/ConfigRegistry.cpp
     framework/GameInstance.cpp
     framework/GameManifest.cpp
     framework/ModManifest.cpp
@@ -65,6 +66,10 @@ target_link_libraries(engine
     PRIVATE stb_image
     PUBLIC  nlohmann_json::nlohmann_json
 )
+
+if(CMAKE_DL_LIBS)
+    target_link_libraries(engine PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 if(BUILD_EDITOR)
     target_compile_definitions(engine PUBLIC BUILD_EDITOR)

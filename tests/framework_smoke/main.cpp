@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <fstream>
+#include <algorithm>
 
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/RenderComponents.h>
@@ -8,12 +9,17 @@
 #include <engine/framework/GameManifest.h>
 #include <engine/framework/ModManifest.h>
 #include <engine/framework/ModManager.h>
+#include <engine/framework/ConfigRegistry.h>
 #include <engine/framework/PrefabRegistry.h>
 #include <engine/framework/SceneManager.h>
 #include <engine/assets/AssetManager.h>
 #include <engine/runtime/EngineContext.h>
 
 #include <filesystem>
+
+#ifndef QGAME_SMOKE_NATIVE_MOD_LIB
+#define QGAME_SMOKE_NATIVE_MOD_LIB ""
+#endif
 
 namespace {
 
@@ -49,6 +55,7 @@ public:
 int main() {
     engine::EngineContext engineCtx;
     engine::GameContext gameCtx(engineCtx);
+    engine::ConfigRegistry configs(gameCtx);
     engine::PrefabRegistry prefabs(gameCtx);
     engine::SceneManager scenes(gameCtx);
 
@@ -57,6 +64,9 @@ int main() {
     }
     if (gameCtx.prefabs != &prefabs) {
         return fail("PrefabRegistry was not exposed through GameContext");
+    }
+    if (gameCtx.configs != &configs) {
+        return fail("ConfigRegistry was not exposed through GameContext");
     }
 
     CountingGame game;
@@ -125,8 +135,12 @@ int main() {
     const std::filesystem::path modProject = "framework_smoke_mod_project";
     std::filesystem::create_directories(modProject / "assets");
     std::filesystem::create_directories(modProject / "mods" / "base_items" / "assets");
+    std::filesystem::create_directories(modProject / "mods" / "base_items" / "prefabs");
     std::filesystem::create_directories(modProject / "mods" / "hd_textures" / "assets");
+    std::filesystem::create_directories(modProject / "mods" / "hd_textures" / "scenes");
     std::filesystem::create_directories(modProject / "mods" / "balance_patch" / "assets");
+    std::filesystem::create_directories(modProject / "mods" / "balance_patch" / "configs");
+    std::filesystem::create_directories(modProject / "mods" / "native_smoke");
     {
         std::ofstream out(modProject / "assets" / "manifest.json");
         out << R"({
@@ -144,6 +158,7 @@ int main() {
   "type": "data",
   "priority": 0,
   "assetManifest": "assets/manifest.json",
+  "prefabManifest": "prefabs/manifest.json",
   "dependencies": []
 })";
     }
@@ -156,6 +171,20 @@ int main() {
 })";
     }
     {
+        std::ofstream out(modProject / "mods" / "base_items" / "prefabs" / "manifest.json");
+        out << R"({
+  "prefabs": [
+    {
+      "id": "prefab.mod.base_items.crate",
+      "components": {
+        "Name": { "s": "BaseCrate" },
+        "Transform": { "x": 7.0, "y": 8.0, "rot": 0.0, "sx": 1.0, "sy": 1.0 }
+      }
+    }
+  ]
+})";
+    }
+    {
         std::ofstream out(modProject / "mods" / "hd_textures" / "mod.json");
         out << R"({
   "id": "hd_textures",
@@ -164,6 +193,7 @@ int main() {
   "type": "data",
   "priority": 10,
   "assetManifest": "assets/manifest.json",
+  "sceneManifest": "scenes/manifest.json",
   "dependencies": [ "base_items" ]
 })";
     }
@@ -176,6 +206,26 @@ int main() {
 })";
     }
     {
+        std::ofstream out(modProject / "mods" / "hd_textures" / "scenes" / "manifest.json");
+        out << R"({
+  "scenes": [
+    { "id": "scene.mod.hd.preview", "path": "preview.scene.json" }
+  ]
+})";
+    }
+    {
+        std::ofstream out(modProject / "mods" / "hd_textures" / "scenes" / "preview.scene.json");
+        out << R"({
+  "version": 1,
+  "entities": [
+    {
+      "Name": { "s": "HdPreview" },
+      "Transform": { "x": 1.0, "y": 2.0, "rot": 0.0, "sx": 1.0, "sy": 1.0 }
+    }
+  ]
+})";
+    }
+    {
         std::ofstream out(modProject / "mods" / "balance_patch" / "mod.json");
         out << R"({
   "id": "balance_patch",
@@ -184,6 +234,7 @@ int main() {
   "type": "data",
   "priority": 20,
   "assetManifest": "assets/manifest.json",
+  "configManifest": "configs/manifest.json",
   "dependencies": []
 })";
     }
@@ -195,25 +246,51 @@ int main() {
   ]
 })";
     }
+    {
+        std::ofstream out(modProject / "mods" / "balance_patch" / "configs" / "manifest.json");
+        out << R"({
+  "configs": [
+    {
+      "id": "config.game.balance",
+      "value": { "playerDamage": 42, "source": "balance_patch" }
+    }
+  ]
+})";
+    }
+    {
+        std::string nativeLib = QGAME_SMOKE_NATIVE_MOD_LIB;
+        std::replace(nativeLib.begin(), nativeLib.end(), '\\', '/');
+        std::ofstream out(modProject / "mods" / "native_smoke" / "mod.json");
+        out << R"({
+  "id": "native_smoke",
+  "name": "Native Smoke",
+  "version": "0.1.0",
+  "type": "native",
+  "priority": 30,
+  "library": ")" << nativeLib << R"(",
+  "dependencies": [ "balance_patch" ]
+})";
+    }
 
     engine::GameManifest modGameManifest;
     modGameManifest.id = "mod_smoke_game";
     modGameManifest.startupScene = "scene.smoke";
     modGameManifest.assetManifest = "assets/manifest.json";
-    modGameManifest.mods = { "hd_textures", "balance_patch" };
+    modGameManifest.mods = { "hd_textures", "balance_patch", "native_smoke" };
 
-    engine::AssetManager modAssets;
     engine::ModManager mods;
-    if (!mods.mountGameAssetsAndMods(modAssets,
-                                      (modProject / "game.json").string(),
-                                      modGameManifest)) {
+    gameCtx.assets.shutdown();
+    gameCtx.assets.init(nullptr, nullptr);
+    if (!mods.mountGameAndMods(gameCtx,
+                               (modProject / "game.json").string(),
+                               modGameManifest)) {
         return fail("mod manager failed to mount game assets and mods");
     }
-    if (!modAssets.hasAsset("texture.demo.character") ||
-        !modAssets.hasAsset("texture.mod.base_items.marker")) {
+    if (!gameCtx.assets.hasAsset("texture.demo.character") ||
+        !gameCtx.assets.hasAsset("texture.mod.base_items.marker")) {
         return fail("mod assets were not mounted");
     }
-    auto chain = modAssets.assetOverrideChain("texture.demo.character");
+    auto chain = gameCtx.assets.assetOverrideChain("texture.demo.character");
     if (chain.size() != 3 ||
         chain[0].sourceName != "game" ||
         chain[1].sourceName != "mod:hd_textures" ||
@@ -221,11 +298,34 @@ int main() {
         return fail("mod override chain was not deterministic");
     }
     const auto& mounted = mods.mountedMods();
-    if (mounted.size() != 3 ||
+    if (mounted.size() != 4 ||
         mounted[0].manifest.id != "base_items" ||
         mounted[1].manifest.id != "hd_textures" ||
-        mounted[2].manifest.id != "balance_patch") {
+        mounted[2].manifest.id != "balance_patch" ||
+        mounted[3].manifest.id != "native_smoke") {
         return fail("mod load order did not respect dependencies and priority");
+    }
+    if (!prefabs.hasPrefab("prefab.mod.base_items.crate")) {
+        return fail("data mod prefab was not registered");
+    }
+    if (!scenes.hasScene("scene.mod.hd.preview")) {
+        return fail("data mod scene was not registered");
+    }
+    const engine::ConfigDesc* balance = configs.findConfig("config.game.balance");
+    if (!balance || balance->value.value("playerDamage", 0) != 42) {
+        return fail("data mod config was not registered");
+    }
+    std::filesystem::remove("framework_smoke_native_init.txt");
+    std::filesystem::remove("framework_smoke_native_shutdown.txt");
+    if (!mods.loadNativeMods(gameCtx)) {
+        return fail("native mod load failed");
+    }
+    if (!std::filesystem::exists("framework_smoke_native_init.txt")) {
+        return fail("native mod init did not run");
+    }
+    mods.shutdownNativeMods();
+    if (!std::filesystem::exists("framework_smoke_native_shutdown.txt")) {
+        return fail("native mod shutdown did not run");
     }
 
     const char* scenePath = "framework_smoke.scene.json";

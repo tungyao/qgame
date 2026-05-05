@@ -1,0 +1,19 @@
+{
+  "prefabs": [
+    {
+      "id": "prefab.mod.hd_textures.preview",
+      "components": {
+        "Name": { "s": "ModPreviewPrefab" },
+        "Transform": { "x": 640.0, "y": 300.0, "rot": 0.0, "sx": 3.0, "sy": 3.0 },
+        "Sprite": {
+          "assetId": "texture.demo.character",
+          "srcX": 0.0,
+          "srcY": 0.0,
+          "srcW": 32.0,
+          "srcH": 48.0,
+          "layer": 1
+        }
+      }
+    }
+  ]
+}

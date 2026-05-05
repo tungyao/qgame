@@ -1,5 +1,10 @@
 #include "SceneManager.h"
 
+#include <fstream>
+#include <filesystem>
+
+#include <nlohmann/json.hpp>
+
 #include "GameContext.h"
 #include "../scene/SceneSerializer.h"
 #include "../../core/Logger.h"
@@ -21,6 +26,50 @@ bool SceneManager::registerScene(const std::string& id, const std::string& path)
 
     scenes_[id] = SceneDesc{id, path};
     core::logInfo("[SceneManager] registered scene %s -> %s", id.c_str(), path.c_str());
+    return true;
+}
+
+bool SceneManager::registerManifest(const std::string& path) {
+    std::ifstream input(path);
+    if (!input) {
+        core::logError("[SceneManager] cannot read manifest: %s", path.c_str());
+        return false;
+    }
+
+    nlohmann::json root;
+    try {
+        input >> root;
+    } catch (const nlohmann::json::exception& ex) {
+        core::logError("[SceneManager] manifest parse error in %s: %s", path.c_str(), ex.what());
+        return false;
+    }
+
+    if (!root.contains("scenes") || !root["scenes"].is_array()) {
+        core::logError("[SceneManager] scenes must be an array: %s", path.c_str());
+        return false;
+    }
+
+    const std::filesystem::path baseDir = std::filesystem::path(path).parent_path();
+    size_t count = 0;
+    for (const auto& sceneJson : root["scenes"]) {
+        if (!sceneJson.is_object()) {
+            core::logError("[SceneManager] scene entry must be an object: %s", path.c_str());
+            return false;
+        }
+
+        const std::string id = sceneJson.value("id", "");
+        const std::string rawPath = sceneJson.value("path", "");
+        std::filesystem::path scenePath(rawPath);
+        if (!scenePath.is_absolute()) {
+            scenePath = baseDir / scenePath;
+        }
+        if (!registerScene(id, scenePath.lexically_normal().string())) {
+            return false;
+        }
+        ++count;
+    }
+
+    core::logInfo("[SceneManager] loaded %zu scene(s) from %s", count, path.c_str());
     return true;
 }
 

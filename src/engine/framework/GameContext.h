@@ -10,6 +10,7 @@
 namespace engine {
 
 class GameAPI;
+class ConfigRegistry;
 class PrefabRegistry;
 class SceneManager;
 
@@ -51,6 +52,7 @@ struct GameContext {
     // 自己拥有这些对象，从而保持初始化顺序简单明确。
     SceneManager* scenes = nullptr;
     PrefabRegistry* prefabs = nullptr;
+    ConfigRegistry* configs = nullptr;
     GameAPI* api = nullptr;
 
     // 便捷读取当前帧 dt。保留函数形式，后续如果加入暂停/时间缩放策略，

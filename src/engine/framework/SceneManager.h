@@ -29,6 +29,7 @@ public:
     // 注册一个 scene ID。重复注册同一 ID 会覆盖旧路径，便于后续 Mod 按确定性
     // 规则覆盖 scene 定义。
     bool registerScene(const std::string& id, const std::string& path);
+    bool registerManifest(const std::string& path);
 
     // 按稳定 ID 加载场景。成功后 currentSceneId/currentScenePath 同步更新。
     bool loadScene(const std::string& id);

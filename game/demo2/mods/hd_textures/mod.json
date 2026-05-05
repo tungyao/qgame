@@ -6,5 +6,8 @@
   "type": "data",
   "priority": 10,
   "assetManifest": "assets/manifest.json",
+  "prefabManifest": "prefabs/manifest.json",
+  "sceneManifest": "scenes/manifest.json",
+  "configManifest": "configs/manifest.json",
   "dependencies": []
 }
