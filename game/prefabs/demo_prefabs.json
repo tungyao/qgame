@@ -1,0 +1,29 @@
+{
+  "prefabs": [
+    {
+      "id": "prefab.demo.framework_actor",
+      "components": {
+        "Name": { "s": "FrameworkDataActor" },
+        "Transform": { "x": 0.0, "y": 0.0, "rot": 0.0, "sx": 1.0, "sy": 1.0 },
+        "Sprite": {
+          "assetId": "texture.demo.character",
+          "srcX": 0.0,
+          "srcY": 0.0,
+          "srcW": 32.0,
+          "srcH": 48.0,
+          "layer": 4,
+          "sortOrder": 0,
+          "ySort": false,
+          "visible": true,
+          "pass": 0,
+          "tintR": 120,
+          "tintG": 220,
+          "tintB": 255,
+          "tintA": 255,
+          "pivX": 0.5,
+          "pivY": 0.5
+        }
+      }
+    }
+  ]
+}

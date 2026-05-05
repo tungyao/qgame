@@ -10,6 +10,7 @@
 namespace engine {
 
 class GameAPI;
+class PrefabRegistry;
 class SceneManager;
 
 // GameContext 是 Game Framework 暴露给游戏/Mod 的“公开工作台”。
@@ -49,6 +50,7 @@ struct GameContext {
     // 可选门面。由宿主在创建 SceneManager / GameAPI 后回填，避免 GameContext
     // 自己拥有这些对象，从而保持初始化顺序简单明确。
     SceneManager* scenes = nullptr;
+    PrefabRegistry* prefabs = nullptr;
     GameAPI* api = nullptr;
 
     // 便捷读取当前帧 dt。保留函数形式，后续如果加入暂停/时间缩放策略，

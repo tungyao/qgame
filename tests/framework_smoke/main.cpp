@@ -1,11 +1,13 @@
 #include <cstdio>
 #include <fstream>
 
+#include <engine/components/PhysicsComponents.h>
 #include <engine/components/RenderComponents.h>
 #include <engine/framework/GameContext.h>
 #include <engine/framework/GameInstance.h>
 #include <engine/framework/GameManifest.h>
 #include <engine/framework/ModManifest.h>
+#include <engine/framework/PrefabRegistry.h>
 #include <engine/framework/SceneManager.h>
 #include <engine/runtime/EngineContext.h>
 
@@ -43,10 +45,14 @@ public:
 int main() {
     engine::EngineContext engineCtx;
     engine::GameContext gameCtx(engineCtx);
+    engine::PrefabRegistry prefabs(gameCtx);
     engine::SceneManager scenes(gameCtx);
 
     if (gameCtx.scenes != &scenes) {
         return fail("SceneManager was not exposed through GameContext");
+    }
+    if (gameCtx.prefabs != &prefabs) {
+        return fail("PrefabRegistry was not exposed through GameContext");
     }
 
     CountingGame game;
@@ -156,6 +162,75 @@ int main() {
     if (remainingNames.begin() != remainingNames.end() || !scenes.currentSceneId().empty()) {
         return fail("scene unload did not clear state");
     }
+
+    const char* prefabManifestPath = "framework_smoke.prefabs.json";
+    {
+        std::ofstream out(prefabManifestPath);
+        out << R"({
+  "prefabs": [
+    {
+      "id": "prefab.smoke.actor",
+      "components": {
+        "Name": { "s": "PrefabBase" },
+        "Transform": { "x": 1.0, "y": 2.0, "rot": 0.0, "sx": 1.0, "sy": 1.0 },
+        "RigidBody": { "vx": 3.0, "vy": 4.0, "gs": 0.0, "kin": true }
+      }
+    }
+  ]
+})";
+    }
+
+    if (!prefabs.registerManifest(prefabManifestPath)) {
+        return fail("prefab manifest registration failed");
+    }
+    if (!prefabs.hasPrefab("prefab.smoke.actor")) {
+        return fail("registered prefab was not found");
+    }
+
+    const char* prefabScenePath = "framework_smoke.prefab.scene.json";
+    {
+        std::ofstream out(prefabScenePath);
+        out << R"({
+  "version": 2,
+  "entities": [
+    {
+      "prefab": "prefab.smoke.actor",
+      "components": {
+        "Name": { "s": "PrefabInstance" },
+        "Transform": { "x": 50.0, "y": 60.0, "rot": 0.0, "sx": 2.0, "sy": 2.0 }
+      }
+    }
+  ]
+})";
+    }
+
+    if (!scenes.registerScene("scene.prefab_smoke", prefabScenePath)) {
+        return fail("prefab scene registration failed");
+    }
+    if (!scenes.loadScene("scene.prefab_smoke")) {
+        return fail("prefab scene load failed");
+    }
+
+    bool foundPrefabInstance = false;
+    auto prefabView = gameCtx.world.view<engine::Name, engine::Transform, engine::RigidBody>();
+    for (auto ent : prefabView) {
+        const auto& name = prefabView.get<engine::Name>(ent);
+        const auto& transform = prefabView.get<engine::Transform>(ent);
+        const auto& rb = prefabView.get<engine::RigidBody>(ent);
+        if (std::string(name.c_str()) == "PrefabInstance" &&
+            transform.x == 50.0f &&
+            transform.y == 60.0f &&
+            transform.scaleX == 2.0f &&
+            rb.velocityX == 3.0f &&
+            rb.isKinematic) {
+            foundPrefabInstance = true;
+        }
+    }
+    if (!foundPrefabInstance) {
+        return fail("prefab instance with scene overrides was not found");
+    }
+
+    scenes.unloadScene();
 
     game.onShutdown(gameCtx);
     if (game.shutdownCount != 1) {

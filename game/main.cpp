@@ -5,7 +5,9 @@
 #include <engine/framework/GameContext.h>
 #include <engine/framework/GameInstance.h>
 #include <engine/framework/GameManifest.h>
+#include <engine/framework/PrefabRegistry.h>
 #include <engine/framework/SceneManager.h>
+#include <engine/scene/SceneSerializer.h>
 #include <engine/components/RenderComponents.h>
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/AnimatorComponent.h>
@@ -15,15 +17,25 @@
 #include <engine/prefabs/PlayerPrefab.h>
 #include <engine/systems/RenderSystem.h>
 #include <SDL3/SDL.h>
+#include <nlohmann/json.hpp>
 #include <vector>
 #include <string>
 #include <functional>
+#include <fstream>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
 
 #ifndef QGAME_GAME_MANIFEST
 #define QGAME_GAME_MANIFEST "game/game.json"
+#endif
+
+#ifndef QGAME_DEMO_PREFAB_MANIFEST
+#define QGAME_DEMO_PREFAB_MANIFEST "game/prefabs/demo_prefabs.json"
+#endif
+
+#ifndef QGAME_DEMO_PREFAB_SCENE
+#define QGAME_DEMO_PREFAB_SCENE "game/scenes/prefab_demo.scene.json"
 #endif
 
 // DemoGameInstance lets the existing large demo move onto the Game Framework
@@ -741,6 +753,7 @@ int main(int argc, char* argv[]) {
 
 	engine::GameAPI api{ ctx };
 	engine::GameContext gameCtx{ ctx };
+	engine::PrefabRegistry prefabs{ gameCtx };
 	engine::SceneManager sceneManager{ gameCtx };
 	gameCtx.api = &api;
 
@@ -770,6 +783,25 @@ int main(int argc, char* argv[]) {
 				printf("[Assets] failed to load baked QPAK manifest or demo assets\n");
 				return false;
 			}
+			if (!prefabs.registerManifest(QGAME_DEMO_PREFAB_MANIFEST)) {
+				printf("[PrefabDataTest] failed to register prefab manifest: %s\n", QGAME_DEMO_PREFAB_MANIFEST);
+				return false;
+			}
+
+			// Scene/Prefab 数据化自检：把 prefab scene 加载到临时 registry，验证
+			// SceneSerializer 能解析 prefab 引用和局部组件覆盖。这里不加载到主
+			// world，避免清空后面的程序化 demo 场景。
+			entt::registry prefabSceneSmokeWorld;
+			if (!engine::SceneSerializer::loadScene(
+					prefabSceneSmokeWorld,
+					api.assetManager(),
+					QGAME_DEMO_PREFAB_SCENE,
+					&prefabs)) {
+				printf("[PrefabDataTest] failed to load prefab scene: %s\n", QGAME_DEMO_PREFAB_SCENE);
+				return false;
+			}
+			auto smokeView = prefabSceneSmokeWorld.view<engine::Name, engine::Transform, engine::Sprite>();
+			printf("[PrefabDataTest] prefab scene entities: %zu\n", static_cast<size_t>(smokeView.size_hint()));
 
 			(void)fw;
 			return true;
@@ -909,6 +941,48 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 100, 255, 100, 255 };
 		api.addComponent(e, sp);
+	}
+
+	// ── S2 Scene/Prefab 数据化可视测试 ─────────────────────────────────────────
+	// prefab_demo.scene.json 里目前有两个 prefab instance。这里把它们实例化进
+	// 当前 world，但同一时间只显示一个；按 N 键在两个 JSON 实例之间切换。
+	std::vector<entt::entity> prefabSceneEntities;
+	std::vector<engine::Transform> prefabSceneTransforms;
+	int activePrefabSceneIndex = 0;
+	auto applyPrefabSceneSwitch = [&]() {
+		for (size_t i = 0; i < prefabSceneEntities.size(); ++i) {
+			entt::entity e = prefabSceneEntities[i];
+			if (e == entt::null || !api.hasComponent<engine::Sprite>(e)) continue;
+			api.patchComponent<engine::Sprite>(e, [&](engine::Sprite& sprite) {
+				sprite.visible = static_cast<int>(i) == activePrefabSceneIndex;
+			});
+		}
+	};
+	{
+		std::ifstream sceneInput(QGAME_DEMO_PREFAB_SCENE);
+		if (!sceneInput) {
+			printf("[PrefabDataTest] cannot read prefab scene: %s\n", QGAME_DEMO_PREFAB_SCENE);
+		} else {
+			nlohmann::json sceneJson;
+			sceneInput >> sceneJson;
+			int index = 0;
+			for (const auto& entityJson : sceneJson.value("entities", nlohmann::json::array())) {
+				const std::string prefabId = entityJson.value("prefab", "");
+				const nlohmann::json overrides = entityJson.value("components", nlohmann::json::object());
+				entt::entity e = prefabs.instantiate(prefabId, ctx.world, api.assetManager(), overrides);
+				const bool ok = e != entt::null &&
+					api.hasComponent<engine::Name>(e) &&
+					api.hasComponent<engine::Transform>(e) &&
+					api.hasComponent<engine::Sprite>(e);
+				printf("[PrefabDataTest] scene instance %d (%s): %s\n", index, prefabId.c_str(), ok ? "OK" : "FAILED");
+				if (ok) {
+					prefabSceneEntities.push_back(e);
+					prefabSceneTransforms.push_back(api.getComponent<engine::Transform>(e));
+				}
+				++index;
+			}
+			applyPrefabSceneSwitch();
+		}
 	}
 
 	// ── Region Tint Demo：10 个不同 LUT 的角色 + 颜色平滑切换 ───────────────
@@ -2032,7 +2106,7 @@ int main(int argc, char* argv[]) {
 	// ── 底部提示 ─────────────────────────────────────────────────────────────────
 	{
 		auto hint = api.createUIText(700.f, 24.f,
-			"F1 toggle GPU-driven  |  ESC quit  |  arrow keys move world camera");
+			"F1 GPU-driven | N switch prefab scene instance | ESC quit | arrows move camera");
 		api.setUIParent(hint, canvas);
 		api.setUIAnchor(hint, 0.5f, 1.f, 0.5f, 1.f);
 		api.setUIPivot(hint, 0.5f, 1.f);
@@ -2241,6 +2315,20 @@ int main(int argc, char* argv[]) {
 			anim.localTimeScale = anim.localTimeScale * 0.5f;
 			if (anim.localTimeScale < 0.125f) anim.localTimeScale = 1.f;
 			printf("[Phase5] 7: BreatheBob timeScale = %.2f\n", anim.localTimeScale);
+		}
+
+		// S2 prefab scene 切换测试：prefab_demo.scene.json 里有两个 instance，
+		// N 键在它们之间切换，验证 scene-local overrides 都能恢复到各自原值。
+		if (api.isKeyJustPressed(SDLK_N) && !prefabSceneEntities.empty()) {
+			activePrefabSceneIndex = (activePrefabSceneIndex + 1) % static_cast<int>(prefabSceneEntities.size());
+			applyPrefabSceneSwitch();
+			if (api.hasComponent<engine::Name>(prefabSceneEntities[activePrefabSceneIndex])) {
+				const auto& name = api.getComponent<engine::Name>(prefabSceneEntities[activePrefabSceneIndex]);
+				printf("[PrefabDataTest] switched to prefab scene instance %d: %s\n",
+					activePrefabSceneIndex, name.c_str());
+			} else {
+				printf("[PrefabDataTest] switched to prefab scene instance %d\n", activePrefabSceneIndex);
+			}
 		}
 
 		auto& statusSpr = api.getComponent<engine::Sprite>(statusText);

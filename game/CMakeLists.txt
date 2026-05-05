@@ -3,6 +3,8 @@ add_executable(game
 )
 
 set(QGAME_GAME_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/game.json")
+set(QGAME_DEMO_PREFAB_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/prefabs/demo_prefabs.json")
+set(QGAME_DEMO_PREFAB_SCENE "${CMAKE_CURRENT_SOURCE_DIR}/scenes/prefab_demo.scene.json")
 
 target_link_libraries(game
     PRIVATE engine
@@ -18,10 +20,14 @@ if(TARGET qgame_assets)
     target_compile_definitions(game PRIVATE
         QGAME_BAKED_MANIFEST="${QGAME_BAKED_MANIFEST}"
         QGAME_GAME_MANIFEST="${QGAME_GAME_MANIFEST}"
+        QGAME_DEMO_PREFAB_MANIFEST="${QGAME_DEMO_PREFAB_MANIFEST}"
+        QGAME_DEMO_PREFAB_SCENE="${QGAME_DEMO_PREFAB_SCENE}"
     )
 else()
     target_compile_definitions(game PRIVATE
         QGAME_GAME_MANIFEST="${QGAME_GAME_MANIFEST}"
+        QGAME_DEMO_PREFAB_MANIFEST="${QGAME_DEMO_PREFAB_MANIFEST}"
+        QGAME_DEMO_PREFAB_SCENE="${QGAME_DEMO_PREFAB_SCENE}"
     )
 endif()
 

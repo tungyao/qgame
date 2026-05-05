@@ -114,6 +114,7 @@ struct Sprite {
     int           layer = 0;
     int           sortOrder = 0;
     bool          ySort = false;
+    bool          visible = true;
     core::Color   tint  = core::Color::White;
     float         pivotX = 0.5f;
     float         pivotY = 0.5f;

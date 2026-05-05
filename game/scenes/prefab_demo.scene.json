@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "entities": [
+    {
+      "prefab": "prefab.demo.framework_actor",
+      "components": {
+        "Name": { "s": "PrefabScene_A" },
+        "Transform": { "x": 100.0, "y": 100.0, "rot": 0.0, "sx": 2.0, "sy": 2.0 }
+      }
+    },
+    {
+      "prefab": "prefab.demo.framework_actor",
+      "components": {
+        "Name": { "s": "PrefabScene_B" },
+        "Transform": { "x": 180.0, "y": 100.0, "rot": 0.0, "sx": 2.0, "sy": 2.0 }
+      }
+    }
+  ]
+}

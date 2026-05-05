@@ -332,6 +332,7 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
 
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
+        if (!sprite.visible) continue;
         const AnimatorOutput* aout = ctx.world.try_get<AnimatorOutput>(ent);
 
         Drawable d{};
@@ -628,6 +629,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
 
         // ========== 收集 Sprite (GPU 路径) ==========
         for (auto [ent, eTf, spr] : spriteView.each()) {
+            if (!spr.visible) continue;
             if (!spr.gpuHandle.valid()) continue;
             const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
             if (!slot) continue;

@@ -5,6 +5,7 @@
 namespace engine {
 
 class AssetManager;
+class PrefabRegistry;
 
 // EnTT Snapshot + JSON archive 实现场景序列化/反序列化。
 // 资源引用优先写 assetId，路径字段仅作为旧场景/调试回退。
@@ -20,6 +21,13 @@ public:
     static bool loadScene(entt::registry& reg,
                           AssetManager& assetMgr,
                           const std::string& path);
+
+    // S2: 支持 scene entity 引用 prefab ID。
+    // prefabs 可为空；为空时 loader 仍保持旧行为，只读取直接写在场景里的组件。
+    static bool loadScene(entt::registry& reg,
+                          AssetManager& assetMgr,
+                          const std::string& path,
+                          const PrefabRegistry* prefabs);
 };
 
 } // namespace engine

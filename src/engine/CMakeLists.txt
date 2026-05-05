@@ -4,6 +4,7 @@ add_library(engine SHARED
     framework/GameInstance.cpp
     framework/GameManifest.cpp
     framework/ModManifest.cpp
+    framework/PrefabRegistry.cpp
     framework/SceneManager.cpp
     api/GameAPI.cpp
     api/GameAPI_ExplicitInstantiation.cpp
@@ -20,6 +21,7 @@ add_library(engine SHARED
     assets/AssetManager.cpp
     assets/FontLoader.cpp
     prefabs/PlayerPrefab.cpp
+    scene/ComponentJson.cpp
     scene/SceneSerializer.cpp
     resources/GPUDrivenRenderer.cpp
 )
@@ -53,7 +55,7 @@ target_link_libraries(engine
     PRIVATE platform
     PRIVATE SDL3::SDL3
     PRIVATE stb_image
-    PRIVATE nlohmann_json::nlohmann_json
+    PUBLIC  nlohmann_json::nlohmann_json
 )
 
 if(BUILD_EDITOR)

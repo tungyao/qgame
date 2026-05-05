@@ -31,7 +31,7 @@ bool SceneManager::loadScene(const std::string& id) {
         return false;
     }
 
-    if (!SceneSerializer::loadScene(ctx_.world, ctx_.assets, desc->path)) {
+    if (!SceneSerializer::loadScene(ctx_.world, ctx_.assets, desc->path, ctx_.prefabs)) {
         core::logError("[SceneManager] failed to load scene %s from %s",
                        id.c_str(), desc->path.c_str());
         return false;
@@ -49,7 +49,7 @@ bool SceneManager::loadScenePath(const std::string& path) {
         return false;
     }
 
-    if (!SceneSerializer::loadScene(ctx_.world, ctx_.assets, path)) {
+    if (!SceneSerializer::loadScene(ctx_.world, ctx_.assets, path, ctx_.prefabs)) {
         core::logError("[SceneManager] failed to load scene path %s", path.c_str());
         return false;
     }
