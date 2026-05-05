@@ -236,6 +236,32 @@ public:
 
     virtual void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) = 0;
 
+    // L2 2D lighting prototype. A compute shader writes a half-resolution
+    // black-alpha shadow overlay texture; the backend then draws that texture
+    // over the world color. This keeps the first hard-shadow milestone small
+    // while preserving the data contract needed by later full composite passes.
+    struct Light2DPoint {
+        float x = 0.f, y = 0.f;
+        float radius = 1.f, intensity = 1.f;
+        float colorR = 1.f, colorG = 1.f, colorB = 1.f, colorA = 1.f;
+    };
+
+    struct Light2DSegment {
+        float ax = 0.f, ay = 0.f, bx = 0.f, by = 0.f;
+        float opacity = 1.f, pad0 = 0.f, pad1 = 0.f, pad2 = 0.f;
+    };
+
+    struct Lighting2DParams {
+        std::vector<Light2DPoint> lights;
+        std::vector<Light2DSegment> segments;
+        CameraData camera;
+        uint32_t viewportW = 0;
+        uint32_t viewportH = 0;
+        bool enabled = true;
+    };
+
+    virtual void submitLighting2DPass(const PassSubmitInfo& info, const Lighting2DParams& params) = 0;
+
     bool debug_ = false;
 };
 

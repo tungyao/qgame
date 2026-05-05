@@ -98,6 +98,75 @@ bool cmdAABB(const backend::RenderCmd& cmd,
     return false;
 }
 
+backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ctx,
+                                                               const backend::CameraData& camera,
+                                                               uint32_t viewportW,
+                                                               uint32_t viewportH) {
+    backend::IRenderDevice::Lighting2DParams out{};
+    out.camera = camera;
+    out.viewportW = viewportW;
+    out.viewportH = viewportH;
+
+    // L2 prototype deliberately uploads only the first visible point light.
+    // The shader and acceptance target are scoped to one light + up to 64
+    // segments so we can validate hard-shadow correctness before tiled culling.
+    auto lightView = ctx.world.view<Transform, Light2D>();
+    for (auto [ent, tf, light] : lightView.each()) {
+        (void)ent;
+        if (!light.visible || light.radius <= 0.f) continue;
+        backend::IRenderDevice::Light2DPoint gpu{};
+        gpu.x = tf.x;
+        gpu.y = tf.y;
+        gpu.radius = light.radius;
+        gpu.intensity = light.intensity;
+        gpu.colorR = light.color.r / 255.f;
+        gpu.colorG = light.color.g / 255.f;
+        gpu.colorB = light.color.b / 255.f;
+        gpu.colorA = light.color.a / 255.f;
+        out.lights.push_back(gpu);
+        break;
+    }
+
+    auto pushSegment = [&](float ax, float ay, float bx, float by, float opacity) {
+        if (out.segments.size() >= 64) return;
+        backend::IRenderDevice::Light2DSegment seg{};
+        seg.ax = ax;
+        seg.ay = ay;
+        seg.bx = bx;
+        seg.by = by;
+        seg.opacity = opacity;
+        out.segments.push_back(seg);
+    };
+
+    auto occView = ctx.world.view<Transform, LightOccluder2D>();
+    for (auto [ent, tf, occ] : occView.each()) {
+        (void)ent;
+        if (!occ.castsShadow || occ.opacity <= 0.f) continue;
+
+        if (occ.shape == LightOccluder2D::Shape::Segment) {
+            pushSegment(tf.x + occ.ax, tf.y + occ.ay,
+                        tf.x + occ.bx, tf.y + occ.by,
+                        occ.opacity);
+        } else {
+            // AABB is treated as centered on Transform. That matches demo3's
+            // debug rectangles and keeps the first GPU data path unambiguous.
+            const float hw = occ.width * 0.5f;
+            const float hh = occ.height * 0.5f;
+            const float x0 = tf.x - hw;
+            const float y0 = tf.y - hh;
+            const float x1 = tf.x + hw;
+            const float y1 = tf.y + hh;
+            pushSegment(x0, y0, x1, y0, occ.opacity);
+            pushSegment(x1, y0, x1, y1, occ.opacity);
+            pushSegment(x1, y1, x0, y1, occ.opacity);
+            pushSegment(x0, y1, x0, y0, occ.opacity);
+        }
+    }
+
+    out.enabled = !out.lights.empty();
+    return out;
+}
+
 }
 
 RenderSystem::RenderSystem(EngineContext& ctx) 
@@ -553,6 +622,12 @@ void RenderSystem::buildCommandBuffer() {
         info.clearColor   = cam.clearColor;
         dev.submitPass(info, filtered);
         submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
+        if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
+            auto lighting = buildLighting2DParams(ctx_, info.camera,
+                                                  static_cast<uint32_t>(w),
+                                                  static_cast<uint32_t>(h));
+            dev.submitLighting2DPass(info, lighting);
+        }
     }
 }
 
@@ -839,6 +914,13 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 textInfo.clearColor   = core::Color::Black;
                 dev.submitPass(textInfo, cmdPtrs);
             }
+        }
+
+        if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
+            auto lighting = buildLighting2DParams(ctx_, info.camera,
+                                                  static_cast<uint32_t>(w),
+                                                  static_cast<uint32_t>(h));
+            dev.submitLighting2DPass(info, lighting);
         }
     }
 }

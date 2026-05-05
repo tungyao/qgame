@@ -60,6 +60,7 @@ public:
     
     void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) override;
     void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) override;
+    void submitLighting2DPass(const PassSubmitInfo& info, const Lighting2DParams& params) override;
 
     // 供 RenderSystem 查询设备，上传纹理用
     SDL_GPUDevice* gpuDevice() const { return device_; }
@@ -94,6 +95,10 @@ private:
 
     // ── 初始化辅助 ────────────────────────────────────────────────────────────
     void createPipeline();
+    bool probeStorageTextureSupport();
+    bool ensureLighting2DResources(uint32_t viewportW, uint32_t viewportH,
+                                   uint32_t lightCount, uint32_t segmentCount);
+    TextureHandle createStorageTexture(int width, int height);
     SDL_GPUGraphicsPipeline* createPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createGPUDrivenPipelineForFormat(SDL_GPUTextureFormat format);
@@ -136,6 +141,14 @@ private:
     SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* gpuDrivenPipeline_  = nullptr;
     SDL_GPUGraphicsPipeline* particlePipeline_   = nullptr;
+    ComputePipelineHandle    lighting2DComputePipeline_{};
+    TextureHandle            lighting2DTexture_{};
+    BufferHandle             lighting2DLightBuffer_{};
+    BufferHandle             lighting2DSegmentBuffer_{};
+    int                      lighting2DTextureWidth_ = 0;
+    int                      lighting2DTextureHeight_ = 0;
+    uint32_t                 lighting2DLightCapacity_ = 0;
+    uint32_t                 lighting2DSegmentCapacity_ = 0;
 
     // 1×1 R8 dummy region 纹理（无 region 时绑定，避免 sampler 缺失）
     TextureHandle dummyRegionTex_{};

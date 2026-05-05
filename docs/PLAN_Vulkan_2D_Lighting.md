@@ -420,6 +420,14 @@ SDL GPU 仍可作为短中期主后端，但文档和代码应把它视为 “Vu
 - `RenderSystem` 每帧收集上述计数，作为 future compute pass 的数据路径探针。
 - `game/demo3` 已加入，用 debug sprite 可视化夜晚、光源、遮挡物和反射区域。
 
+2026-05 阶段 2 已开始：
+
+- SDL GPU 后端已加入 storage texture 能力探针：初始化时验证 RGBA8 纹理是否支持 `COMPUTE_STORAGE_WRITE | SAMPLER` 并实际创建 4x4 probe texture。
+- `supportsStorageTexture` 现在来自真实后端探针。
+- `assets/shaders/lighting2d.comp.glsl` 已加入；构建链当前使用同语义的 `lighting2d.comp.hlsl` 生成 SPIR-V/DXIL。
+- SDL GPU 后端已接入单光源硬阴影 compute：Light2D/segment storage buffer -> 1/2 resolution storage texture -> sprite overlay composite。
+- `supportsLighting2D` 在 compute/storage texture 能力通过时启用；demo3 状态行会显示 lighting2D 与 compute dispatch 计数。
+
 ### L0：文档和能力探针
 
 交付：

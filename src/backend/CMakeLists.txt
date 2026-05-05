@@ -66,6 +66,11 @@ compile_hlsl_to_spirv(
     "${SHADER_GEN}/particle_sort_spv.h" particle_sort_spv
     "${SHADER_FALLBACK}/particle_sort_spv.h"
 )
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/lighting2d.comp.hlsl"  comp
+    "${SHADER_GEN}/lighting2d_spv.h" lighting2d_spv
+    "${SHADER_FALLBACK}/lighting2d_spv.h"
+)
 
 # ── DXIL 着色器 (D3D12) ──────────────────────────────────────────────────────
 set(DXIL_SHADER_DEPS "")
@@ -115,6 +120,11 @@ if(DXC_EXE)
         "${SHADER_GEN}/particle_sort_dxil.h" particle_sort_dxil
         "${SHADER_FALLBACK}/particle_sort_dxil.h"
     )
+    compile_hlsl_to_dxil(
+        "${SHADER_SRC}/lighting2d.comp.hlsl"   comp
+        "${SHADER_GEN}/lighting2d_dxil.h" lighting2d_dxil
+        "${SHADER_FALLBACK}/lighting2d_dxil.h"
+    )
     list(APPEND DXIL_SHADER_DEPS
         "${SHADER_GEN}/sprite_vert_dxil.h"
         "${SHADER_GEN}/sprite_frag_dxil.h"
@@ -125,6 +135,7 @@ if(DXC_EXE)
         "${SHADER_GEN}/sprite_sort_dxil.h"
         "${SHADER_GEN}/particle_update_dxil.h"
         "${SHADER_GEN}/particle_sort_dxil.h"
+        "${SHADER_GEN}/lighting2d_dxil.h"
     )
 endif()
 
@@ -150,6 +161,7 @@ set(ALL_SHADER_DEPS
     "${SHADER_GEN}/particle_gpu_frag_spv.h"
     "${SHADER_GEN}/particle_update_spv.h"
     "${SHADER_GEN}/particle_sort_spv.h"
+    "${SHADER_GEN}/lighting2d_spv.h"
 )
 if(DXIL_SHADER_DEPS)
     list(JOIN DXIL_SHADER_DEPS ";" dxil_deps_str)

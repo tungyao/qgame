@@ -1060,4 +1060,10 @@ void GLRenderDevice::submitGPUParticlePass(const PassSubmitInfo&,
     // GPU particle pass intentionally stays unsupported on the OpenGL fallback.
 }
 
+void GLRenderDevice::submitLighting2DPass(const PassSubmitInfo&,
+                                          const Lighting2DParams&) {
+    // L2 lighting is a Vulkan/SDL_GPU compute prototype. OpenGL remains a
+    // simple correctness fallback and deliberately ignores this pass.
+}
+
 } // namespace backend

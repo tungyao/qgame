@@ -56,12 +56,14 @@
 #include "sprite_gpu_frag_spv.h"      // GPU-driven 片段着色器
 #include "particle_gpu_vert_spv.h"    // GPU 粒子顶点着色器: 从 storage buffer 展开 quad
 #include "particle_gpu_frag_spv.h"    // GPU 粒子片段着色器
+#include "lighting2d_spv.h"           // L2 2D lighting compute shader
 #ifdef QGAME_HAS_DXIL_SHADERS
 #include "sprite_vert_dxil.h"         // DXIL 版本的着色器 (Windows D3D12 后端)
 #include "sprite_frag_dxil.h"
 #include "msdf_frag_dxil.h"
 #include "particle_gpu_vert_dxil.h"
 #include "particle_gpu_frag_dxil.h"
+#include "lighting2d_dxil.h"
 #endif
 
 namespace backend {
@@ -159,11 +161,15 @@ void SDLGPURenderDevice::init() {
     // - Storage buffers and compute are part of the intended mainline path.
     // - GPU-driven sprite rendering is enabled only when its pipeline and
     //   static quad index buffer were actually created.
-    // - Indirect, storage texture, texture array, and timestamp query stay
-    //   conservative until each feature has a real conformance test.
+    // - Storage texture support is now probed by actually asking SDL/Vulkan
+    //   whether RGBA8 can be used as a compute-write + sampler texture and by
+    //   creating one tiny texture. This is still a capability probe, not the
+    //   complete 2D lighting pass.
+    // - Texture array and timestamp query stay conservative until each feature
+    //   has a real conformance test.
     capabilities_.supportsCompute = true;
     capabilities_.supportsStorageBuffer = true;
-    capabilities_.supportsStorageTexture = false;
+    capabilities_.supportsStorageTexture = probeStorageTextureSupport();
     capabilities_.supportsGPUDrivenSprite = (gpuDrivenPipeline_ != nullptr &&
                                              gpuDrivenQuadIndexBuf_ != nullptr);
     capabilities_.supportsIndirectDraw = true;
@@ -258,6 +264,23 @@ void SDLGPURenderDevice::shutdown() {
     if (gpuDrivenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenPipeline_); gpuDrivenPipeline_ = nullptr; }
     if (particlePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particlePipeline_); particlePipeline_ = nullptr; }
     if (gpuDrivenQuadIndexBuf_) { SDL_ReleaseGPUBuffer(device_, gpuDrivenQuadIndexBuf_); gpuDrivenQuadIndexBuf_ = nullptr; }
+
+    if (lighting2DComputePipeline_.valid()) {
+        destroyComputePipeline(lighting2DComputePipeline_);
+        lighting2DComputePipeline_ = {};
+    }
+    if (textures_.valid(lighting2DTexture_)) {
+        destroyTexture(lighting2DTexture_);
+        lighting2DTexture_ = {};
+    }
+    if (buffers_.valid(lighting2DLightBuffer_)) {
+        destroyBuffer(lighting2DLightBuffer_);
+        lighting2DLightBuffer_ = {};
+    }
+    if (buffers_.valid(lighting2DSegmentBuffer_)) {
+        destroyBuffer(lighting2DSegmentBuffer_);
+        lighting2DSegmentBuffer_ = {};
+    }
 
     // 释放批处理缓冲 (vertex + index + transfer)
     if (vertexBuf_) { SDL_ReleaseGPUBuffer(device_, vertexBuf_); vertexBuf_ = nullptr; }
@@ -389,6 +412,41 @@ TextureHandle SDLGPURenderDevice::createRenderTargetTexture(int width, int heigh
     }
 
     // 离屏纹理通常用于 editor 预览，使用线性过滤
+    SDL_GPUSamplerCreateInfo samplerInfo{};
+    samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
+    samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
+    samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    SDL_GPUSampler* sampler = SDL_CreateGPUSampler(device_, &samplerInfo);
+
+    return textures_.insert(TextureEntry{ gpuTex, sampler, width, height });
+}
+
+TextureHandle SDLGPURenderDevice::createStorageTexture(int width, int height) {
+    if (!device_ || width <= 0 || height <= 0) return {};
+
+    // Lighting L2 writes this texture from compute and samples it immediately
+    // afterwards through the regular sprite pipeline. No color-target usage is
+    // needed for the prototype; compute owns the pixels.
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE |
+                 SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = static_cast<uint32_t>(width);
+    info.height = static_cast<uint32_t>(height);
+    info.layer_count_or_depth = 1;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+    SDL_GPUTexture* gpuTex = SDL_CreateGPUTexture(device_, &info);
+    if (!gpuTex) {
+        core::logError("createStorageTexture failed (%dx%d): %s", width, height, SDL_GetError());
+        return {};
+    }
+
     SDL_GPUSamplerCreateInfo samplerInfo{};
     samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
     samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
@@ -1450,6 +1508,122 @@ void SDLGPURenderDevice::createPipeline() {
                   particlePipeline_ ? "yes" : "no");
 }
 
+bool SDLGPURenderDevice::probeStorageTextureSupport() {
+    if (!device_) return false;
+
+    // L2 lighting needs a texture that compute can write and a later graphics
+    // pass can sample. RGBA8 is the first target format because it maps cleanly
+    // to the existing sprite/composite color path and is broadly supported for
+    // storage use in SDL GPU's documented format table.
+    constexpr SDL_GPUTextureUsageFlags kLightingUsage =
+        SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE |
+        SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    constexpr SDL_GPUTextureFormat kLightingFormat =
+        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+
+    if (!SDL_GPUTextureSupportsFormat(device_, kLightingFormat,
+                                      SDL_GPU_TEXTURETYPE_2D,
+                                      kLightingUsage)) {
+        core::logWarn("2D lighting storage texture probe: RGBA8 write+sample unsupported");
+        return false;
+    }
+
+    // Querying support is useful, but actually creating the resource catches
+    // driver/backend problems earlier and gives demo3 a trustworthy status
+    // line. The texture is immediately released; real lighting targets will be
+    // created per viewport size by the future Light2D renderer.
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = kLightingFormat;
+    info.usage = kLightingUsage;
+    info.width = 4;
+    info.height = 4;
+    info.layer_count_or_depth = 1;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+    SDL_GPUTexture* probe = SDL_CreateGPUTexture(device_, &info);
+    if (!probe) {
+        core::logWarn("2D lighting storage texture probe create failed: %s", SDL_GetError());
+        return false;
+    }
+
+    SDL_ReleaseGPUTexture(device_, probe);
+    core::logInfo("2D lighting storage texture probe: RGBA8 compute-write + sampler supported");
+    return true;
+}
+
+bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t viewportH,
+                                                   uint32_t lightCount, uint32_t segmentCount) {
+    if (!capabilities_.supportsStorageTexture || viewportW == 0 || viewportH == 0) {
+        return false;
+    }
+
+    if (!lighting2DComputePipeline_.valid()) {
+        ComputePipelineDesc desc{};
+        desc.spirvCode = lighting2d_spv;
+        desc.spirvSize = lighting2d_spv_size;
+#ifdef QGAME_HAS_DXIL_SHADERS
+        desc.dxilCode = lighting2d_dxil;
+        desc.dxilSize = lighting2d_dxil_size;
+#endif
+        desc.entryPoint = "main";
+        desc.threadCountX = 8;
+        desc.threadCountY = 8;
+        desc.threadCountZ = 1;
+        desc.numReadonlyStorageBuffers = 2;
+        desc.numReadwriteStorageTextures = 1;
+        desc.numUniformBuffers = 1;
+        lighting2DComputePipeline_ = createComputePipeline(desc);
+        if (!lighting2DComputePipeline_.valid()) {
+            core::logError("ensureLighting2DResources: failed to create lighting2d compute pipeline");
+            return false;
+        }
+    }
+
+    const int desiredW = static_cast<int>(std::max(1u, (viewportW + 1u) / 2u));
+    const int desiredH = static_cast<int>(std::max(1u, (viewportH + 1u) / 2u));
+    if (!textures_.valid(lighting2DTexture_) ||
+        lighting2DTextureWidth_ != desiredW ||
+        lighting2DTextureHeight_ != desiredH) {
+        if (textures_.valid(lighting2DTexture_)) {
+            destroyTexture(lighting2DTexture_);
+        }
+        lighting2DTexture_ = createStorageTexture(desiredW, desiredH);
+        lighting2DTextureWidth_ = desiredW;
+        lighting2DTextureHeight_ = desiredH;
+        if (!lighting2DTexture_.valid()) return false;
+    }
+
+    const uint32_t lightCapacity = std::max(1u, lightCount);
+    if (!buffers_.valid(lighting2DLightBuffer_) || lighting2DLightCapacity_ < lightCapacity) {
+        if (buffers_.valid(lighting2DLightBuffer_)) {
+            destroyBuffer(lighting2DLightBuffer_);
+        }
+        BufferDesc bd{};
+        bd.size = sizeof(Light2DPoint) * lightCapacity;
+        bd.usage = BufferUsage::Storage;
+        lighting2DLightBuffer_ = createBuffer(bd);
+        lighting2DLightCapacity_ = lightCapacity;
+        if (!lighting2DLightBuffer_.valid()) return false;
+    }
+
+    const uint32_t segmentCapacity = std::max(1u, segmentCount);
+    if (!buffers_.valid(lighting2DSegmentBuffer_) || lighting2DSegmentCapacity_ < segmentCapacity) {
+        if (buffers_.valid(lighting2DSegmentBuffer_)) {
+            destroyBuffer(lighting2DSegmentBuffer_);
+        }
+        BufferDesc bd{};
+        bd.size = sizeof(Light2DSegment) * segmentCapacity;
+        bd.usage = BufferUsage::Storage;
+        lighting2DSegmentBuffer_ = createBuffer(bd);
+        lighting2DSegmentCapacity_ = segmentCapacity;
+        if (!lighting2DSegmentBuffer_.valid()) return false;
+    }
+
+    return true;
+}
+
 // 创建标准 sprite/tile 渲染管线 (给定颜色目标格式)
 // 顶点布局: pos(2f) | uv(2f) | color(4ub normalised)
 // 片元: 纹理采样 × 顶点颜色, alpha blend
@@ -1914,6 +2088,121 @@ void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
     }
 
     SDL_EndGPURenderPass(pass);
+}
+
+void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
+                                              const Lighting2DParams& params) {
+    if (!gpuCmdBuf_ || !swapchainTex_) return;
+    if (!params.enabled || params.lights.empty()) return;
+    if (!capabilities_.supportsStorageTexture) return;
+
+    CameraData cam = params.camera;
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(params.viewportW ? params.viewportW : swapW_);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(params.viewportH ? params.viewportH : swapH_);
+    if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
+
+    // L2 acceptance target is one light + up to 64 segments. Keep the upload
+    // bounded now so shader cost and data layout stay obvious while profiling.
+    const uint32_t lightCount = 1u;
+    const uint32_t segmentCount = static_cast<uint32_t>(std::min<size_t>(params.segments.size(), 64));
+    if (!ensureLighting2DResources(static_cast<uint32_t>(cam.viewportW),
+                                   static_cast<uint32_t>(cam.viewportH),
+                                   lightCount,
+                                   std::max(1u, segmentCount))) {
+        return;
+    }
+
+    uploadToBuffer(lighting2DLightBuffer_, params.lights.data(), sizeof(Light2DPoint), 0);
+    if (segmentCount > 0) {
+        uploadToBuffer(lighting2DSegmentBuffer_, params.segments.data(),
+                       sizeof(Light2DSegment) * segmentCount, 0);
+    } else {
+        Light2DSegment dummy{};
+        uploadToBuffer(lighting2DSegmentBuffer_, &dummy, sizeof(dummy), 0);
+    }
+
+    if (!computePipelines_.valid(lighting2DComputePipeline_)) return;
+    if (!textures_.valid(lighting2DTexture_)) return;
+    if (!buffers_.valid(lighting2DLightBuffer_)) return;
+    if (!buffers_.valid(lighting2DSegmentBuffer_)) return;
+
+    ComputePipelineEntry& compute = computePipelines_.get(lighting2DComputePipeline_);
+    TextureEntry& lightingTex = textures_.get(lighting2DTexture_);
+    BufferEntry& lightBuffer = buffers_.get(lighting2DLightBuffer_);
+    BufferEntry& segmentBuffer = buffers_.get(lighting2DSegmentBuffer_);
+
+    struct LightingUniforms {
+        float cameraPos[2];
+        float viewportSize[2];
+        float lightingSize[2];
+        uint32_t lightCount;
+        uint32_t segmentCount;
+        float zoom;
+        float shadowStrength;
+        float pad0[2];
+    } uniforms{
+        { cam.x, cam.y },
+        { static_cast<float>(cam.viewportW), static_cast<float>(cam.viewportH) },
+        { static_cast<float>(lighting2DTextureWidth_), static_cast<float>(lighting2DTextureHeight_) },
+        lightCount,
+        segmentCount,
+        (cam.zoom > 0.f) ? cam.zoom : 1.f,
+        0.72f,
+        { 0.f, 0.f }
+    };
+
+    SDL_GPUStorageTextureReadWriteBinding rwTexture{};
+    rwTexture.texture = lightingTex.gpuTex;
+    rwTexture.mip_level = 0;
+    rwTexture.layer = 0;
+    rwTexture.cycle = false;
+
+    SDL_GPUComputePass* computePass = SDL_BeginGPUComputePass(gpuCmdBuf_, &rwTexture, 1, nullptr, 0);
+    if (!computePass) {
+        core::logError("submitLighting2DPass: SDL_BeginGPUComputePass failed: %s", SDL_GetError());
+        return;
+    }
+
+    SDL_BindGPUComputePipeline(computePass, compute.pipeline);
+    SDL_GPUBuffer* readonlyBuffers[2] = { lightBuffer.gpuBuffer, segmentBuffer.gpuBuffer };
+    SDL_BindGPUComputeStorageBuffers(computePass, 0, readonlyBuffers, 2);
+    SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &uniforms, sizeof(uniforms));
+
+    const uint32_t groupsX = static_cast<uint32_t>((lighting2DTextureWidth_ + 7) / 8);
+    const uint32_t groupsY = static_cast<uint32_t>((lighting2DTextureHeight_ + 7) / 8);
+    SDL_DispatchGPUCompute(computePass, groupsX, groupsY, 1);
+    SDL_EndGPUComputePass(computePass);
+    frameStats_.computeDispatchCount++;
+
+    // Composite: draw the compute-produced black-alpha overlay over the world.
+    // This is not the final lighting model, but it proves the resource chain:
+    // ECS data -> storage buffers -> compute storage texture -> sampled overlay.
+    DrawSpriteCmd overlay{};
+    overlay.texture = lighting2DTexture_;
+    overlay.x = cam.x;
+    overlay.y = cam.y;
+    overlay.scaleX = static_cast<float>(cam.viewportW);
+    overlay.scaleY = static_cast<float>(cam.viewportH);
+    overlay.pivotX = 0.5f;
+    overlay.pivotY = 0.5f;
+    overlay.srcRect = core::Rect{
+        0.f, 0.f,
+        static_cast<float>(lighting2DTextureWidth_),
+        static_cast<float>(lighting2DTextureHeight_)
+    };
+    overlay.layer = 10000;
+    overlay.pass = engine::RenderPass::World;
+    overlay.tint = core::Color::White;
+
+    RenderCmd overlayCmd = overlay;
+    const RenderCmd* overlayPtr = &overlayCmd;
+    std::vector<const RenderCmd*> cmds{ overlayPtr };
+
+    PassSubmitInfo overlayInfo = info;
+    overlayInfo.camera = cam;
+    overlayInfo.clearEnabled = false;
+    renderCmdsToTarget(gpuCmdBuf_, pipeline_, cmds, cam, false, core::Color::Black,
+                       swapchainTex_, swapW_, swapH_);
 }
 
 void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,
