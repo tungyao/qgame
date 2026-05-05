@@ -4,6 +4,7 @@
 #include "../components/AnimatorComponent.h"
 #include "../resources/SpriteBuffer.h"
 #include "../resources/GPUDrivenRenderer.h"
+#include "../resources/GPUParticleRenderer.h"
 #include <entt/entt.hpp>
 
 namespace backend { class CommandBuffer; }
@@ -37,11 +38,16 @@ private:
     void freeGPUSlot(entt::registry& reg, entt::entity e);
     void updateGPUSlot(const Transform& tf, const Sprite& spr, const AnimatorOutput* aout = nullptr);
     void onTransformUpdate(entt::registry& reg, entt::entity e);
+    void syncParticleEmitters(float dt);
+    void submitParticlePass(const Transform& tf, const Camera& cam,
+                            int viewportW, int viewportH, float dt);
 
     EngineContext& ctx_;
     SpriteBuffer spriteBuffer_;
     GPUDrivenRenderer gpuRenderer_;
+    GPUParticleRenderer particleRenderer_;
     bool gpuDrivenEnabled_ = false;
+    float lastDt_ = 0.f;
     entt::connection destroyConnection_;
     entt::connection transformUpdateConnection_;
 };

@@ -54,10 +54,14 @@
 #include "msdf_frag_spv.h"            // MSDF 字体片段着色器: median() 抗锯齿
 #include "sprite_gpu_vert_spv.h"      // GPU-driven 顶点着色器: 从 storage buffer 读 sprite 数据
 #include "sprite_gpu_frag_spv.h"      // GPU-driven 片段着色器
+#include "particle_gpu_vert_spv.h"    // GPU 粒子顶点着色器: 从 storage buffer 展开 quad
+#include "particle_gpu_frag_spv.h"    // GPU 粒子片段着色器
 #ifdef QGAME_HAS_DXIL_SHADERS
 #include "sprite_vert_dxil.h"         // DXIL 版本的着色器 (Windows D3D12 后端)
 #include "sprite_frag_dxil.h"
 #include "msdf_frag_dxil.h"
+#include "particle_gpu_vert_dxil.h"
+#include "particle_gpu_frag_dxil.h"
 #endif
 
 namespace backend {
@@ -162,7 +166,7 @@ void SDLGPURenderDevice::init() {
     capabilities_.supportsStorageTexture = false;
     capabilities_.supportsGPUDrivenSprite = (gpuDrivenPipeline_ != nullptr &&
                                              gpuDrivenQuadIndexBuf_ != nullptr);
-    capabilities_.supportsIndirectDraw = false;
+    capabilities_.supportsIndirectDraw = true;
     capabilities_.supportsTextureArray = false;
     capabilities_.supportsTimestampQuery = false;
 
@@ -246,6 +250,7 @@ void SDLGPURenderDevice::shutdown() {
     if (msdfPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfPipeline_); msdfPipeline_ = nullptr; }
     if (msdfOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfOffscreenPipeline_); msdfOffscreenPipeline_ = nullptr; }
     if (gpuDrivenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenPipeline_); gpuDrivenPipeline_ = nullptr; }
+    if (particlePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particlePipeline_); particlePipeline_ = nullptr; }
     if (gpuDrivenQuadIndexBuf_) { SDL_ReleaseGPUBuffer(device_, gpuDrivenQuadIndexBuf_); gpuDrivenQuadIndexBuf_ = nullptr; }
 
     // 释放批处理缓冲 (vertex + index + transfer)
@@ -1424,9 +1429,19 @@ void SDLGPURenderDevice::createPipeline() {
         }
     }
 
-    core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8, gpuDriven: %s)",
+    // 粒子渲染同样使用 HLSL 自动生成的 SPIRV/DXIL 产物。compute shader
+    // 由 engine 层 GPUParticleRenderer 创建；这里仅创建 instanced quad pipeline。
+    particlePipeline_ = createParticlePipelineForFormat(swapchainFormat);
+    if (!particlePipeline_) {
+        core::logError("createPipeline: failed to create particle pipeline");
+    } else if (!gpuDrivenQuadIndexBuf_) {
+        createGPUDrivenIndexBuffer();
+    }
+
+    core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8, gpuDriven: %s, particles: %s)",
                   static_cast<int>(swapchainFormat),
-                  gpuDrivenPipeline_ ? "yes" : "no");
+                  gpuDrivenPipeline_ ? "yes" : "no",
+                  particlePipeline_ ? "yes" : "no");
 }
 
 // 创建标准 sprite/tile 渲染管线 (给定颜色目标格式)
@@ -1689,6 +1704,80 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createGPUDrivenPipelineForFormat(SD
     return pipeline;
 }
 
+SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createParticlePipelineForFormat(SDL_GPUTextureFormat format) {
+    // 粒子顶点没有传统 vertex buffer；每个 instance 直接从 storage buffer
+    // 读取 GPUParticle，然后在 shader 中展开成 4 个 quad 顶点。
+    SDL_GPUShaderCreateInfo vsInfo{};
+    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+        vsInfo.code      = particle_gpu_vert_spv;
+        vsInfo.code_size = particle_gpu_vert_spv_size;
+#ifdef QGAME_HAS_DXIL_SHADERS
+    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
+        vsInfo.code      = particle_gpu_vert_dxil;
+        vsInfo.code_size = particle_gpu_vert_dxil_size;
+#endif
+    }
+    vsInfo.entrypoint = "main";
+    vsInfo.format    = shaderFormat_;
+    vsInfo.stage     = SDL_GPU_SHADERSTAGE_VERTEX;
+    vsInfo.num_samplers         = 0;
+    vsInfo.num_storage_buffers  = 2; // set=0,b=0: particles, b=1: alive indices
+    vsInfo.num_storage_textures = 0;
+    vsInfo.num_uniform_buffers  = 1; // set=1,b=0: viewProj
+    SDL_GPUShader* vs = SDL_CreateGPUShader(device_, &vsInfo);
+
+    SDL_GPUShaderCreateInfo fsInfo{};
+    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+        fsInfo.code      = particle_gpu_frag_spv;
+        fsInfo.code_size = particle_gpu_frag_spv_size;
+#ifdef QGAME_HAS_DXIL_SHADERS
+    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
+        fsInfo.code      = particle_gpu_frag_dxil;
+        fsInfo.code_size = particle_gpu_frag_dxil_size;
+#endif
+    }
+    fsInfo.entrypoint = "main";
+    fsInfo.format    = shaderFormat_;
+    fsInfo.stage     = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    fsInfo.num_samplers        = 1;
+    fsInfo.num_storage_buffers = 0;
+    fsInfo.num_uniform_buffers = 0;
+    SDL_GPUShader* fs = SDL_CreateGPUShader(device_, &fsInfo);
+
+    if (!vs || !fs) {
+        core::logError("createParticlePipelineForFormat: shader compile failed: %s", SDL_GetError());
+        if (vs) SDL_ReleaseGPUShader(device_, vs);
+        if (fs) SDL_ReleaseGPUShader(device_, fs);
+        return nullptr;
+    }
+
+    SDL_GPUColorTargetDescription colorTarget{};
+    colorTarget.format = format;
+    colorTarget.blend_state.enable_blend          = true;
+    colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    colorTarget.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    colorTarget.blend_state.color_blend_op        = SDL_GPU_BLENDOP_ADD;
+    colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    colorTarget.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    colorTarget.blend_state.alpha_blend_op        = SDL_GPU_BLENDOP_ADD;
+
+    SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+    pipeInfo.vertex_shader   = vs;
+    pipeInfo.fragment_shader = fs;
+    pipeInfo.vertex_input_state.num_vertex_buffers    = 0;
+    pipeInfo.vertex_input_state.num_vertex_attributes = 0;
+    pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    pipeInfo.target_info.color_target_descriptions = &colorTarget;
+    pipeInfo.target_info.num_color_targets         = 1;
+
+    SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
+    SDL_ReleaseGPUShader(device_, vs);
+    SDL_ReleaseGPUShader(device_, fs);
+    return pipeline;
+}
+
 void SDLGPURenderDevice::createGPUDrivenIndexBuffer() {
     // 6 个索引、复用 4 个 quad 顶点 (vertIdx = gl_VertexIndex & 3)
     static const uint16_t quadIdx[6] = { 0, 1, 2, 0, 2, 3 };
@@ -1817,6 +1906,143 @@ void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
         frameStats_.gpuDrawBatchCount++;
         frameStats_.drawCallCount++;
     }
+
+    SDL_EndGPURenderPass(pass);
+}
+
+void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,
+                                               const GPUParticleParams& params) {
+    if (!gpuCmdBuf_ || !swapchainTex_) return;
+    if (params.particleCount == 0) return;
+    if (!particlePipeline_ || !gpuDrivenQuadIndexBuf_) return;
+    if (!buffers_.valid(params.particleBuffer)) return;
+    if (!buffers_.valid(params.aliveIndexBuffer)) return;
+    if (!buffers_.valid(params.indirectArgsBuffer)) return;
+    if (!textures_.valid(params.texture)) return;
+    if (!computePipelines_.valid(params.updatePipeline)) return;
+    if (!computePipelines_.valid(params.sortPipeline)) return;
+
+    BufferEntry& particleBuf = buffers_.get(params.particleBuffer);
+    BufferEntry& aliveBuf = buffers_.get(params.aliveIndexBuffer);
+    BufferEntry& indirectBuf = buffers_.get(params.indirectArgsBuffer);
+    ComputePipelineEntry& update = computePipelines_.get(params.updatePipeline);
+    ComputePipelineEntry& sort = computePipelines_.get(params.sortPipeline);
+
+    // Reset the indirect draw command before GPU compaction. The update
+    // compute owns num_instances after this point; CPU never reads it back.
+    // Layout = SDL_GPUIndexedIndirectDrawCommand.
+    const uint32_t indirectInit[5] = { 6u, 0u, 0u, 0u, 0u };
+    uploadToBuffer(params.indirectArgsBuffer, indirectInit, sizeof(indirectInit), 0);
+
+    // Phase 1: GPU simulation. The compute shader only receives dt/range,
+    // then updates age and position in-place inside the particle storage buffer.
+    struct UpdateUniforms {
+        float dt;
+        uint32_t firstParticle;
+        uint32_t particleCount;
+        uint32_t pad0;
+    } updateUniforms{
+        params.dt,
+        params.firstParticle,
+        params.particleCount,
+        0u
+    };
+
+    SDL_GPUStorageBufferReadWriteBinding rwBindings[3]{};
+    rwBindings[0].buffer = particleBuf.gpuBuffer;
+    rwBindings[0].cycle = false;
+    rwBindings[1].buffer = aliveBuf.gpuBuffer;
+    rwBindings[1].cycle = false;
+    rwBindings[2].buffer = indirectBuf.gpuBuffer;
+    rwBindings[2].cycle = false;
+    SDL_GPUComputePass* computePass = SDL_BeginGPUComputePass(gpuCmdBuf_, nullptr, 0, rwBindings, 3);
+    if (computePass) {
+        SDL_BindGPUComputePipeline(computePass, update.pipeline);
+        SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &updateUniforms, sizeof(updateUniforms));
+        const uint32_t groups = (params.particleCount + 63u) / 64u;
+        SDL_DispatchGPUCompute(computePass, groups, 1, 1);
+        SDL_EndGPUComputePass(computePass);
+        frameStats_.computeDispatchCount++;
+    }
+
+    // Phase 1.5: GPU sort. The alive list was compacted by update compute,
+    // and DrawArgs[1] carries the current alive count. Odd-even sort needs
+    // particleCount phases to be correct for any alive count without readback.
+    const uint32_t sortGroups = ((params.particleCount + 1u) / 2u + 127u) / 128u;
+    for (uint32_t phase = 0; phase < params.particleCount; ++phase) {
+        struct SortUniforms {
+            uint32_t phase;
+            uint32_t maxParticleCount;
+            uint32_t pad0;
+            uint32_t pad1;
+        } sortUniforms{ phase, params.particleCount, 0u, 0u };
+
+        SDL_GPUStorageBufferReadWriteBinding sortRw{};
+        sortRw.buffer = aliveBuf.gpuBuffer;
+        sortRw.cycle = false;
+        SDL_GPUComputePass* sortPass = SDL_BeginGPUComputePass(gpuCmdBuf_, nullptr, 0, &sortRw, 1);
+        if (!sortPass) break;
+
+        SDL_BindGPUComputePipeline(sortPass, sort.pipeline);
+        SDL_GPUBuffer* readonlyBuffers[2] = { particleBuf.gpuBuffer, indirectBuf.gpuBuffer };
+        SDL_BindGPUComputeStorageBuffers(sortPass, 0, readonlyBuffers, 2);
+        SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &sortUniforms, sizeof(sortUniforms));
+        SDL_DispatchGPUCompute(sortPass, sortGroups, 1, 1);
+        SDL_EndGPUComputePass(sortPass);
+        frameStats_.computeDispatchCount++;
+    }
+
+    CameraData cam = params.camera;
+    if (cam.viewportW == 0) cam = info.camera;
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(swapW_);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(swapH_);
+
+    float proj[16], view[16], viewProj[16];
+    const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+    buildOrthoProjectionMatrix(static_cast<float>(cam.viewportW),
+                               static_cast<float>(cam.viewportH), proj);
+    buildViewMatrix(cam.x, cam.y, zoom, cam.rotation, view);
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            viewProj[i * 4 + j] = 0.f;
+            for (int k = 0; k < 4; ++k)
+                viewProj[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
+        }
+
+    // Phase 2: indirect draw. The vertex shader indexes through AliveIndices,
+    // and the indirect command's instance count is produced by compute.
+    SDL_GPUColorTargetInfo colorTarget{};
+    colorTarget.texture     = swapchainTex_;
+    colorTarget.load_op     = params.clearEnabled ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+    colorTarget.store_op    = SDL_GPU_STOREOP_STORE;
+    colorTarget.clear_color = SDL_FColor{
+        params.clearColor.r / 255.f, params.clearColor.g / 255.f,
+        params.clearColor.b / 255.f, params.clearColor.a / 255.f
+    };
+
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
+    if (!pass) {
+        core::logError("submitGPUParticlePass: SDL_BeginGPURenderPass failed: %s", SDL_GetError());
+        return;
+    }
+
+    SDL_BindGPUGraphicsPipeline(pass, particlePipeline_);
+    SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, viewProj, sizeof(viewProj));
+
+    SDL_GPUBuffer* vsStorage[2] = { particleBuf.gpuBuffer, aliveBuf.gpuBuffer };
+    SDL_BindGPUVertexStorageBuffers(pass, 0, vsStorage, 2);
+
+    SDL_GPUBufferBinding idxBinding{ gpuDrivenQuadIndexBuf_, 0 };
+    SDL_BindGPUIndexBuffer(pass, &idxBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+    const TextureEntry& tex = textures_.get(params.texture);
+    SDL_GPUTextureSamplerBinding tb{ tex.gpuTex, tex.sampler };
+    SDL_BindGPUFragmentSamplers(pass, 0, &tb, 1);
+    frameStats_.textureBindCount++;
+
+    SDL_DrawGPUIndexedPrimitivesIndirect(pass, indirectBuf.gpuBuffer, 0, 1);
+    frameStats_.gpuDrawBatchCount++;
+    frameStats_.drawCallCount++;
 
     SDL_EndGPURenderPass(pass);
 }

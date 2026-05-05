@@ -3,6 +3,7 @@
 #include "../runtime/EngineContext.h"
 #include "../components/RenderComponents.h"
 #include "../components/TextComponent.h"
+#include "../components/ParticleComponent.h"
 #include "../components/AnimatorComponent.h"
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/IRenderDevice.h"
@@ -107,6 +108,7 @@ RenderSystem::~RenderSystem() = default;
 void RenderSystem::init() {
     spriteBuffer_.init(&ctx_.renderDevice(), SpriteBuffer::INITIAL_CAPACITY);
     gpuRenderer_.init(&ctx_.renderDevice());
+    particleRenderer_.init(&ctx_.renderDevice());
 
     destroyConnection_ = ctx_.world.on_destroy<Sprite>().connect<&RenderSystem::freeGPUSlot>(this);
     transformUpdateConnection_ = ctx_.world.on_update<Transform>().connect<&RenderSystem::onTransformUpdate>(this);
@@ -122,10 +124,12 @@ void RenderSystem::init() {
     core::logInfo("RenderSystem initialized (S3: Persistent GPU Sprite Buffer + M1/M2 GPU-Driven)");
 }
 
-void RenderSystem::update(float /*dt*/) {
+void RenderSystem::update(float dt) {
     if (!ctx_.renderToSwapchain) {
         return;
     }
+    lastDt_ = dt;
+    syncParticleEmitters(dt);
     syncEntitiesToGPU();
     spriteBuffer_.advanceFrame();
     spriteBuffer_.uploadDirty();
@@ -169,8 +173,54 @@ void RenderSystem::update(float /*dt*/) {
 void RenderSystem::shutdown() {
     destroyConnection_.release();
     transformUpdateConnection_.release();
+    particleRenderer_.shutdown();
     gpuRenderer_.shutdown();
     spriteBuffer_.shutdown();
+}
+
+void RenderSystem::syncParticleEmitters(float dt) {
+    if (!particleRenderer_.isInitialized()) return;
+    if (!ctx_.renderDevice().capabilities().supportsCompute) return;
+
+    auto view = ctx_.world.view<Transform, ParticleComponent>();
+    for (auto [ent, tf, pc] : view.each()) {
+        (void)ent;
+        particleRenderer_.emit(pc, tf, dt, ctx_.renderDevice());
+    }
+}
+
+void RenderSystem::submitParticlePass(const Transform& tf, const Camera& cam,
+                                      int viewportW, int viewportH, float dt) {
+    if (!particleRenderer_.isInitialized() ||
+        !particleRenderer_.hasUpdatePipeline() ||
+        !particleRenderer_.hasSortPipeline()) return;
+    if (!ctx_.renderDevice().capabilities().supportsCompute) return;
+
+    backend::IRenderDevice& dev = ctx_.renderDevice();
+    backend::CameraData camera = toBackendCamera(tf, cam, viewportW, viewportH);
+
+    auto view = ctx_.world.view<ParticleComponent>();
+    for (auto [ent, pc] : view.each()) {
+        (void)ent;
+        if (!pc.visible || !pc.texture.valid()) continue;
+        if (pc.gpuOffset == 0xFFFFFFFFu || pc.gpuCount == 0) continue;
+        if ((cam.layerMask & renderPassBit(pc.pass)) == 0) continue;
+
+        backend::IRenderDevice::GPUParticleParams params;
+        params.updatePipeline = particleRenderer_.updatePipeline();
+        params.sortPipeline = particleRenderer_.sortPipeline();
+        params.particleBuffer = particleRenderer_.particleBuffer();
+        params.aliveIndexBuffer = particleRenderer_.aliveIndexBuffer();
+        params.indirectArgsBuffer = particleRenderer_.indirectArgsBuffer();
+        params.texture = pc.texture;
+        params.firstParticle = pc.gpuOffset;
+        params.particleCount = pc.gpuCount;
+        params.dt = std::max(0.f, dt);
+        params.camera = camera;
+        params.clearEnabled = false;
+        params.clearColor = cam.clearColor;
+        dev.submitGPUParticlePass({ camera, false, cam.clearColor }, params);
+    }
 }
 
 void RenderSystem::onTransformUpdate(entt::registry& reg, entt::entity e) {
@@ -493,6 +543,7 @@ void RenderSystem::buildCommandBuffer() {
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
         dev.submitPass(info, filtered);
+        submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
     }
 }
 
@@ -716,6 +767,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         }
         
         dev.submitGPUDrivenPass(info, params);
+        submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
 
         // ========== Step 2: CPU 渲染 Text 和 Tile (叠加在 Sprite 之上) ==========
         if (!nonSpriteDrawables.empty()) {

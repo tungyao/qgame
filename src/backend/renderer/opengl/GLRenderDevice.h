@@ -57,6 +57,7 @@ public:
     bool          getTextureDimensions(TextureHandle, int& outW, int& outH) const override;
     
     void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) override;
+    void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) override;
 
 private:
     struct TextureEntry {

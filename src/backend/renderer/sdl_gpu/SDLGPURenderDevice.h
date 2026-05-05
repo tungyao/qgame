@@ -59,6 +59,7 @@ public:
     SDL_GPUTexture* getSDLTexture(TextureHandle handle) const;
     
     void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) override;
+    void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) override;
 
     // 供 RenderSystem 查询设备，上传纹理用
     SDL_GPUDevice* gpuDevice() const { return device_; }
@@ -96,6 +97,7 @@ private:
     SDL_GPUGraphicsPipeline* createPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createGPUDrivenPipelineForFormat(SDL_GPUTextureFormat format);
+    SDL_GPUGraphicsPipeline* createParticlePipelineForFormat(SDL_GPUTextureFormat format);
     void                     createGPUDrivenIndexBuffer();
     SDL_GPUShader* loadShader(const uint8_t* code, size_t size,
                               SDL_GPUShaderStage stage,
@@ -133,6 +135,7 @@ private:
     SDL_GPUGraphicsPipeline* msdfPipeline_       = nullptr;
     SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* gpuDrivenPipeline_  = nullptr;
+    SDL_GPUGraphicsPipeline* particlePipeline_   = nullptr;
 
     // 1×1 R8 dummy region 纹理（无 region 时绑定，避免 sampler 缺失）
     TextureHandle dummyRegionTex_{};

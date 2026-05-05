@@ -11,6 +11,7 @@
 #include <engine/components/RenderComponents.h>
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/AnimatorComponent.h>
+#include <engine/components/ParticleComponent.h>
 #include <engine/components/TextComponent.h>
 #include <engine/components/UIComponents.h>
 #include <engine/components/TweenComponent.h>
@@ -149,6 +150,27 @@ static std::vector<uint8_t> makeTextTexture(const std::string& text, core::Color
 				pixels[idx + 2] = color.b;
 				pixels[idx + 3] = color.a;
 			}
+		}
+	}
+	return pixels;
+}
+
+static std::vector<uint8_t> makeParticleTexture(int size) {
+	std::vector<uint8_t> pixels(size * size * 4, 0);
+	const float center = (size - 1) * 0.5f;
+	const float radius = center > 0.f ? center : 1.f;
+	for (int y = 0; y < size; ++y) {
+		for (int x = 0; x < size; ++x) {
+			const float dx = (x - center) / radius;
+			const float dy = (y - center) / radius;
+			const float d = std::sqrt(dx * dx + dy * dy);
+			const float coreGlow = std::max(0.f, 1.f - d);
+			const float softEdge = coreGlow * coreGlow;
+			const int i = (y * size + x) * 4;
+			pixels[i + 0] = static_cast<uint8_t>(255);
+			pixels[i + 1] = static_cast<uint8_t>(220);
+			pixels[i + 2] = static_cast<uint8_t>(80 + 120 * softEdge);
+			pixels[i + 3] = static_cast<uint8_t>(255 * softEdge);
 		}
 	}
 	return pixels;
@@ -826,6 +848,9 @@ int main(int argc, char* argv[]) {
 	auto stoppedPx = makeTextTexture("Stopped", { 255, 100, 100, 255 });
 	TextureHandle stoppedTex = api.createTextureFromMemory(stoppedPx.data(), 56, 16);
 
+	auto particlePx = makeParticleTexture(32);
+	TextureHandle particleTex = api.createTextureFromMemory(particlePx.data(), 32, 32);
+
 	// Phase 1 测试：构造一个 one-shot "attack" clip，复用 spriteTex
 	AnimationHandle attackAnim;
 	{
@@ -941,6 +966,37 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 100, 255, 100, 255 };
 		api.addComponent(e, sp);
+	}
+
+	// ── GPU Sprite Particle Demo ──────────────────────────────────────────────
+	// CPU 只负责发射初始粒子；GPU compute 负责生命周期/位置推进、alive list、
+	// 排序和 indirect draw 参数。粒子纹理是程序化 soft sprite，所以不依赖额外资产。
+	entt::entity particleEmitter = entt::null;
+	{
+		particleEmitter = api.spawnEntity();
+		engine::Transform tf{};
+		tf.x = 520.f;
+		tf.y = 260.f;
+		tf.rotation = -1.35f;
+		api.addComponent(particleEmitter, tf);
+
+		engine::ParticleComponent particles{};
+		particles.texture = particleTex;
+		particles.srcRect = { 0.f, 0.f, 32.f, 32.f };
+		particles.maxParticles = 256;
+		particles.emissionRate = 180.f;
+		particles.lifetime = 1.25f;
+		particles.speedMin = 35.f;
+		particles.speedMax = 160.f;
+		particles.sizeStart = 18.f;
+		particles.sizeEnd = 2.f;
+		particles.spread = 1.15f;
+		particles.colorStart = { 255, 245, 140, 230 };
+		particles.colorEnd = { 255, 80, 40, 0 };
+		particles.layer = 8;
+		particles.ySort = true;
+		particles.pass = engine::RenderPass::World;
+		api.addComponent(particleEmitter, particles);
 	}
 
 	// ── S2 Scene/Prefab 数据化可视测试 ─────────────────────────────────────────
@@ -2121,10 +2177,20 @@ int main(int argc, char* argv[]) {
 
 	float maskRunT = 0.f;
 	float tintDemoT = 0.f;
+	float particleDemoT = 0.f;
 	bool demoRunning = true;
 	demo.setUpdate([&](engine::GameContext& fw, float dt) {
 		(void)fw;
 		auto& playerAnimator = api.getComponent<engine::AnimatorComponent>(player);
+
+		if (particleEmitter != entt::null) {
+			particleDemoT += dt;
+			api.patchComponent<engine::Transform>(particleEmitter, [&](engine::Transform& tf) {
+				tf.rotation = -1.35f + std::sin(particleDemoT * 1.8f) * 0.65f;
+				tf.x = 520.f + std::cos(particleDemoT * 0.9f) * 42.f;
+				tf.y = 260.f + std::sin(particleDemoT * 1.1f) * 24.f;
+			});
+		}
 
 		// Region Tint demo：每个 entity 在调色板间循环平滑过渡。
 		// 每段 transition 持续 kCycleSec 秒；entity i 的相位偏移 i*0.6 错峰。

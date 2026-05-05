@@ -1051,4 +1051,9 @@ void GLRenderDevice::submitGPUDrivenPass(const PassSubmitInfo&,
     // GPU-driven pass not supported in CPU rendering mode
 }
 
+void GLRenderDevice::submitGPUParticlePass(const PassSubmitInfo&,
+                                           const GPUParticleParams&) {
+    // GPU particle pass intentionally stays unsupported on the OpenGL fallback.
+}
+
 } // namespace backend

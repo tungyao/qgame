@@ -24,6 +24,7 @@ add_library(engine SHARED
     scene/ComponentJson.cpp
     scene/SceneSerializer.cpp
     resources/GPUDrivenRenderer.cpp
+    resources/GPUParticleRenderer.cpp
 )
 
 target_compile_definitions(engine PRIVATE QGAME_ENGINE_EXPORTS)
@@ -36,9 +37,15 @@ endif()
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(engine PRIVATE "${CMAKE_BINARY_DIR}/generated/shaders")
 
-set(ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_spv.h")
+set(ENGINE_SHADER_DEPS
+    "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_spv.h"
+    "${CMAKE_BINARY_DIR}/generated/shaders/particle_update_spv.h"
+    "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_spv.h"
+)
 if(DXC_EXE)
     list(APPEND ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_dxil.h")
+    list(APPEND ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/particle_update_dxil.h")
+    list(APPEND ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_dxil.h")
     target_compile_definitions(engine PRIVATE QGAME_HAS_DXIL_SHADERS)
 
 

@@ -200,6 +200,23 @@ public:
     
     virtual void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) = 0;
 
+    struct GPUParticleParams {
+        ComputePipelineHandle updatePipeline;
+        ComputePipelineHandle sortPipeline;
+        BufferHandle particleBuffer;
+        BufferHandle aliveIndexBuffer;
+        BufferHandle indirectArgsBuffer;
+        TextureHandle texture;
+        uint32_t firstParticle = 0;
+        uint32_t particleCount = 0;
+        float dt = 0.f;
+        CameraData camera;
+        bool clearEnabled = false;
+        core::Color clearColor = core::Color::Black;
+    };
+
+    virtual void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) = 0;
+
     bool debug_ = false;
 };
 

@@ -34,6 +34,16 @@ compile_hlsl_to_spirv(
     "${SHADER_GEN}/sprite_gpu_frag_spv.h" sprite_gpu_frag_spv
     "${SHADER_FALLBACK}/sprite_gpu_frag_spv.h"
 )
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/particle_gpu.vert.hlsl"  vert
+    "${SHADER_GEN}/particle_gpu_vert_spv.h" particle_gpu_vert_spv
+    "${SHADER_FALLBACK}/particle_gpu_vert_spv.h"
+)
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/particle_gpu.frag.hlsl"  frag
+    "${SHADER_GEN}/particle_gpu_frag_spv.h" particle_gpu_frag_spv
+    "${SHADER_FALLBACK}/particle_gpu_frag_spv.h"
+)
 
 # ── Compute 着色器 (Culling + Sort) ─────────────────────────────────────────
 compile_hlsl_to_spirv(
@@ -45,6 +55,16 @@ compile_hlsl_to_spirv(
     "${SHADER_SRC}/sprite_sort.comp.hlsl"  comp
     "${SHADER_GEN}/sprite_sort_spv.h" sprite_sort_spv
     "${SHADER_FALLBACK}/sprite_sort_spv.h"
+)
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/particle_update.comp.hlsl"  comp
+    "${SHADER_GEN}/particle_update_spv.h" particle_update_spv
+    "${SHADER_FALLBACK}/particle_update_spv.h"
+)
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/particle_sort.comp.hlsl"  comp
+    "${SHADER_GEN}/particle_sort_spv.h" particle_sort_spv
+    "${SHADER_FALLBACK}/particle_sort_spv.h"
 )
 
 # ── DXIL 着色器 (D3D12) ──────────────────────────────────────────────────────
@@ -61,6 +81,16 @@ if(DXC_EXE)
         "${SHADER_FALLBACK}/sprite_frag_dxil.h"
     )
     compile_hlsl_to_dxil(
+        "${SHADER_SRC}/particle_gpu.vert.hlsl"   vert
+        "${SHADER_GEN}/particle_gpu_vert_dxil.h" particle_gpu_vert_dxil
+        "${SHADER_FALLBACK}/particle_gpu_vert_dxil.h"
+    )
+    compile_hlsl_to_dxil(
+        "${SHADER_SRC}/particle_gpu.frag.hlsl"   frag
+        "${SHADER_GEN}/particle_gpu_frag_dxil.h" particle_gpu_frag_dxil
+        "${SHADER_FALLBACK}/particle_gpu_frag_dxil.h"
+    )
+    compile_hlsl_to_dxil(
         "${SHADER_SRC}/msdf.frag.hlsl"   frag
         "${SHADER_GEN}/msdf_frag_dxil.h" msdf_frag_dxil
         "${SHADER_FALLBACK}/msdf_frag_dxil.h"
@@ -75,12 +105,26 @@ if(DXC_EXE)
         "${SHADER_GEN}/sprite_sort_dxil.h" sprite_sort_dxil
         "${SHADER_FALLBACK}/sprite_sort_dxil.h"
     )
+    compile_hlsl_to_dxil(
+        "${SHADER_SRC}/particle_update.comp.hlsl"   comp
+        "${SHADER_GEN}/particle_update_dxil.h" particle_update_dxil
+        "${SHADER_FALLBACK}/particle_update_dxil.h"
+    )
+    compile_hlsl_to_dxil(
+        "${SHADER_SRC}/particle_sort.comp.hlsl"   comp
+        "${SHADER_GEN}/particle_sort_dxil.h" particle_sort_dxil
+        "${SHADER_FALLBACK}/particle_sort_dxil.h"
+    )
     list(APPEND DXIL_SHADER_DEPS
         "${SHADER_GEN}/sprite_vert_dxil.h"
         "${SHADER_GEN}/sprite_frag_dxil.h"
+        "${SHADER_GEN}/particle_gpu_vert_dxil.h"
+        "${SHADER_GEN}/particle_gpu_frag_dxil.h"
         "${SHADER_GEN}/msdf_frag_dxil.h"
         "${SHADER_GEN}/sprite_culling_dxil.h"
         "${SHADER_GEN}/sprite_sort_dxil.h"
+        "${SHADER_GEN}/particle_update_dxil.h"
+        "${SHADER_GEN}/particle_sort_dxil.h"
     )
 endif()
 
@@ -102,6 +146,10 @@ set(ALL_SHADER_DEPS
     "${SHADER_GEN}/sprite_sort_spv.h"
     "${SHADER_GEN}/sprite_gpu_vert_spv.h"
     "${SHADER_GEN}/sprite_gpu_frag_spv.h"
+    "${SHADER_GEN}/particle_gpu_vert_spv.h"
+    "${SHADER_GEN}/particle_gpu_frag_spv.h"
+    "${SHADER_GEN}/particle_update_spv.h"
+    "${SHADER_GEN}/particle_sort_spv.h"
 )
 if(DXIL_SHADER_DEPS)
     list(JOIN DXIL_SHADER_DEPS ";" dxil_deps_str)
