@@ -1,0 +1,11 @@
+{
+  "configs": [
+    {
+      "id": "config.demo2.multi",
+      "value": {
+        "winner": "base_items",
+        "bonus": 1
+      }
+    }
+  ]
+}

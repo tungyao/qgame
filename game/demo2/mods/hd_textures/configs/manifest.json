@@ -6,6 +6,13 @@
         "label": "data mod config loaded",
         "bonus": 42
       }
+    },
+    {
+      "id": "config.demo2.multi",
+      "value": {
+        "winner": "hd_textures",
+        "bonus": 42
+      }
     }
   ]
 }

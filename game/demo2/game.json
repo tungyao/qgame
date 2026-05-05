@@ -6,6 +6,7 @@
   "assetManifest": "../../assets/manifest.json",
   "nativeLibrary": "",
   "mods": [
-    "hd_textures"
+    "hd_textures",
+    "balance_patch"
   ]
 }

@@ -1,10 +1,13 @@
 #include "ModManager.h"
 
+#include "AssetLoaderRegistry.h"
 #include "ConfigRegistry.h"
 #include "GameContext.h"
 #include "PrefabRegistry.h"
 #include "SceneManager.h"
 #include "../assets/AssetManager.h"
+#include "../runtime/SystemRegistry.h"
+#include "../systems/ISystem.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -23,6 +26,55 @@ namespace engine {
 
 namespace {
 
+class NativeCallbackSystem final : public ISystem {
+public:
+    explicit NativeCallbackSystem(const QGameNativeSystemDesc& desc)
+        : id_(desc.id ? desc.id : "")
+        , userData_(desc.userData)
+        , init_(desc.init)
+        , preUpdate_(desc.pre_update)
+        , update_(desc.update)
+        , postUpdate_(desc.post_update)
+        , shutdown_(desc.shutdown)
+        , manuallyScheduled_(desc.manuallyScheduled) {}
+
+    void init() override {
+        if (init_) init_(userData_);
+    }
+
+    void preUpdate() override {
+        if (preUpdate_) preUpdate_(userData_, 0.0f);
+    }
+
+    void update(float dt) override {
+        if (update_) update_(userData_, dt);
+    }
+
+    void postUpdate() override {
+        if (postUpdate_) postUpdate_(userData_, 0.0f);
+    }
+
+    void shutdown() override {
+        if (shutdown_) shutdown_(userData_);
+    }
+
+    bool isManuallyScheduled() const override {
+        return manuallyScheduled_;
+    }
+
+    const std::string& id() const { return id_; }
+
+private:
+    std::string id_;
+    void* userData_ = nullptr;
+    QGameNativeSystemInitFn init_ = nullptr;
+    QGameNativeSystemUpdateFn preUpdate_ = nullptr;
+    QGameNativeSystemUpdateFn update_ = nullptr;
+    QGameNativeSystemUpdateFn postUpdate_ = nullptr;
+    QGameNativeSystemShutdownFn shutdown_ = nullptr;
+    bool manuallyScheduled_ = false;
+};
+
 std::string normalizePath(const std::filesystem::path& path) {
     return path.lexically_normal().string();
 }
@@ -32,6 +84,11 @@ std::filesystem::path resolveRelativeTo(const std::filesystem::path& baseDir,
     std::filesystem::path p(path);
     if (p.is_absolute()) return p.lexically_normal();
     return (baseDir / p).lexically_normal();
+}
+
+ModManager::NativeRuntime* runtimeFrom(QGameModContext* ctx) {
+    if (!ctx || !ctx->userData) return nullptr;
+    return static_cast<ModManager::NativeRuntime*>(ctx->userData);
 }
 
 void modLogInfo(const char* message) {
@@ -47,33 +104,64 @@ void modLogError(const char* message) {
 }
 
 bool modLoadAssetManifest(QGameModContext* ctx, const char* path) {
-    if (!ctx || !ctx->userData || !path) return false;
-    auto* game = static_cast<GameContext*>(ctx->userData);
-    return game->assets.loadManifestOverlay(path, "native");
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !runtime->mod || !path) return false;
+    return runtime->game->assets.loadManifestOverlay(
+        path, "native:" + runtime->mod->mod.manifest.id);
 }
 
 bool modRegisterScene(QGameModContext* ctx, const char* id, const char* path) {
-    if (!ctx || !ctx->userData || !id || !path) return false;
-    auto* game = static_cast<GameContext*>(ctx->userData);
-    return game->scenes && game->scenes->registerScene(id, path);
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !id || !path) return false;
+    return runtime->game->scenes && runtime->game->scenes->registerScene(id, path);
 }
 
 bool modRegisterSceneManifest(QGameModContext* ctx, const char* path) {
-    if (!ctx || !ctx->userData || !path) return false;
-    auto* game = static_cast<GameContext*>(ctx->userData);
-    return game->scenes && game->scenes->registerManifest(path);
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !path) return false;
+    return runtime->game->scenes && runtime->game->scenes->registerManifest(path);
 }
 
 bool modRegisterPrefabManifest(QGameModContext* ctx, const char* path) {
-    if (!ctx || !ctx->userData || !path) return false;
-    auto* game = static_cast<GameContext*>(ctx->userData);
-    return game->prefabs && game->prefabs->registerManifest(path);
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !path) return false;
+    return runtime->game->prefabs && runtime->game->prefabs->registerManifest(path);
 }
 
 bool modRegisterConfigManifest(QGameModContext* ctx, const char* path) {
-    if (!ctx || !ctx->userData || !path) return false;
-    auto* game = static_cast<GameContext*>(ctx->userData);
-    return game->configs && game->configs->registerManifest(path);
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !path) return false;
+    return runtime->game->configs && runtime->game->configs->registerManifest(path);
+}
+
+bool modRegisterSystem(QGameModContext* ctx, const QGameNativeSystemDesc* desc) {
+    auto* runtime = runtimeFrom(ctx);
+    return runtime && runtime->manager && runtime->manager->registerNativeSystem(ctx, desc);
+}
+
+bool modSubscribeEvent(QGameModContext* ctx,
+                       const char* eventName,
+                       void* userData,
+                       QGameEventHandlerFn handler) {
+    auto* runtime = runtimeFrom(ctx);
+    return runtime && runtime->manager &&
+           runtime->manager->subscribeNativeEvent(ctx, eventName, userData, handler);
+}
+
+bool modEmitEvent(QGameModContext* ctx, const char* eventName, const char* payload) {
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->manager || !eventName) return false;
+    return runtime->manager->emitNativeEvent(eventName, payload ? payload : "");
+}
+
+bool modRegisterAssetLoader(QGameModContext* ctx,
+                            const char* type,
+                            void* userData,
+                            QGameAssetLoadFn load,
+                            QGameAssetUnloadFn unload) {
+    auto* runtime = runtimeFrom(ctx);
+    return runtime && runtime->manager &&
+           runtime->manager->registerNativeAssetLoader(ctx, type, userData, load, unload);
 }
 
 QGameLogAPI gLogApi{modLogInfo, modLogWarn, modLogError};
@@ -81,6 +169,10 @@ QGameAssetManagerAPI gAssetApi{modLoadAssetManifest};
 QGameSceneRegistryAPI gSceneApi{modRegisterScene, modRegisterSceneManifest};
 QGamePrefabRegistryAPI gPrefabApi{modRegisterPrefabManifest};
 QGameConfigRegistryAPI gConfigApi{modRegisterConfigManifest};
+QGameSystemRegistryAPI gSystemApi{modRegisterSystem};
+QGameEventBusAPI gEventApi{modSubscribeEvent, modEmitEvent};
+QGameAssetLoaderRegistryAPI gAssetLoaderApi{modRegisterAssetLoader};
+QGameComponentRegistryAPI gComponentApi{0};
 
 } // namespace
 
@@ -368,30 +460,39 @@ bool ModManager::loadNativeMod(GameContext& ctx, const LoadedMod& mod) {
     const std::filesystem::path libraryPath =
         resolveRelativeTo(std::filesystem::path(mod.rootDir), mod.manifest.library);
 
-    NativeMod native{};
-    native.mod = mod;
-    if (!native.library.open(normalizePath(libraryPath))) {
+    auto native = std::make_unique<NativeMod>();
+    native->mod = mod;
+    if (!native->library.open(normalizePath(libraryPath))) {
         return false;
     }
 
-    native.init = reinterpret_cast<QGameModInitFn>(native.library.symbol("qgame_mod_init"));
-    native.shutdown = reinterpret_cast<QGameModShutdownFn>(native.library.symbol("qgame_mod_shutdown"));
-    if (!native.init || !native.shutdown) {
+    native->init = reinterpret_cast<QGameModInitFn>(native->library.symbol("qgame_mod_init"));
+    native->shutdown = reinterpret_cast<QGameModShutdownFn>(native->library.symbol("qgame_mod_shutdown"));
+    if (!native->init || !native->shutdown) {
         core::logError("[ModManager] native mod missing qgame_mod_init/qgame_mod_shutdown: %s",
                        mod.manifest.id.c_str());
         return false;
     }
 
-    native.context.apiVersion = QGAME_MOD_API_VERSION;
-    native.context.userData = &ctx;
-    native.context.assets = &gAssetApi;
-    native.context.scenes = &gSceneApi;
-    native.context.prefabs = &gPrefabApi;
-    native.context.configs = &gConfigApi;
-    native.context.log = &gLogApi;
+    native->runtime.game = &ctx;
+    native->runtime.manager = this;
+    native->runtime.mod = native.get();
 
-    if (!native.init(&native.context)) {
+    native->context.apiVersion = QGAME_MOD_API_VERSION;
+    native->context.userData = &native->runtime;
+    native->context.assets = &gAssetApi;
+    native->context.scenes = &gSceneApi;
+    native->context.prefabs = &gPrefabApi;
+    native->context.configs = &gConfigApi;
+    native->context.systems = &gSystemApi;
+    native->context.events = &gEventApi;
+    native->context.assetLoaders = &gAssetLoaderApi;
+    native->context.components = &gComponentApi;
+    native->context.log = &gLogApi;
+
+    if (!native->init(&native->context)) {
         core::logError("[ModManager] qgame_mod_init failed: %s", mod.manifest.id.c_str());
+        cleanupNativeRegistrations(*native);
         return false;
     }
 
@@ -413,13 +514,105 @@ bool ModManager::loadNativeMods(GameContext& ctx) {
 
 void ModManager::shutdownNativeMods() {
     for (int i = static_cast<int>(nativeMods_.size()) - 1; i >= 0; --i) {
-        NativeMod& mod = nativeMods_[static_cast<size_t>(i)];
+        NativeMod& mod = *nativeMods_[static_cast<size_t>(i)];
+        cleanupNativeRegistrations(mod);
         if (mod.shutdown) {
             mod.shutdown(&mod.context);
             core::logInfo("[ModManager] shutdown native mod: %s", mod.mod.manifest.id.c_str());
         }
     }
     nativeMods_.clear();
+}
+
+bool ModManager::registerNativeSystem(QGameModContext* ctx,
+                                      const QGameNativeSystemDesc* desc) {
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !runtime->mod || !desc || !desc->update) {
+        core::logError("[ModManager] invalid native system registration");
+        return false;
+    }
+
+    auto system = std::make_unique<NativeCallbackSystem>(*desc);
+    NativeCallbackSystem* raw = system.get();
+    ISystem& registered = runtime->game->systems.registerSystem(std::move(system));
+    runtime->mod->systems.push_back(&registered);
+
+    // Native mods are usually loaded after EngineContext::init() has already
+    // called SystemRegistry::initAll(), so the wrapper is initialized eagerly.
+    raw->init();
+    core::logInfo("[ModManager] registered native system %s",
+                  raw->id().empty() ? "(unnamed)" : raw->id().c_str());
+    return true;
+}
+
+bool ModManager::subscribeNativeEvent(QGameModContext* ctx,
+                                      const char* eventName,
+                                      void* userData,
+                                      QGameEventHandlerFn handler) {
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->mod || !eventName || !handler) return false;
+
+    NativeEventHandler sub{};
+    sub.owner = runtime->mod;
+    sub.eventName = eventName;
+    sub.userData = userData;
+    sub.handler = handler;
+    eventHandlers_.push_back(sub);
+    core::logInfo("[ModManager] native event handler registered: %s", eventName);
+    return true;
+}
+
+bool ModManager::emitNativeEvent(const std::string& eventName, const std::string& payload) {
+    bool delivered = false;
+    for (const NativeEventHandler& sub : eventHandlers_) {
+        if (sub.eventName == eventName && sub.handler) {
+            sub.handler(sub.userData, eventName.c_str(), payload.c_str());
+            delivered = true;
+        }
+    }
+    return delivered;
+}
+
+bool ModManager::registerNativeAssetLoader(QGameModContext* ctx,
+                                           const char* type,
+                                           void* userData,
+                                           QGameAssetLoadFn load,
+                                           QGameAssetUnloadFn unload) {
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !runtime->game->assetLoaders ||
+        !runtime->mod || !type || !load) {
+        return false;
+    }
+
+    NativeMod* owner = runtime->mod;
+    return runtime->game->assetLoaders->registerLoader(
+        type,
+        [userData, load](const char* assetId, const char* path) {
+            return load(userData, assetId, path);
+        },
+        [userData, unload](void* asset) {
+            if (unload) unload(userData, asset);
+        },
+        owner,
+        "native:" + owner->mod.manifest.id);
+}
+
+void ModManager::cleanupNativeRegistrations(NativeMod& mod) {
+    if (mod.runtime.game) {
+        for (ISystem* system : mod.systems) {
+            mod.runtime.game->systems.unregisterSystem(system, true);
+        }
+        mod.systems.clear();
+
+        if (mod.runtime.game->assetLoaders) {
+            mod.runtime.game->assetLoaders->unregisterLoadersByOwner(&mod);
+        }
+    }
+
+    eventHandlers_.erase(
+        std::remove_if(eventHandlers_.begin(), eventHandlers_.end(),
+                       [&](const NativeEventHandler& sub) { return sub.owner == &mod; }),
+        eventHandlers_.end());
 }
 
 } // namespace engine

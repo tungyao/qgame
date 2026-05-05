@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entities": [
+    {
+      "Name": { "s": "BalancePatchPreview" },
+      "Transform": { "x": 32.0, "y": 32.0, "rot": 0.0, "sx": 1.0, "sy": 1.0 }
+    }
+  ]
+}

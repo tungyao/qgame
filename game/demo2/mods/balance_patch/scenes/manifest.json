@@ -1,0 +1,8 @@
+{
+  "scenes": [
+    {
+      "id": "scene.mod.balance_patch.preview",
+      "path": "preview.scene.json"
+    }
+  ]
+}

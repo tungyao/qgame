@@ -4,6 +4,7 @@
 
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/RenderComponents.h>
+#include <engine/framework/AssetLoaderRegistry.h>
 #include <engine/framework/GameContext.h>
 #include <engine/framework/GameInstance.h>
 #include <engine/framework/GameManifest.h>
@@ -55,6 +56,7 @@ public:
 int main() {
     engine::EngineContext engineCtx;
     engine::GameContext gameCtx(engineCtx);
+    engine::AssetLoaderRegistry assetLoaders(gameCtx);
     engine::ConfigRegistry configs(gameCtx);
     engine::PrefabRegistry prefabs(gameCtx);
     engine::SceneManager scenes(gameCtx);
@@ -67,6 +69,9 @@ int main() {
     }
     if (gameCtx.configs != &configs) {
         return fail("ConfigRegistry was not exposed through GameContext");
+    }
+    if (gameCtx.assetLoaders != &assetLoaders) {
+        return fail("AssetLoaderRegistry was not exposed through GameContext");
     }
 
     CountingGame game;
@@ -317,15 +322,42 @@ int main() {
     }
     std::filesystem::remove("framework_smoke_native_init.txt");
     std::filesystem::remove("framework_smoke_native_shutdown.txt");
+    std::filesystem::remove("framework_smoke_native_system_update.txt");
+    std::filesystem::remove("framework_smoke_native_system_shutdown.txt");
+    std::filesystem::remove("framework_smoke_native_event.txt");
+    std::filesystem::remove("framework_smoke_native_loader.txt");
     if (!mods.loadNativeMods(gameCtx)) {
         return fail("native mod load failed");
     }
     if (!std::filesystem::exists("framework_smoke_native_init.txt")) {
         return fail("native mod init did not run");
     }
+    for (const auto& system : gameCtx.systems.systems()) {
+        system->update(0.016f);
+    }
+    if (!std::filesystem::exists("framework_smoke_native_system_update.txt")) {
+        return fail("native system update did not run");
+    }
+    if (!mods.emitNativeEvent("native.smoke", "hello")) {
+        return fail("native event was not delivered");
+    }
+    if (!std::filesystem::exists("framework_smoke_native_event.txt")) {
+        return fail("native event handler did not run");
+    }
+    if (!assetLoaders.hasLoader("native.smoke.asset") ||
+        assetLoaders.load("native.smoke.asset", "asset.native.smoke", "memory") == nullptr ||
+        !std::filesystem::exists("framework_smoke_native_loader.txt")) {
+        return fail("native asset loader did not run");
+    }
     mods.shutdownNativeMods();
     if (!std::filesystem::exists("framework_smoke_native_shutdown.txt")) {
         return fail("native mod shutdown did not run");
+    }
+    if (!std::filesystem::exists("framework_smoke_native_system_shutdown.txt")) {
+        return fail("native system shutdown did not run");
+    }
+    if (assetLoaders.hasLoader("native.smoke.asset")) {
+        return fail("native asset loader was not unregistered");
     }
 
     const char* scenePath = "framework_smoke.scene.json";

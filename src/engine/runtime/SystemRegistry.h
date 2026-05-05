@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <vector>
 #include <unordered_map>
 #include <memory>
@@ -18,6 +19,31 @@ public:
         lookup_[std::type_index(typeid(T))] = ptr.get();
         order_.push_back(std::move(ptr));
         return ref;
+    }
+
+    ISystem& registerSystem(std::unique_ptr<ISystem> system) {
+        ASSERT_MSG(system != nullptr, "System must not be null");
+        ISystem& ref = *system;
+        order_.push_back(std::move(system));
+        return ref;
+    }
+
+    bool unregisterSystem(ISystem* system, bool callShutdown = true) {
+        if (!system) return false;
+
+        for (auto it = lookup_.begin(); it != lookup_.end(); ) {
+            if (it->second == system) it = lookup_.erase(it);
+            else ++it;
+        }
+
+        auto it = std::find_if(order_.begin(), order_.end(),
+                               [&](const std::unique_ptr<ISystem>& ptr) {
+                                   return ptr.get() == system;
+                               });
+        if (it == order_.end()) return false;
+        if (callShutdown) (*it)->shutdown();
+        order_.erase(it);
+        return true;
     }
 
     template<typename T>

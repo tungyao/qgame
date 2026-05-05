@@ -1,0 +1,11 @@
+{
+  "prefabs": [
+    {
+      "id": "prefab.mod.base_items.token",
+      "components": {
+        "Name": { "s": "BaseToken" },
+        "Transform": { "x": 0.0, "y": 0.0, "rot": 0.0, "sx": 1.0, "sy": 1.0 }
+      }
+    }
+  ]
+}

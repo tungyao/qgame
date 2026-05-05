@@ -88,9 +88,35 @@ int main(int argc, char** argv) {
     TextureHandle character = api.loadTextureById("texture.demo.character");
     engine::FontHandle font = api.loadFontById("font.demo.main");
     const auto chain = ctx.assetManager.assetOverrideChain("texture.demo.character");
+    const auto& mountedMods = mods.mountedMods();
+    std::string loadOrder = "load order:";
+    for (const auto& mod : mountedMods) {
+        loadOrder += " " + mod.manifest.id + "(p" + std::to_string(mod.manifest.priority) + ")";
+    }
     const bool prefabOk = prefabs.hasPrefab("prefab.mod.hd_textures.preview");
+    const bool basePrefabOk = prefabs.hasPrefab("prefab.mod.base_items.token");
     const bool sceneOk = scenes.hasScene("scene.mod.hd_textures.preview");
+    const bool balanceSceneOk = scenes.hasScene("scene.mod.balance_patch.preview");
     const engine::ConfigDesc* demoConfig = configs.findConfig("config.mod.hd_textures.demo2");
+    const engine::ConfigDesc* multiConfig = configs.findConfig("config.demo2.multi");
+    const std::string multiWinner = multiConfig ? multiConfig->value.value("winner", "") : "";
+    const int multiBonus = multiConfig ? multiConfig->value.value("bonus", 0) : 0;
+
+    const bool orderOk =
+        mountedMods.size() == 3 &&
+        mountedMods[0].manifest.id == "base_items" &&
+        mountedMods[1].manifest.id == "hd_textures" &&
+        mountedMods[2].manifest.id == "balance_patch";
+    const bool overrideOk =
+        chain.size() == 3 &&
+        chain[0].sourceName == "game" &&
+        chain[1].sourceName == "mod:hd_textures" &&
+        chain[2].sourceName == "mod:balance_patch";
+    const bool dataOk =
+        prefabOk && basePrefabOk && sceneOk && balanceSceneOk &&
+        demoConfig && multiConfig &&
+        multiWinner == "balance_patch" && multiBonus == 99;
+    const bool multiModOk = gameManifestOk && modMountOk && orderOk && overrideOk && dataOk;
 
     auto worldCam = api.spawnEntity();
     api.addComponent(worldCam, engine::Transform{0.f, 0.f});
@@ -130,23 +156,33 @@ int main(int argc, char** argv) {
         chainText += " " + item.sourceName;
     }
 
-    makeText(api, font, "Demo2: S3 Mod Resource Pack", 32.f, 42.f, 30.f,
+    makeText(api, font, "Demo2: Multi-Mod Load Test", 32.f, 42.f, 30.f,
              core::Color{242, 246, 255, 255});
     makeText(api, font,
-             std::string("game.json + mods/hd_textures mounted: ") + (modMountOk ? "OK" : "FAILED"),
+             std::string("game.json + 3 mods mounted: ") + (multiModOk ? "OK" : "FAILED"),
              32.f, 88.f, 16.f,
-             modMountOk ? core::Color{120, 235, 160, 255} : core::Color{255, 110, 110, 255});
-    makeText(api, font, chainText, 32.f, 118.f, 16.f,
-             chain.size() > 1 ? core::Color{120, 210, 255, 255} : core::Color{255, 190, 120, 255});
-    makeText(api, font, "winner path: " + path, 32.f, 148.f, 13.f,
+             multiModOk ? core::Color{120, 235, 160, 255} : core::Color{255, 110, 110, 255});
+    makeText(api, font, loadOrder, 32.f, 116.f, 15.f,
+             orderOk ? core::Color{130, 220, 255, 255} : core::Color{255, 150, 100, 255});
+    makeText(api, font, chainText, 32.f, 144.f, 15.f,
+             overrideOk ? core::Color{120, 210, 255, 255} : core::Color{255, 190, 120, 255});
+    makeText(api, font, "winner path: " + path, 32.f, 172.f, 13.f,
              core::Color{185, 195, 210, 255});
     makeText(api, font,
-             std::string("data mod: prefab ") + (prefabOk ? "OK" : "missing") +
-                 " | scene " + (sceneOk ? "OK" : "missing") +
-                 " | config bonus " + (demoConfig ? std::to_string(demoConfig->value.value("bonus", 0)) : "missing"),
-             32.f, 176.f, 15.f,
-             prefabOk && sceneOk && demoConfig ? core::Color{150, 235, 210, 255}
-                                               : core::Color{255, 130, 110, 255});
+             std::string("data: base prefab ") + (basePrefabOk ? "OK" : "missing") +
+                 " | hd prefab " + (prefabOk ? "OK" : "missing") +
+                 " | scenes " + (sceneOk && balanceSceneOk ? "OK" : "missing"),
+             32.f, 200.f, 15.f,
+             basePrefabOk && prefabOk && sceneOk && balanceSceneOk
+                 ? core::Color{150, 235, 210, 255}
+                 : core::Color{255, 130, 110, 255});
+    makeText(api, font,
+             "config.demo2.multi winner: " + multiWinner +
+                 " | bonus " + std::to_string(multiBonus),
+             32.f, 228.f, 15.f,
+             multiWinner == "balance_patch" && multiBonus == 99
+                 ? core::Color{150, 235, 210, 255}
+                 : core::Color{255, 130, 110, 255});
     makeText(api, font, "ESC closes. Pass --opengl to force OpenGL, --auto-exit for smoke tests.",
              32.f, 500.f, 14.f, core::Color{165, 175, 190, 255});
 
@@ -172,5 +208,5 @@ int main(int argc, char** argv) {
     }
 
     ctx.shutdown();
-    return gameManifestOk && modMountOk && character.valid() && font.valid() && chain.size() > 1 ? 0 : 1;
+    return multiModOk && character.valid() && font.valid() ? 0 : 1;
 }

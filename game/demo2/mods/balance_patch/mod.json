@@ -1,15 +1,14 @@
 {
-  "id": "hd_textures",
-  "name": "HD Texture Override",
+  "id": "balance_patch",
+  "name": "Balance Patch",
   "version": "0.1.0",
   "engineVersion": "0.1.x",
   "type": "data",
-  "priority": 10,
+  "priority": 20,
   "assetManifest": "assets/manifest.json",
-  "prefabManifest": "prefabs/manifest.json",
   "sceneManifest": "scenes/manifest.json",
   "configManifest": "configs/manifest.json",
   "dependencies": [
-    "base_items"
+    "hd_textures"
   ]
 }

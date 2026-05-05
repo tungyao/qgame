@@ -1,0 +1,11 @@
+{
+  "configs": [
+    {
+      "id": "config.demo2.multi",
+      "value": {
+        "winner": "balance_patch",
+        "bonus": 99
+      }
+    }
+  ]
+}

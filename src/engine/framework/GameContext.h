@@ -9,6 +9,7 @@
 
 namespace engine {
 
+class AssetLoaderRegistry;
 class GameAPI;
 class ConfigRegistry;
 class PrefabRegistry;
@@ -53,6 +54,7 @@ struct GameContext {
     SceneManager* scenes = nullptr;
     PrefabRegistry* prefabs = nullptr;
     ConfigRegistry* configs = nullptr;
+    AssetLoaderRegistry* assetLoaders = nullptr;
     GameAPI* api = nullptr;
 
     // 便捷读取当前帧 dt。保留函数形式，后续如果加入暂停/时间缩放策略，

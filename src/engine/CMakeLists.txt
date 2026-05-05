@@ -1,6 +1,7 @@
 add_library(engine SHARED
     runtime/EngineContext.cpp
     runtime/FrameScheduler.cpp
+    framework/AssetLoaderRegistry.cpp
     framework/ConfigRegistry.cpp
     framework/GameInstance.cpp
     framework/GameManifest.cpp

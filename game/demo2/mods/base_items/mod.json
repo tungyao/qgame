@@ -1,0 +1,11 @@
+{
+  "id": "base_items",
+  "name": "Base Items",
+  "version": "0.1.0",
+  "engineVersion": "0.1.x",
+  "type": "data",
+  "priority": 0,
+  "prefabManifest": "prefabs/manifest.json",
+  "configManifest": "configs/manifest.json",
+  "dependencies": []
+}
