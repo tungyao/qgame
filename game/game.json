@@ -1,0 +1,9 @@
+{
+  "id": "qgame_demo",
+  "name": "QGame Framework Demo",
+  "version": "0.1.0",
+  "startupScene": "scene.demo.programmatic",
+  "assetManifest": "../assets/manifest.json",
+  "nativeLibrary": "",
+  "mods": []
+}

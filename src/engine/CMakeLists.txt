@@ -1,6 +1,10 @@
 add_library(engine SHARED
     runtime/EngineContext.cpp
     runtime/FrameScheduler.cpp
+    framework/GameInstance.cpp
+    framework/GameManifest.cpp
+    framework/ModManifest.cpp
+    framework/SceneManager.cpp
     api/GameAPI.cpp
     api/GameAPI_ExplicitInstantiation.cpp
     api/EditorAPI.cpp

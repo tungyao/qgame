@@ -2,6 +2,8 @@ add_executable(game
     main.cpp
 )
 
+set(QGAME_GAME_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/game.json")
+
 target_link_libraries(game
     PRIVATE engine
     PRIVATE SDL3::SDL3
@@ -13,7 +15,14 @@ target_link_libraries(game
 # this compile definition.
 if(TARGET qgame_assets)
     add_dependencies(game qgame_assets)
-    target_compile_definitions(game PRIVATE QGAME_BAKED_MANIFEST="${QGAME_BAKED_MANIFEST}")
+    target_compile_definitions(game PRIVATE
+        QGAME_BAKED_MANIFEST="${QGAME_BAKED_MANIFEST}"
+        QGAME_GAME_MANIFEST="${QGAME_GAME_MANIFEST}"
+    )
+else()
+    target_compile_definitions(game PRIVATE
+        QGAME_GAME_MANIFEST="${QGAME_GAME_MANIFEST}"
+    )
 endif()
 
 # 让游戏可执行文件能在自身目录旁找到 engine/SDL3 共享库

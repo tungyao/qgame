@@ -2,6 +2,10 @@
 #include <engine/runtime/EngineContext.h>
 #include <engine/runtime/EngineConfig.h>
 #include <engine/api/GameAPI.h>
+#include <engine/framework/GameContext.h>
+#include <engine/framework/GameInstance.h>
+#include <engine/framework/GameManifest.h>
+#include <engine/framework/SceneManager.h>
 #include <engine/components/RenderComponents.h>
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/AnimatorComponent.h>
@@ -13,9 +17,52 @@
 #include <SDL3/SDL.h>
 #include <vector>
 #include <string>
+#include <functional>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+
+#ifndef QGAME_GAME_MANIFEST
+#define QGAME_GAME_MANIFEST "game/game.json"
+#endif
+
+// DemoGameInstance lets the existing large demo move onto the Game Framework
+// lifecycle without first splitting every local variable into a separate state
+// object. The callbacks deliberately stay small and explicit: onInit owns demo
+// asset bootstrap, onUpdate owns the per-frame gameplay/demo controls, and
+// onShutdown is the future hook for game-owned cleanup.
+class DemoGameInstance final : public engine::GameInstance {
+public:
+	using InitFn = std::function<bool(engine::GameContext&)>;
+	using UpdateFn = std::function<void(engine::GameContext&, float)>;
+	using ShutdownFn = std::function<void(engine::GameContext&)>;
+
+	DemoGameInstance(InitFn init, UpdateFn update, ShutdownFn shutdown = {})
+		: init_(std::move(init))
+		, update_(std::move(update))
+		, shutdown_(std::move(shutdown)) {}
+
+	bool onInit(engine::GameContext& ctx) override {
+		return init_ ? init_(ctx) : true;
+	}
+
+	void onUpdate(engine::GameContext& ctx, float dt) override {
+		if (update_) update_(ctx, dt);
+	}
+
+	void onShutdown(engine::GameContext& ctx) override {
+		if (shutdown_) shutdown_(ctx);
+	}
+
+	void setUpdate(UpdateFn update) {
+		update_ = std::move(update);
+	}
+
+private:
+	InitFn init_;
+	UpdateFn update_;
+	ShutdownFn shutdown_;
+};
 
 
 static std::vector<uint8_t> makeCheckerboard(int w, int h, int cellSize, core::Color a, core::Color b) {
@@ -693,13 +740,45 @@ int main(int argc, char* argv[]) {
 	ctx.init(cfg);
 
 	engine::GameAPI api{ ctx };
+	engine::GameContext gameCtx{ ctx };
+	engine::SceneManager sceneManager{ gameCtx };
+	gameCtx.api = &api;
 
-	const bool manifestOk = api.loadAssetManifest(QGAME_BAKED_MANIFEST);
-	TextureHandle character = api.loadTextureById("texture.demo.character");
-	engine::FontHandle font = api.loadFontById("font.demo.main");
-	AnimationHandle playerAnim  = api.loadAnimationById("animation.demo.test");
-	if (!manifestOk || !character.valid() || !font.valid() || !playerAnim.valid()) {
-		printf("[Assets] failed to load baked QPAK manifest or demo assets\n");
+	engine::GameManifest gameManifest;
+	TextureHandle character;
+	engine::FontHandle font;
+	AnimationHandle playerAnim;
+	DemoGameInstance demo{
+		[&](engine::GameContext& fw) {
+			// game.json is now the demo project's framework entry. The scene is
+			// still built programmatically below, so startupScene is used as the
+			// stable identity for this demo until Scene/Prefab data migration lands.
+			if (!engine::GameManifestLoader::loadFromFile(QGAME_GAME_MANIFEST, gameManifest)) {
+				printf("[Game] failed to load game manifest: %s\n", QGAME_GAME_MANIFEST);
+				return false;
+			}
+			printf("[Game] %s (%s) startupScene=%s\n",
+				gameManifest.name.c_str(),
+				gameManifest.version.c_str(),
+				gameManifest.startupScene.c_str());
+
+			const bool manifestOk = api.loadAssetManifest(QGAME_BAKED_MANIFEST);
+			character = api.loadTextureById("texture.demo.character");
+			font = api.loadFontById("font.demo.main");
+			playerAnim = api.loadAnimationById("animation.demo.test");
+			if (!manifestOk || !character.valid() || !font.valid() || !playerAnim.valid()) {
+				printf("[Assets] failed to load baked QPAK manifest or demo assets\n");
+				return false;
+			}
+
+			(void)fw;
+			return true;
+		},
+		{}
+	};
+
+	if (!demo.onInit(gameCtx)) {
+		ctx.shutdown();
 		return 1;
 	}
 	// ── 上传程序化纹理 ────────────────────────────────────────────────────────
@@ -1968,9 +2047,10 @@ int main(int argc, char* argv[]) {
 
 	float maskRunT = 0.f;
 	float tintDemoT = 0.f;
-	while (ctx.scheduler.tick()) {
-		float dt = ctx.scheduler.deltaTime();
-		auto& anim = api.getComponent<engine::AnimatorComponent>(player);
+	bool demoRunning = true;
+	demo.setUpdate([&](engine::GameContext& fw, float dt) {
+		(void)fw;
+		auto& playerAnimator = api.getComponent<engine::AnimatorComponent>(player);
 
 		// Region Tint demo：每个 entity 在调色板间循环平滑过渡。
 		// 每段 transition 持续 kCycleSec 秒；entity i 的相位偏移 i*0.6 错峰。
@@ -2041,13 +2121,13 @@ int main(int argc, char* argv[]) {
 
 		// Phase 1: walk 走最低优先级；attack 锁定时不打断
 		if (isMoving) {
-			if (!anim.playing && anim.interruptible) {
+			if (!playerAnimator.playing && playerAnimator.interruptible) {
 				engine::PlayOptions o; o.priority = 0;
-				anim.play(playerAnim, o);
+				playerAnimator.play(playerAnim, o);
 			}
 		}
 		else {
-			if (anim.playing && anim.interruptible && anim.currentAnim == playerAnim) anim.stop();
+			if (playerAnimator.playing && playerAnimator.interruptible && playerAnimator.currentAnim == playerAnim) playerAnimator.stop();
 		}
 
 		// Phase 1 手动测试键
@@ -2057,30 +2137,30 @@ int main(int argc, char* argv[]) {
 			opts.priority = 10;
 			opts.forceRestart = true;
 			opts.mode = engine::PlayMode::Once;
-			anim.play(attackAnim, opts);
-			anim.lock();
+			playerAnimator.play(attackAnim, opts);
+			playerAnimator.lock();
 			printf("[Phase1] J: attack play (prio=10, locked, one-shot)\n");
 		}
 		// K: 低优先级 walk 请求 — 锁定时应入队、否则立即播
 		if (api.isKeyJustPressed(SDLK_K)) {
 			engine::PlayOptions opts; opts.priority = 1;
-			bool wasLocked = !anim.interruptible;
-			AnimationHandle prev = anim.currentAnim;
-			anim.play(playerAnim, opts);
-			const char* result = (anim.currentAnim == playerAnim && prev != playerAnim) ? "switched"
-				: anim.hasQueued ? "queued"
+			bool wasLocked = !playerAnimator.interruptible;
+			AnimationHandle prev = playerAnimator.currentAnim;
+			playerAnimator.play(playerAnim, opts);
+			const char* result = (playerAnimator.currentAnim == playerAnim && prev != playerAnim) ? "switched"
+				: playerAnimator.hasQueued ? "queued"
 				: "kept-current";
 			printf("[Phase1] K: low-prio walk -> %s (locked=%d)\n", result, wasLocked ? 1 : 0);
 		}
 		// L: 入队 walk —— 在 attack 完成后自动接续
 		if (api.isKeyJustPressed(SDLK_L)) {
 			engine::PlayOptions opts; opts.priority = 0;
-			anim.queue(playerAnim, opts);
+			playerAnimator.queue(playerAnim, opts);
 			printf("[Phase1] L: queued walk for after current\n");
 		}
 		// U: 解锁当前
 		if (api.isKeyJustPressed(SDLK_U)) {
-			anim.unlock();
+			playerAnimator.unlock();
 			printf("[Phase1] U: unlocked\n");
 		}
 
@@ -2374,9 +2454,17 @@ int main(int argc, char* argv[]) {
 			lastHovered = hoveredUI;
 		}
 
-		if (api.isKeyJustPressed(SDLK_ESCAPE)) { api.quit(); break; }
+		if (api.isKeyJustPressed(SDLK_ESCAPE)) {
+			api.quit();
+			demoRunning = false;
+		}
+	});
+
+	while (demoRunning && ctx.scheduler.tick()) {
+		demo.onUpdate(gameCtx, ctx.scheduler.deltaTime());
 	}
 
+	demo.onShutdown(gameCtx);
 	ctx.shutdown();
 	return 0;
 }
