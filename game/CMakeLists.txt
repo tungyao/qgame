@@ -83,3 +83,4 @@ if(WIN32)
 endif()
 
 add_subdirectory(demo2)
+add_subdirectory(demo3)

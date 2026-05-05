@@ -10,6 +10,7 @@ class PrefabRegistry;
 // EnTT Snapshot + JSON archive 实现场景序列化/反序列化。
 // 资源引用优先写 assetId，路径字段仅作为旧场景/调试回退。
 // 支持组件：Transform / Sprite / TileMap / TextComponent / Camera / RigidBody / Collider
+// / Light2D / LightOccluder2D / Reflector2D / Environment2D
 class SceneSerializer {
 public:
     // 序列化 registry 到 JSON 文件；assetMgr 用于将 TextureHandle 转路径

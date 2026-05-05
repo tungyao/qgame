@@ -260,6 +260,10 @@ void GLRenderDevice::init() {
     capabilities_.supportsIndirectDraw = false;
     capabilities_.supportsTextureArray = false;
     capabilities_.supportsTimestampQuery = false;
+    capabilities_.supportsWorldOffscreenColor = true;
+    capabilities_.supportsSampledRenderTarget = true;
+    capabilities_.supportsLighting2D = false;
+    capabilities_.backendName = "OpenGL";
 
     // 1×1 R8 dummy region 纹理（id=0），无 region 时绑定它
     {

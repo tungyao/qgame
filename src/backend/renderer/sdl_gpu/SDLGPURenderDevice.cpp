@@ -169,6 +169,12 @@ void SDLGPURenderDevice::init() {
     capabilities_.supportsIndirectDraw = true;
     capabilities_.supportsTextureArray = false;
     capabilities_.supportsTimestampQuery = false;
+    capabilities_.supportsWorldOffscreenColor = true;
+    capabilities_.supportsSampledRenderTarget = true;
+    capabilities_.supportsLighting2D = capabilities_.supportsCompute &&
+        capabilities_.supportsStorageBuffer &&
+        capabilities_.supportsStorageTexture;
+    capabilities_.backendName = "SDL_GPU(Vulkan-first)";
 
     // 6. 1×1 R8 dummy region 纹理（无 region 时绑到 sampler 槽 1）
     {

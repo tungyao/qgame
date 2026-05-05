@@ -31,6 +31,17 @@ struct RendererCapabilities {
     // changing the public rendering model.
     bool supportsTextureArray = false;
     bool supportsTimestampQuery = false;
+
+    // 2D lighting is intentionally separate from generic compute. A backend may
+    // run compute shaders but still lack the storage-texture / render-target
+    // sampling path required by the planned lighting buffer and composite pass.
+    bool supportsWorldOffscreenColor = false;
+    bool supportsSampledRenderTarget = false;
+    bool supportsLighting2D = false;
+
+    // Diagnostic backend name for debug overlays and demo scenes. Keep it a
+    // static string so per-frame stats never allocate.
+    const char* backendName = "Unknown";
 };
 
 enum class RenderPath : uint8_t {
@@ -66,6 +77,14 @@ struct RenderFrameStats {
     uint32_t drawCallCount = 0;
     uint32_t computeDispatchCount = 0;
     uint32_t textureBindCount = 0;
+
+    // Phase L0/L1 lighting counters. These do not imply that lighting is
+    // rendered yet; they prove the ECS data path is visible to RenderSystem and
+    // give the future compute pass a simple regression signal.
+    uint32_t light2DCount = 0;
+    uint32_t occluder2DCount = 0;
+    uint32_t reflector2DCount = 0;
+    uint32_t environment2DCount = 0;
 
     // Upload pressure is the first target for the next stage: frame upload
     // queue + staging/ring buffers should drive these numbers down.

@@ -409,6 +409,17 @@ SDL GPU 仍可作为短中期主后端，但文档和代码应把它视为 “Vu
 
 ## 10. 落地阶段
 
+### 当前实现状态
+
+2026-05 阶段 0/1 已落地：
+
+- `Light2D` / `LightOccluder2D` / `Reflector2D` / `Environment2D` 组件已加入。
+- `SceneSerializer` / `ComponentJson` 已支持保存和加载上述组件。
+- `RendererCapabilities` 已增加 2D lighting 相关能力字段。
+- `RenderFrameStats` 已增加 light / occluder / reflector / environment 计数。
+- `RenderSystem` 每帧收集上述计数，作为 future compute pass 的数据路径探针。
+- `game/demo3` 已加入，用 debug sprite 可视化夜晚、光源、遮挡物和反射区域。
+
 ### L0：文档和能力探针
 
 交付：

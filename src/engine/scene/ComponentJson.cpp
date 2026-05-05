@@ -4,6 +4,7 @@
 #include "../components/PhysicsComponents.h"
 #include "../components/RenderComponents.h"
 #include "../components/TextComponent.h"
+#include "../components/LightComponents.h"
 
 #include <cstdint>
 #include <vector>
@@ -217,6 +218,143 @@ static TextComponent textFromJson(const Json& j, AssetManager& mgr) {
     return t;
 }
 
+static Json colorToJson(const core::Color& c) {
+    // 颜色在 scene/prefab 中保持 0..255 整数，和现有 Sprite/Text 字段一致。
+    // 后续 GPU 上传时再统一归一化到 0..1，避免 JSON 手写时出现浮点颜色歧义。
+    return {{"r", (int)c.r}, {"g", (int)c.g}, {"b", (int)c.b}, {"a", (int)c.a}};
+}
+
+static core::Color colorFromJson(const Json& j, core::Color fallback = core::Color::White) {
+    if (!j.is_object()) return fallback;
+    return core::Color{(uint8_t)j.value("r", (int)fallback.r),
+                       (uint8_t)j.value("g", (int)fallback.g),
+                       (uint8_t)j.value("b", (int)fallback.b),
+                       (uint8_t)j.value("a", (int)fallback.a)};
+}
+
+static Json light2DToJson(const Light2D& l) {
+    // Light2D 只保存“光”的参数；世界位置来自同实体 Transform。
+    // 这样保存/加载时不会出现 Transform 与 Light2D 内部坐标互相打架。
+    return {
+        {"type", static_cast<int>(l.type)},
+        {"color", colorToJson(l.color)},
+        {"radius", l.radius},
+        {"intensity", l.intensity},
+        {"softness", l.softness},
+        {"coneRotation", l.coneRotation},
+        {"coneAngle", l.coneAngle},
+        {"layerMask", l.layerMask},
+        {"castsShadow", l.castsShadow},
+        {"visible", l.visible},
+    };
+}
+
+static Light2D light2DFromJson(const Json& j) {
+    Light2D l;
+    l.type = static_cast<Light2DType>(j.value("type", static_cast<int>(Light2DType::Point)));
+    l.color = colorFromJson(j.value("color", Json::object()), core::Color::White);
+    l.radius = j.value("radius", 256.f);
+    l.intensity = j.value("intensity", 1.f);
+    l.softness = j.value("softness", 16.f);
+    l.coneRotation = j.value("coneRotation", 0.f);
+    l.coneAngle = j.value("coneAngle", 6.28318530718f);
+    l.layerMask = j.value("layerMask", 0xFFFFFFFFu);
+    l.castsShadow = j.value("castsShadow", true);
+    l.visible = j.value("visible", true);
+    return l;
+}
+
+static Json lightOccluder2DToJson(const LightOccluder2D& o) {
+    // 第一阶段避免动态数组：AABB 和 Segment 都能用固定字段表达，
+    // 方便手写 JSON，也方便编辑器之后直接生成字段面板。
+    return {
+        {"shape", static_cast<int>(o.shape)},
+        {"width", o.width},
+        {"height", o.height},
+        {"ax", o.ax},
+        {"ay", o.ay},
+        {"bx", o.bx},
+        {"by", o.by},
+        {"opacity", o.opacity},
+        {"heightZ", o.heightZ},
+        {"castsShadow", o.castsShadow},
+    };
+}
+
+static LightOccluder2D lightOccluder2DFromJson(const Json& j) {
+    LightOccluder2D o;
+    o.shape = static_cast<LightOccluder2D::Shape>(
+        j.value("shape", static_cast<int>(LightOccluder2D::Shape::AABB)));
+    o.width = j.value("width", 0.f);
+    o.height = j.value("height", 0.f);
+    o.ax = j.value("ax", 0.f);
+    o.ay = j.value("ay", 0.f);
+    o.bx = j.value("bx", 0.f);
+    o.by = j.value("by", 0.f);
+    o.opacity = j.value("opacity", 1.f);
+    o.heightZ = j.value("heightZ", 1.f);
+    o.castsShadow = j.value("castsShadow", true);
+    return o;
+}
+
+static Json reflector2DToJson(const Reflector2D& r) {
+    // Reflector2D 是显式反射区域。它不保存贴图引用，避免反射系统变成
+    // 另一套材质资源系统；最终颜色来自 WorldColorPass 的采样结果。
+    return {
+        {"shape", static_cast<int>(r.shape)},
+        {"ax", r.ax},
+        {"ay", r.ay},
+        {"bx", r.bx},
+        {"by", r.by},
+        {"width", r.width},
+        {"height", r.height},
+        {"reflectivity", r.reflectivity},
+        {"roughness", r.roughness},
+        {"tint", colorToJson(r.tint)},
+        {"visible", r.visible},
+    };
+}
+
+static Reflector2D reflector2DFromJson(const Json& j) {
+    Reflector2D r;
+    r.shape = static_cast<Reflector2D::Shape>(
+        j.value("shape", static_cast<int>(Reflector2D::Shape::Segment)));
+    r.ax = j.value("ax", 0.f);
+    r.ay = j.value("ay", 0.f);
+    r.bx = j.value("bx", 0.f);
+    r.by = j.value("by", 0.f);
+    r.width = j.value("width", 0.f);
+    r.height = j.value("height", 0.f);
+    r.reflectivity = j.value("reflectivity", 0.5f);
+    r.roughness = j.value("roughness", 0.35f);
+    r.tint = colorFromJson(j.value("tint", Json::object()), core::Color::White);
+    r.visible = j.value("visible", true);
+    return r;
+}
+
+static Json environment2DToJson(const Environment2D& e) {
+    return {
+        {"ambientColor", colorToJson(e.ambientColor)},
+        {"ambientIntensity", e.ambientIntensity},
+        {"exposure", e.exposure},
+        {"bloomThreshold", e.bloomThreshold},
+        {"wetness", e.wetness},
+        {"enabled", e.enabled},
+    };
+}
+
+static Environment2D environment2DFromJson(const Json& j) {
+    Environment2D e;
+    e.ambientColor = colorFromJson(j.value("ambientColor", Json::object()),
+                                   core::Color{32, 40, 56, 255});
+    e.ambientIntensity = j.value("ambientIntensity", 0.25f);
+    e.exposure = j.value("exposure", 1.f);
+    e.bloomThreshold = j.value("bloomThreshold", 1.1f);
+    e.wetness = j.value("wetness", 0.f);
+    e.enabled = j.value("enabled", true);
+    return e;
+}
+
 void writeKnownComponents(entt::registry& reg,
                           entt::entity entity,
                           AssetManager& assetMgr,
@@ -230,6 +368,10 @@ void writeKnownComponents(entt::registry& reg,
     if (auto* c = reg.try_get<RigidBody>(entity)) out["RigidBody"] = rigidBodyToJson(*c);
     if (auto* c = reg.try_get<Collider>(entity)) out["Collider"] = colliderToJson(*c);
     if (auto* c = reg.try_get<TextComponent>(entity)) out["TextComponent"] = textToJson(*c, assetMgr);
+    if (auto* c = reg.try_get<Light2D>(entity)) out["Light2D"] = light2DToJson(*c);
+    if (auto* c = reg.try_get<LightOccluder2D>(entity)) out["LightOccluder2D"] = lightOccluder2DToJson(*c);
+    if (auto* c = reg.try_get<Reflector2D>(entity)) out["Reflector2D"] = reflector2DToJson(*c);
+    if (auto* c = reg.try_get<Environment2D>(entity)) out["Environment2D"] = environment2DToJson(*c);
 }
 
 void applyKnownComponents(entt::registry& reg,
@@ -263,6 +405,18 @@ void applyKnownComponents(entt::registry& reg,
     if (components.contains("TextComponent")) {
         reg.emplace_or_replace<TextComponent>(entity, textFromJson(components["TextComponent"], assetMgr));
     }
+    if (components.contains("Light2D")) {
+        reg.emplace_or_replace<Light2D>(entity, light2DFromJson(components["Light2D"]));
+    }
+    if (components.contains("LightOccluder2D")) {
+        reg.emplace_or_replace<LightOccluder2D>(entity, lightOccluder2DFromJson(components["LightOccluder2D"]));
+    }
+    if (components.contains("Reflector2D")) {
+        reg.emplace_or_replace<Reflector2D>(entity, reflector2DFromJson(components["Reflector2D"]));
+    }
+    if (components.contains("Environment2D")) {
+        reg.emplace_or_replace<Environment2D>(entity, environment2DFromJson(components["Environment2D"]));
+    }
 }
 
 Json collectComponentObject(const Json& entityJson) {
@@ -278,7 +432,8 @@ Json collectComponentObject(const Json& entityJson) {
 
     static constexpr const char* kKnownComponentNames[] = {
         "EntityID", "Name", "Transform", "Sprite", "TileMap",
-        "Camera", "RigidBody", "Collider", "TextComponent"
+        "Camera", "RigidBody", "Collider", "TextComponent",
+        "Light2D", "LightOccluder2D", "Reflector2D", "Environment2D"
     };
     for (const char* name : kKnownComponentNames) {
         if (entityJson.contains(name)) {

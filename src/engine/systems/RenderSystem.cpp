@@ -5,6 +5,7 @@
 #include "../components/TextComponent.h"
 #include "../components/ParticleComponent.h"
 #include "../components/AnimatorComponent.h"
+#include "../components/LightComponents.h"
 #include "../../backend/renderer/CommandBuffer.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../core/Logger.h"
@@ -137,6 +138,14 @@ void RenderSystem::update(float dt) {
     backend::IRenderDevice& dev = ctx_.renderDevice();
     backend::RenderFrameStats& stats = dev.mutableFrameStats();
     stats.spriteCount = spriteBuffer_.activeCount();
+    // Phase L0/L1 of the 2D lighting plan: RenderSystem deliberately only
+    // observes the lighting ECS data here. The actual Vulkan compute pass will
+    // consume the same components later, but these counters already prove that
+    // scenes, prefabs, and demos can feed stable light/occluder/reflector data.
+    stats.light2DCount = static_cast<uint32_t>(ctx_.world.view<Light2D>().size());
+    stats.occluder2DCount = static_cast<uint32_t>(ctx_.world.view<LightOccluder2D>().size());
+    stats.reflector2DCount = static_cast<uint32_t>(ctx_.world.view<Reflector2D>().size());
+    stats.environment2DCount = static_cast<uint32_t>(ctx_.world.view<Environment2D>().size());
 
     // Route selection is capability driven. The CPU-batch path remains a
     // correctness fallback; all performance work should make this branch less
