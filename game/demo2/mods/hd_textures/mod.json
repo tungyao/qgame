@@ -1,0 +1,10 @@
+{
+  "id": "hd_textures",
+  "name": "HD Texture Override",
+  "version": "0.1.0",
+  "engineVersion": "0.1.x",
+  "type": "data",
+  "priority": 10,
+  "assetManifest": "assets/manifest.json",
+  "dependencies": []
+}

@@ -119,13 +119,7 @@ void AssetManager::shutdown() {
     fontPathById_.clear();
     animByPath_.clear();
     animPathById_.clear();
-    assetsById_.clear();
-    packsById_.clear();
-    manifestDir_.clear();
-    textureIdByPath_.clear();
-    soundIdByPath_.clear();
-    animationIdByPath_.clear();
-    fontIdByPath_.clear();
+    clearManifestIndex();
     textureAssetIdByHandle_.clear();
     soundAssetIdByHandle_.clear();
     animationAssetIdByHandle_.clear();
@@ -242,14 +236,28 @@ std::string AssetManager::resolveManifestPath(const AssetRecord& rec) const {
     if (isPackPath(raw)) return normalizeAssetPath(raw);
 
     std::filesystem::path p(raw);
-    if (p.is_absolute() || manifestDir_.empty()) return p.lexically_normal().string();
+    const std::string& baseDir = !rec.baseDir.empty() ? rec.baseDir : manifestDir_;
+    if (p.is_absolute() || baseDir.empty()) return p.lexically_normal().string();
 
-    const std::filesystem::path fromManifest = std::filesystem::path(manifestDir_) / p;
+    const std::filesystem::path fromManifest = std::filesystem::path(baseDir) / p;
     if (std::filesystem::exists(fromManifest)) {
         return fromManifest.lexically_normal().string();
     }
 
     return p.lexically_normal().string();
+}
+
+void AssetManager::clearManifestIndex() {
+    // Manifest 数据是资源 ID 到磁盘/QPAK 路径的索引。清掉索引不会销毁
+    // 已加载 GPU/音频资源；资源生命周期仍由各自的引用计数和 shutdown 管理。
+    assetsById_.clear();
+    assetOverrideChains_.clear();
+    packsById_.clear();
+    manifestDir_.clear();
+    textureIdByPath_.clear();
+    soundIdByPath_.clear();
+    animationIdByPath_.clear();
+    fontIdByPath_.clear();
 }
 
 void AssetManager::indexManifestRecord(const AssetRecord& rec) {
@@ -264,6 +272,21 @@ void AssetManager::indexManifestRecord(const AssetRecord& rec) {
         case AssetType::Sound:     soundIdByPath_[resolved] = rec.id; break;
         case AssetType::Animation: animationIdByPath_[resolved] = rec.id; break;
         case AssetType::Font:      fontIdByPath_[resolved] = rec.id; break;
+        default: break;
+    }
+}
+
+void AssetManager::removeManifestRecordIndex(const AssetRecord& rec) {
+    const std::string resolved = resolveManifestPath(rec);
+    if (resolved.empty()) return;
+
+    // 覆盖同一个 asset ID 时，旧路径不能继续反查到这个 ID；否则旧场景
+    // 直接按路径加载后，保存时会误写成当前已经被 Mod 覆盖的 stable ID。
+    switch (rec.type) {
+        case AssetType::Texture:   textureIdByPath_.erase(resolved); break;
+        case AssetType::Sound:     soundIdByPath_.erase(resolved); break;
+        case AssetType::Animation: animationIdByPath_.erase(resolved); break;
+        case AssetType::Font:      fontIdByPath_.erase(resolved); break;
         default: break;
     }
 }
@@ -293,6 +316,11 @@ const std::string& AssetManager::assetIdForPath(AssetType type, const std::strin
 }
 
 bool AssetManager::loadManifest(const std::string& path) {
+    clearManifestIndex();
+    return loadManifestOverlay(path, "game");
+}
+
+bool AssetManager::loadManifestOverlay(const std::string& path, const std::string& sourceName) {
     std::ifstream ifs(path);
     if (!ifs.is_open()) {
         core::logError("[AssetManager] failed to open manifest: %s", path.c_str());
@@ -313,12 +341,6 @@ bool AssetManager::loadManifest(const std::string& path) {
     }
 
     manifestDir_ = std::filesystem::path(path).parent_path().string();
-    assetsById_.clear();
-    packsById_.clear();
-    textureIdByPath_.clear();
-    soundIdByPath_.clear();
-    animationIdByPath_.clear();
-    fontIdByPath_.clear();
 
     if (j.contains("packs") && j["packs"].is_array()) {
         for (const auto& item : j["packs"]) {
@@ -339,6 +361,7 @@ bool AssetManager::loadManifest(const std::string& path) {
         rec.type   = parseAssetType(item.value("type", std::string{}));
         rec.source = item.value("source", std::string{});
         rec.baked  = item.value("baked", std::string{});
+        rec.baseDir = manifestDir_;
 
         if (rec.id.empty()) {
             core::logWarn("[AssetManager] manifest asset without id ignored: %s", path.c_str());
@@ -352,16 +375,28 @@ bool AssetManager::loadManifest(const std::string& path) {
             core::logWarn("[AssetManager] manifest asset %s has no source/baked path", rec.id.c_str());
             continue;
         }
-        if (assetsById_.find(rec.id) != assetsById_.end()) {
-            core::logWarn("[AssetManager] duplicate manifest asset id replaced: %s", rec.id.c_str());
+        auto& chain = assetOverrideChains_[rec.id];
+        if (!chain.empty()) {
+            core::logWarn("[AssetManager] asset override: %s", rec.id.c_str());
+            for (const auto& layer : chain) {
+                core::logWarn("  previous: %s (%s)",
+                              layer.sourceName.c_str(),
+                              layer.manifestPath.c_str());
+            }
+            core::logWarn("  winner: %s (%s)", sourceName.c_str(), path.c_str());
+            auto old = assetsById_.find(rec.id);
+            if (old != assetsById_.end()) {
+                removeManifestRecordIndex(old->second);
+            }
         }
+        chain.push_back(AssetOverrideEntry{sourceName, path});
 
         indexManifestRecord(rec);
         assetsById_[rec.id] = std::move(rec);
     }
 
-    core::logInfo("[AssetManager] loaded manifest %s (%zu assets)",
-                  path.c_str(), assetsById_.size());
+    core::logInfo("[AssetManager] loaded manifest layer %s from %s (%zu total assets)",
+                  sourceName.c_str(), path.c_str(), assetsById_.size());
     return true;
 }
 
@@ -375,6 +410,13 @@ std::vector<std::string> AssetManager::assetIds() const {
     for (const auto& [id, _] : assetsById_) ids.push_back(id);
     std::sort(ids.begin(), ids.end());
     return ids;
+}
+
+std::vector<AssetManager::AssetOverrideEntry>
+AssetManager::assetOverrideChain(const std::string& id) const {
+    auto it = assetOverrideChains_.find(id);
+    if (it == assetOverrideChains_.end()) return {};
+    return it->second;
 }
 
 TextureHandle AssetManager::loadTextureById(const std::string& id) {

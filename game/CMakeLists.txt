@@ -81,3 +81,5 @@ if(WIN32)
     # 隐藏控制台窗口
     set_target_properties(game PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
+
+add_subdirectory(demo2)

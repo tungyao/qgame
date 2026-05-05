@@ -4,6 +4,7 @@ add_library(engine SHARED
     framework/GameInstance.cpp
     framework/GameManifest.cpp
     framework/ModManifest.cpp
+    framework/ModManager.cpp
     framework/PrefabRegistry.cpp
     framework/SceneManager.cpp
     api/GameAPI.cpp

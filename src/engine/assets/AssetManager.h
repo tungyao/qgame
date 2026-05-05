@@ -35,12 +35,19 @@ public:
 
     // Phase 1/3 resource pipeline: manifest + stable asset IDs.
     bool loadManifest(const std::string& path);
+    bool loadManifestOverlay(const std::string& path, const std::string& sourceName);
     bool hasAsset(const std::string& id) const;
     TextureHandle loadTextureById(const std::string& id);
     SoundHandle   loadSoundById(const std::string& id);
     AnimationHandle loadAnimationById(const std::string& id);
     FontHandle    loadFontById(const std::string& id);
     std::vector<std::string> assetIds() const;
+
+    struct AssetOverrideEntry {
+        std::string sourceName;
+        std::string manifestPath;
+    };
+    std::vector<AssetOverrideEntry> assetOverrideChain(const std::string& id) const;
 
     // 引用计数 -1，归零时销毁 GPU 资源
     void releaseTexture(TextureHandle h);
@@ -84,6 +91,7 @@ private:
         AssetType   type = AssetType::Unknown;
         std::string source;
         std::string baked;
+        std::string baseDir;
     };
 
     struct PackEntry {
@@ -110,6 +118,7 @@ private:
     std::unordered_map<std::string, AnimEntry> animByPath_;
     std::unordered_map<std::string, FontEntry> fontByPath_;
     std::unordered_map<std::string, AssetRecord> assetsById_;
+    std::unordered_map<std::string, std::vector<AssetOverrideEntry>> assetOverrideChains_;
     std::unordered_map<std::string, MountedPack> packsById_;
     std::string manifestDir_;
 
@@ -145,8 +154,10 @@ private:
     static std::string siblingRegionIdPath(const std::string& path);
     static std::string parentAssetPath(const std::string& path);
     static std::string joinAssetPath(const std::string& baseDir, const std::string& child);
+    void clearManifestIndex();
     std::string resolveManifestPath(const AssetRecord& rec) const;
     void indexManifestRecord(const AssetRecord& rec);
+    void removeManifestRecordIndex(const AssetRecord& rec);
     const std::string& assetIdForPath(AssetType type, const std::string& path) const;
     bool mountPack(const std::string& id, const std::string& path);
     bool readAssetBytes(const std::string& path, std::vector<uint8_t>& out) const;

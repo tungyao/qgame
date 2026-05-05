@@ -1,0 +1,11 @@
+{
+  "id": "qgame_demo2_mod_resources",
+  "name": "QGame Demo2 Mod Resources",
+  "version": "0.1.0",
+  "startupScene": "scene.demo2.mod_resources",
+  "assetManifest": "../../assets/manifest.json",
+  "nativeLibrary": "",
+  "mods": [
+    "hd_textures"
+  ]
+}

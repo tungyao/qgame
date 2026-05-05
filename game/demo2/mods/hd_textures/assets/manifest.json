@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "id": "texture.demo.character",
+      "type": "texture",
+      "source": "../../../../assets/test_spritesheet.png"
+    }
+  ]
+}
