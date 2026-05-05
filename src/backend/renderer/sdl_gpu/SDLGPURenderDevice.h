@@ -143,7 +143,9 @@ private:
     SDL_GPUGraphicsPipeline* particlePipeline_   = nullptr;
     ComputePipelineHandle    lighting2DComputePipeline_{};
     ComputePipelineHandle    lighting2DCullPipeline_{};
+    ComputePipelineHandle    lighting2DBlurPipeline_{};
     TextureHandle            lighting2DTexture_{};
+    TextureHandle            lighting2DBlurTexture_{};
     BufferHandle             lighting2DLightBuffer_{};
     BufferHandle             lighting2DSegmentBuffer_{};
     BufferHandle             lighting2DTileRangeBuffer_{};
@@ -154,6 +156,7 @@ private:
     uint32_t                 lighting2DSegmentCapacity_ = 0;
     uint32_t                 lighting2DTileCapacity_ = 0;
     uint32_t                 lighting2DTileIndexCapacity_ = 0;
+    uint32_t                 lighting2DFrameIndex_ = 0;
 
     // 1×1 R8 dummy region 纹理（无 region 时绑定，避免 sampler 缺失）
     TextureHandle dummyRegionTex_{};

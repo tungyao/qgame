@@ -1,4 +1,4 @@
-// L3 2D hard-shadow prototype with tiled light culling.
+// L4 2D lighting prototype with tiled culling, soft shadows, and night ambience.
 //
 // This compute shader writes a half-resolution dynamic-light overlay texture.
 // The renderer then draws that texture over the world color using the existing
@@ -17,10 +17,10 @@ struct Light2DPoint {
     float  radius;
     float  intensity;
     float4 color;
+    float  softness;
     uint   layerMask;
     uint   castsShadow;
     uint   pad0;
-    uint   pad1;
 };
 
 struct Light2DSegment {
@@ -51,11 +51,16 @@ cbuffer Lighting2DParams : register(b0, space2)
     uint   segmentCount;
     uint   tileCols;
     uint   tileRows;
-    float  zoom;
-    float  shadowStrength;
     uint   tileSize;
     uint   maxLightsPerTile;
-    uint2  pad0;
+    float4 ambientColor;
+    float  zoom;
+    float  shadowStrength;
+    float  ambientIntensity;
+    float  exposure;
+    uint   frameIndex;
+    float  time;
+    float2 pad0;
 };
 
 float cross2(float2 a, float2 b)
@@ -77,6 +82,64 @@ bool rayIntersectsSegment(float2 p, float2 q, float2 a, float2 b)
     return t > 0.001 && t < 0.999 && u >= 0.0 && u <= 1.0;
 }
 
+float hash12(float2 p)
+{
+    // Tiny deterministic hash for temporal jitter. The input mixes pixel
+    // position and frame index, so neighboring pixels do not all sample the
+    // same point on the area light and subsequent blur can smooth the pattern.
+    float3 p3 = frac(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float2 unitDiskSample(uint sampleIndex, float2 pixel, uint frame)
+{
+    // Four low-discrepancy directions, rotated per frame. This is deliberately
+    // stable and cheap: it gives soft penumbra without the obvious shimmer of
+    // fully random samples, while the frame-dependent phase prevents fixed
+    // banding on perfectly vertical/horizontal occluders.
+    const float PI = 3.14159265359;
+    float base = (float)sampleIndex + 0.5;
+    float jitter = hash12(pixel + float2(frame * 17u, frame * 29u));
+    float angle = (base * 1.57079632679) + jitter * 0.78539816339;
+    float radius = sqrt((base + jitter * 0.35) / 4.35);
+    return float2(cos(angle), sin(angle)) * radius;
+}
+
+float sampleVisibility(float2 world, Light2DPoint light, float2 pixel)
+{
+    if (light.castsShadow == 0u) {
+        return 1.0;
+    }
+
+    float visibility = 0.0;
+    float sampleRadius = max(light.softness, 0.0);
+
+    // A softness of 0 keeps the light as a hard point light. For area lights we
+    // sample four nearby points on the light disk and average whether each path
+    // reaches the pixel. Segment opacity attenuates visibility rather than
+    // forcing a binary answer, which keeps half-transparent occluders useful.
+    [unroll]
+    for (uint sampleIndex = 0; sampleIndex < 4u; ++sampleIndex) {
+        float2 sampleLight = light.position;
+        if (sampleRadius > 0.0) {
+            sampleLight += unitDiskSample(sampleIndex, pixel, frameIndex) * sampleRadius;
+        }
+
+        float blocked = 0.0;
+        [loop]
+        for (uint i = 0; i < segmentCount; ++i) {
+            Light2DSegment seg = Segments[i];
+            if (rayIntersectsSegment(world, sampleLight, seg.a, seg.b)) {
+                blocked = max(blocked, saturate(seg.opacity));
+            }
+        }
+        visibility += 1.0 - saturate(blocked);
+    }
+
+    return visibility * 0.25;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_DispatchThreadID)
 {
@@ -93,6 +156,7 @@ void main(uint3 gid : SV_DispatchThreadID)
     float3 lightAccum = float3(0.0, 0.0, 0.0);
     float  glowAlpha = 0.0;
     float  shadowAlpha = 0.0;
+    float  strongestVisibilityLoss = 0.0;
     uint2 tileCoord = min((uint2)floor(screen / max((float)tileSize, 1.0)),
                           uint2(max(tileCols, 1u) - 1u, max(tileRows, 1u) - 1u));
     uint tileId = tileCoord.y * tileCols + tileCoord.x;
@@ -114,17 +178,6 @@ void main(uint3 gid : SV_DispatchThreadID)
         float dist = distance(world, light.position);
 
         if (dist < light.radius) {
-            float blocked = 0.0;
-
-            [loop]
-            for (uint i = 0; i < segmentCount; ++i) {
-                Light2DSegment seg = Segments[i];
-                if (light.castsShadow != 0u &&
-                    rayIntersectsSegment(world, light.position, seg.a, seg.b)) {
-                    blocked = max(blocked, saturate(seg.opacity));
-                }
-            }
-
             // A squared falloff gives the glow a stronger hot center while
             // still fading softly at the light radius. The visibility term is
             // exactly what ties the old dynamic light visualization to the new
@@ -132,23 +185,38 @@ void main(uint3 gid : SV_DispatchThreadID)
             // replace it with a dark overlay in the same compute pass.
             float attenuation = saturate(1.0 - dist / light.radius);
             float lightWeight = attenuation * attenuation * max(light.intensity, 0.0);
-            float visibility = 1.0 - saturate(blocked);
+            float visibility = sampleVisibility(world, light, (float2)gid.xy);
             float visibleWeight = lightWeight * visibility;
+            float visibilityLoss = 1.0 - visibility;
 
             lightAccum += light.color.rgb * visibleWeight;
             glowAlpha = max(glowAlpha, visibleWeight * light.color.a * 0.36);
-            shadowAlpha = max(shadowAlpha, blocked * attenuation * shadowStrength);
+            shadowAlpha = max(shadowAlpha, visibilityLoss * attenuation * shadowStrength);
+            strongestVisibilityLoss = max(strongestVisibilityLoss, visibilityLoss * attenuation);
         }
     }
+
+    // Environment2D enters the composite here. The alpha-blended prototype
+    // cannot multiply the already-rendered world color yet, so we preserve night
+    // detail by always carrying a low-alpha ambient tint in the lighting texture.
+    // Exposure scales both direct light and ambient, while shadowAlpha can still
+    // win and draw a dark soft-edged shape when a light is occluded.
+    float3 ambient = ambientColor.rgb * saturate(ambientIntensity) * max(exposure, 0.0);
+    lightAccum = lightAccum * max(exposure, 0.0) + ambient;
 
     float luminance = dot(lightAccum, float3(0.2126, 0.7152, 0.0722));
     float finalGlowAlpha = saturate(min(max(glowAlpha, luminance * 0.24), 0.62));
     float finalShadowAlpha = saturate(min(shadowAlpha, 0.82));
+    float ambientAlpha = saturate(ambientIntensity * 0.32 + ambientColor.a * 0.04);
 
-    if (finalGlowAlpha > finalShadowAlpha * 0.65) {
+    if (finalGlowAlpha + ambientAlpha > finalShadowAlpha * 0.65) {
         float3 glowColor = saturate(lightAccum / max(luminance, 1.0));
-        ShadowOverlay[gid.xy] = float4(glowColor, finalGlowAlpha);
+        ShadowOverlay[gid.xy] = float4(glowColor, max(finalGlowAlpha, ambientAlpha));
     } else {
-        ShadowOverlay[gid.xy] = float4(0.0, 0.0, 0.0, finalShadowAlpha);
+        // Preserve a hint of the ambient color even inside shadowed areas. This
+        // keeps the night scene readable and satisfies the L4 goal of avoiding
+        // crushed black, while the alpha still darkens enough to show occlusion.
+        float3 shadowTint = ambient * (0.15 + 0.35 * (1.0 - strongestVisibilityLoss));
+        ShadowOverlay[gid.xy] = float4(saturate(shadowTint), finalShadowAlpha);
     }
 }

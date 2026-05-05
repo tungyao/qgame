@@ -113,6 +113,21 @@ entt::entity makeText(engine::GameAPI& api,
     return e;
 }
 
+enum class LightingPreset {
+    Torch = 0,
+    StreetLamp = 1,
+    Moonlight = 2,
+};
+
+const char* presetName(LightingPreset preset) {
+    switch (preset) {
+        case LightingPreset::Torch: return "Torch";
+        case LightingPreset::StreetLamp: return "StreetLamp";
+        case LightingPreset::Moonlight: return "Moonlight";
+        default: return "Unknown";
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -120,7 +135,7 @@ int main(int argc, char** argv) {
     const bool autoExit = hasArg(argc, argv, "--auto-exit");
 
     engine::EngineConfig cfg;
-    cfg.windowTitle = "QGame Demo3 - Vulkan 2D Lighting L3";
+    cfg.windowTitle = "QGame Demo3 - Vulkan 2D Lighting L4";
     cfg.windowWidth = 1280;
     cfg.windowHeight = 720;
     cfg.vsync = true;
@@ -250,13 +265,31 @@ int main(int argc, char** argv) {
     patrolLight.castsShadow = true;
     api.addComponent(patrol, patrolLight);
 
-    // L3 tiled-culling stress field: 30 small lamps plus the two hand-placed
-    // hero lights above gives exactly 32 Light2D components. They are spread
-    // across the screen so most 32x32 tiles see only a few lights; that makes
-    // the benefit of the GPU tile list visible in captures and keeps the scene
-    // a practical regression test instead of a synthetic full-screen overlap.
+    // Moon preset light: it has no debug sprite because moonlight is a broad
+    // atmospheric source rather than a local lamp marker. Keeping it as a real
+    // Light2D in the same ECS scene proves that presets can switch between
+    // localized fire/street lights and a large soft global-ish light without
+    // changing the renderer path.
+    auto moon = api.spawnEntity();
+    api.addComponent(moon, engine::Transform{640.f, -180.f});
+    engine::Light2D moonLight{};
+    moonLight.type = engine::Light2DType::Point;
+    moonLight.color = core::Color{145, 175, 255, 255};
+    moonLight.radius = 980.f;
+    moonLight.intensity = 0.0f;
+    moonLight.softness = 180.f;
+    moonLight.castsShadow = true;
+    moonLight.visible = true;
+    api.addComponent(moon, moonLight);
+
+    // L3/L4 tiled-culling stress field: 29 small lamps plus the two hand-placed
+    // hero lights and the moon light gives exactly 32 Light2D components. They
+    // are spread across the screen so most 32x32 tiles see only a few lights;
+    // that makes the benefit of the GPU tile list visible in captures and keeps
+    // the scene a practical regression test instead of a synthetic full-screen
+    // overlap.
     std::vector<entt::entity> l3Lights;
-    l3Lights.reserve(30);
+    l3Lights.reserve(29);
     const core::Color l3Palette[] = {
         core::Color{255, 132, 92, 150},
         core::Color{255, 218, 116, 145},
@@ -264,7 +297,7 @@ int main(int argc, char** argv) {
         core::Color{155, 132, 255, 135},
         core::Color{118, 255, 184, 135},
     };
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 29; ++i) {
         const int col = i % 10;
         const int row = i / 10;
         const float x = 155.f + col * 108.f;
@@ -299,14 +332,14 @@ int main(int argc, char** argv) {
     edge.tint = core::Color{130, 200, 255, 255};
     api.addComponent(waterEdge, edge);
 
-    auto title = makeText(api, font, "Demo3: 2D Lighting L3 - 32 Lights + Tiled Culling", 28.f, 34.f, 24.f,
+    auto title = makeText(api, font, "Demo3: 2D Lighting L4 - Soft Shadows + Night Presets", 28.f, 34.f, 24.f,
                           core::Color{235, 242, 255, 255});
     (void)title;
     makeText(api, font,
-             "Glow sprites are debug markers; compute now draws dynamic light and hard shadows together.",
+             "Compute path: tiled culling, area samples, temporal jitter, separable blur, Environment2D.",
              28.f, 66.f, 14.f, core::Color{170, 188, 210, 255});
     makeText(api, font,
-             "Real test data: 32 Light2D + LightOccluder2D + Reflector2D + Environment2D.",
+             "Press 1 Torch | 2 StreetLamp | 3 Moonlight. All presets run in the same scene.",
              28.f, 88.f, 14.f, core::Color{170, 188, 210, 255});
     auto statusText = makeText(api, font, "", 28.f, 116.f, 14.f,
                                core::Color{145, 225, 180, 255});
@@ -314,6 +347,107 @@ int main(int argc, char** argv) {
              28.f, 680.f, 14.f, core::Color{150, 158, 174, 255});
 
     float t = 0.f;
+    LightingPreset preset = LightingPreset::StreetLamp;
+
+    auto applyPreset = [&](LightingPreset next) {
+        preset = next;
+
+        // Presets are deliberately data-only changes: Environment2D controls
+        // the night floor/exposure, while existing Light2D components change
+        // color, radius, softness, and intensity. The renderer sees the same
+        // component types every frame, which keeps L4 testing focused on the
+        // lighting path instead of scene loading tricks.
+        api.patchComponent<engine::Environment2D>(env, [&](engine::Environment2D& e) {
+            if (preset == LightingPreset::Torch) {
+                e.ambientColor = core::Color{18, 22, 34, 255};
+                e.ambientIntensity = 0.12f;
+                e.exposure = 1.05f;
+                e.wetness = 0.35f;
+            } else if (preset == LightingPreset::StreetLamp) {
+                e.ambientColor = core::Color{24, 32, 52, 255};
+                e.ambientIntensity = 0.18f;
+                e.exposure = 0.9f;
+                e.wetness = 0.65f;
+            } else {
+                e.ambientColor = core::Color{42, 52, 82, 255};
+                e.ambientIntensity = 0.30f;
+                e.exposure = 0.78f;
+                e.wetness = 0.5f;
+            }
+        });
+
+        api.patchComponent<engine::Light2D>(lamp, [&](engine::Light2D& l) {
+            if (preset == LightingPreset::Torch) {
+                l.color = core::Color{255, 126, 62, 255};
+                l.radius = 235.f;
+                l.intensity = 1.55f;
+                l.softness = 58.f;
+            } else if (preset == LightingPreset::StreetLamp) {
+                l.color = core::Color{255, 186, 92, 255};
+                l.radius = 310.f;
+                l.intensity = 1.25f;
+                l.softness = 36.f;
+            } else {
+                l.color = core::Color{255, 200, 130, 255};
+                l.radius = 220.f;
+                l.intensity = 0.30f;
+                l.softness = 90.f;
+            }
+        });
+
+        api.patchComponent<engine::Light2D>(patrol, [&](engine::Light2D& l) {
+            if (preset == LightingPreset::Torch) {
+                l.color = core::Color{255, 92, 50, 255};
+                l.radius = 180.f;
+                l.intensity = 0.48f;
+                l.softness = 38.f;
+            } else if (preset == LightingPreset::StreetLamp) {
+                l.color = core::Color{90, 170, 255, 255};
+                l.radius = 250.f;
+                l.intensity = 0.95f;
+                l.softness = 28.f;
+            } else {
+                l.color = core::Color{130, 170, 255, 255};
+                l.radius = 340.f;
+                l.intensity = 0.22f;
+                l.softness = 130.f;
+            }
+        });
+
+        api.patchComponent<engine::Light2D>(moon, [&](engine::Light2D& l) {
+            if (preset == LightingPreset::Moonlight) {
+                l.intensity = 0.52f;
+                l.radius = 1040.f;
+                l.softness = 220.f;
+            } else {
+                l.intensity = 0.0f;
+            }
+        });
+
+        for (size_t i = 0; i < l3Lights.size(); ++i) {
+            api.patchComponent<engine::Light2D>(l3Lights[i], [&](engine::Light2D& l) {
+                if (preset == LightingPreset::Torch) {
+                    l.color = core::Color{255, 114, 54, 255};
+                    l.radius = 94.f + static_cast<float>((i % 4) * 10);
+                    l.intensity = 0.36f;
+                    l.softness = 34.f;
+                } else if (preset == LightingPreset::StreetLamp) {
+                    const core::Color tint = l3Palette[i % 5];
+                    l.color = core::Color{tint.r, tint.g, tint.b, 255};
+                    l.radius = 118.f + static_cast<float>((i % 4) * 14);
+                    l.intensity = 0.42f + static_cast<float>(i % 3) * 0.08f;
+                    l.softness = 18.f;
+                } else {
+                    l.color = core::Color{110, 145, 255, 255};
+                    l.radius = 150.f + static_cast<float>((i % 3) * 18);
+                    l.intensity = 0.14f;
+                    l.softness = 88.f;
+                }
+            });
+        }
+    };
+    applyPreset(preset);
+
     while (ctx.scheduler.tick()) {
         const float dt = ctx.scheduler.deltaTime();
         t += dt;
@@ -341,11 +475,16 @@ int main(int argc, char** argv) {
             });
         }
 
+        if (api.isKeyJustPressed(SDLK_1)) applyPreset(LightingPreset::Torch);
+        if (api.isKeyJustPressed(SDLK_2)) applyPreset(LightingPreset::StreetLamp);
+        if (api.isKeyJustPressed(SDLK_3)) applyPreset(LightingPreset::Moonlight);
+
         const backend::RendererCapabilities& caps = ctx.renderDevice().capabilities();
         const backend::RenderFrameStats& stats = ctx.renderDevice().frameStats();
         char buf[320];
         std::snprintf(buf, sizeof(buf),
-                      "backend=%s | compute=%d storageBuffer=%d storageTexture=%d lighting2D=%d dispatch=%u | lights=%u occluders=%u reflectors=%u env=%u",
+                      "preset=%s | backend=%s | compute=%d storageBuffer=%d storageTexture=%d lighting2D=%d dispatch=%u | lights=%u occluders=%u reflectors=%u env=%u",
+                      presetName(preset),
                       caps.backendName,
                       caps.supportsCompute ? 1 : 0,
                       caps.supportsStorageBuffer ? 1 : 0,

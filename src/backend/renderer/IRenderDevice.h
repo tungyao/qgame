@@ -246,10 +246,10 @@ public:
         float x = 0.f, y = 0.f;
         float radius = 1.f, intensity = 1.f;
         float colorR = 1.f, colorG = 1.f, colorB = 1.f, colorA = 1.f;
+        float softness = 16.f;
         uint32_t layerMask = 0xFFFFFFFFu;
         uint32_t castsShadow = 1u;
         uint32_t pad0 = 0u;
-        uint32_t pad1 = 0u;
     };
 
     struct Light2DSegment {
@@ -263,6 +263,15 @@ public:
         CameraData camera;
         uint32_t viewportW = 0;
         uint32_t viewportH = 0;
+        float ambientR = 24.f / 255.f;
+        float ambientG = 32.f / 255.f;
+        float ambientB = 52.f / 255.f;
+        float ambientA = 1.f;
+        float ambientIntensity = 0.18f;
+        float exposure = 0.9f;
+        float wetness = 0.f;
+        float time = 0.f;
+        uint32_t frameIndex = 0;
         bool enabled = true;
     };
 

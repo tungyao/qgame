@@ -125,6 +125,7 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
         gpu.colorG = light.color.g / 255.f;
         gpu.colorB = light.color.b / 255.f;
         gpu.colorA = light.color.a / 255.f;
+        gpu.softness = light.softness;
         gpu.layerMask = light.layerMask;
         gpu.castsShadow = light.castsShadow ? 1u : 0u;
         out.lights.push_back(gpu);
@@ -166,6 +167,24 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
     }
 
     out.enabled = !out.lights.empty();
+    // L4 environment handoff: RenderSystem still does not decide how lighting
+    // should look, but it does select the active scene Environment2D and copy
+    // its scalar values into the backend POD. The SDL_GPU composite can then
+    // tint the low-light areas, apply exposure, and keep the night scene from
+    // collapsing to pure black without reaching back into ECS.
+    auto envView = ctx.world.view<Environment2D>();
+    for (auto [ent, env] : envView.each()) {
+        (void)ent;
+        if (!env.enabled) continue;
+        out.ambientR = env.ambientColor.r / 255.f;
+        out.ambientG = env.ambientColor.g / 255.f;
+        out.ambientB = env.ambientColor.b / 255.f;
+        out.ambientA = env.ambientColor.a / 255.f;
+        out.ambientIntensity = env.ambientIntensity;
+        out.exposure = env.exposure;
+        out.wetness = env.wetness;
+        break;
+    }
     return out;
 }
 

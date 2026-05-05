@@ -58,6 +58,7 @@
 #include "particle_gpu_frag_spv.h"    // GPU 粒子片段着色器
 #include "lighting2d_spv.h"           // L3 2D lighting compute shader
 #include "lighting2d_cull_spv.h"      // L3 screen-tile light-list builder
+#include "lighting2d_blur_spv.h"      // L4 separable blur for soft lighting
 #ifdef QGAME_HAS_DXIL_SHADERS
 #include "sprite_vert_dxil.h"         // DXIL 版本的着色器 (Windows D3D12 后端)
 #include "sprite_frag_dxil.h"
@@ -66,6 +67,7 @@
 #include "particle_gpu_frag_dxil.h"
 #include "lighting2d_dxil.h"
 #include "lighting2d_cull_dxil.h"
+#include "lighting2d_blur_dxil.h"
 #endif
 
 namespace backend {
@@ -291,9 +293,17 @@ void SDLGPURenderDevice::shutdown() {
         destroyComputePipeline(lighting2DCullPipeline_);
         lighting2DCullPipeline_ = {};
     }
+    if (lighting2DBlurPipeline_.valid()) {
+        destroyComputePipeline(lighting2DBlurPipeline_);
+        lighting2DBlurPipeline_ = {};
+    }
     if (textures_.valid(lighting2DTexture_)) {
         destroyTexture(lighting2DTexture_);
         lighting2DTexture_ = {};
+    }
+    if (textures_.valid(lighting2DBlurTexture_)) {
+        destroyTexture(lighting2DBlurTexture_);
+        lighting2DBlurTexture_ = {};
     }
     if (buffers_.valid(lighting2DLightBuffer_)) {
         destroyBuffer(lighting2DLightBuffer_);
@@ -457,13 +467,14 @@ TextureHandle SDLGPURenderDevice::createRenderTargetTexture(int width, int heigh
 TextureHandle SDLGPURenderDevice::createStorageTexture(int width, int height) {
     if (!device_ || width <= 0 || height <= 0) return {};
 
-    // Lighting L2 writes this texture from compute and samples it immediately
-    // afterwards through the regular sprite pipeline. No color-target usage is
-    // needed for the prototype; compute owns the pixels.
+    // Lighting L4 writes this texture from compute, reads it during the blur
+    // passes, then samples it through the regular sprite pipeline. No
+    // color-target usage is needed for the prototype; compute owns the pixels.
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     info.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE |
+                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
                  SDL_GPU_TEXTUREUSAGE_SAMPLER;
     info.width = static_cast<uint32_t>(width);
     info.height = static_cast<uint32_t>(height);
@@ -1547,6 +1558,7 @@ bool SDLGPURenderDevice::probeStorageTextureSupport() {
     // storage use in SDL GPU's documented format table.
     constexpr SDL_GPUTextureUsageFlags kLightingUsage =
         SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE |
+        SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
         SDL_GPU_TEXTUREUSAGE_SAMPLER;
     constexpr SDL_GPUTextureFormat kLightingFormat =
         SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -1554,7 +1566,7 @@ bool SDLGPURenderDevice::probeStorageTextureSupport() {
     if (!SDL_GPUTextureSupportsFormat(device_, kLightingFormat,
                                       SDL_GPU_TEXTURETYPE_2D,
                                       kLightingUsage)) {
-        core::logWarn("2D lighting storage texture probe: RGBA8 write+sample unsupported");
+        core::logWarn("2D lighting storage texture probe: RGBA8 read/write+sample unsupported");
         return false;
     }
 
@@ -1579,7 +1591,7 @@ bool SDLGPURenderDevice::probeStorageTextureSupport() {
     }
 
     SDL_ReleaseGPUTexture(device_, probe);
-    core::logInfo("2D lighting storage texture probe: RGBA8 compute-write + sampler supported");
+    core::logInfo("2D lighting storage texture probe: RGBA8 compute read/write + sampler supported");
     return true;
 }
 
@@ -1638,6 +1650,31 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         }
     }
 
+    if (!lighting2DBlurPipeline_.valid()) {
+        ComputePipelineDesc desc{};
+        desc.spirvCode = lighting2d_blur_spv;
+        desc.spirvSize = lighting2d_blur_spv_size;
+#ifdef QGAME_HAS_DXIL_SHADERS
+        desc.dxilCode = lighting2d_blur_dxil;
+        desc.dxilSize = lighting2d_blur_dxil_size;
+#endif
+        desc.entryPoint = "main";
+        desc.threadCountX = 8;
+        desc.threadCountY = 8;
+        desc.threadCountZ = 1;
+        // Blur reads one storage texture and writes one storage texture. The
+        // same pipeline is dispatched twice with different source/destination
+        // resources and a direction uniform: horizontal, then vertical.
+        desc.numReadonlyStorageTextures = 1;
+        desc.numReadwriteStorageTextures = 1;
+        desc.numUniformBuffers = 1;
+        lighting2DBlurPipeline_ = createComputePipeline(desc);
+        if (!lighting2DBlurPipeline_.valid()) {
+            core::logError("ensureLighting2DResources: failed to create lighting2d blur pipeline");
+            return false;
+        }
+    }
+
     const int desiredW = static_cast<int>(std::max(1u, (viewportW + 1u) / 2u));
     const int desiredH = static_cast<int>(std::max(1u, (viewportH + 1u) / 2u));
     if (!textures_.valid(lighting2DTexture_) ||
@@ -1650,6 +1687,15 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         lighting2DTextureWidth_ = desiredW;
         lighting2DTextureHeight_ = desiredH;
         if (!lighting2DTexture_.valid()) return false;
+    }
+    if (!textures_.valid(lighting2DBlurTexture_) ||
+        textures_.get(lighting2DBlurTexture_).width != desiredW ||
+        textures_.get(lighting2DBlurTexture_).height != desiredH) {
+        if (textures_.valid(lighting2DBlurTexture_)) {
+            destroyTexture(lighting2DBlurTexture_);
+        }
+        lighting2DBlurTexture_ = createStorageTexture(desiredW, desiredH);
+        if (!lighting2DBlurTexture_.valid()) return false;
     }
 
     const uint32_t lightCapacity = std::max(1u, lightCount);
@@ -2211,7 +2257,9 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
 
     if (!computePipelines_.valid(lighting2DComputePipeline_)) return;
     if (!computePipelines_.valid(lighting2DCullPipeline_)) return;
+    if (!computePipelines_.valid(lighting2DBlurPipeline_)) return;
     if (!textures_.valid(lighting2DTexture_)) return;
+    if (!textures_.valid(lighting2DBlurTexture_)) return;
     if (!buffers_.valid(lighting2DLightBuffer_)) return;
     if (!buffers_.valid(lighting2DSegmentBuffer_)) return;
     if (!buffers_.valid(lighting2DTileRangeBuffer_)) return;
@@ -2219,7 +2267,9 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
 
     ComputePipelineEntry& compute = computePipelines_.get(lighting2DComputePipeline_);
     ComputePipelineEntry& cullCompute = computePipelines_.get(lighting2DCullPipeline_);
+    ComputePipelineEntry& blurCompute = computePipelines_.get(lighting2DBlurPipeline_);
     TextureEntry& lightingTex = textures_.get(lighting2DTexture_);
+    TextureEntry& blurTex = textures_.get(lighting2DBlurTexture_);
     BufferEntry& lightBuffer = buffers_.get(lighting2DLightBuffer_);
     BufferEntry& segmentBuffer = buffers_.get(lighting2DSegmentBuffer_);
     BufferEntry& tileRangeBuffer = buffers_.get(lighting2DTileRangeBuffer_);
@@ -2239,11 +2289,16 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         uint32_t segmentCount;
         uint32_t tileCols;
         uint32_t tileRows;
-        float zoom;
-        float shadowStrength;
         uint32_t tileSize;
         uint32_t maxLightsPerTile;
-        uint32_t pad0[2];
+        float ambientColor[4];
+        float zoom;
+        float shadowStrength;
+        float ambientIntensity;
+        float exposure;
+        uint32_t frameIndex;
+        float time;
+        float pad0[2];
     } uniforms{
         { cam.x, cam.y },
         { static_cast<float>(cam.viewportW), static_cast<float>(cam.viewportH) },
@@ -2252,11 +2307,16 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         segmentCount,
         tileCols,
         tileRows,
-        (cam.zoom > 0.f) ? cam.zoom : 1.f,
-        0.72f,
         kLighting2DTileSize,
         kLighting2DMaxLightsPerTile,
-        { 0u, 0u }
+        { params.ambientR, params.ambientG, params.ambientB, params.ambientA },
+        (cam.zoom > 0.f) ? cam.zoom : 1.f,
+        0.72f,
+        params.ambientIntensity,
+        params.exposure,
+        lighting2DFrameIndex_,
+        params.time > 0.f ? params.time : static_cast<float>(SDL_GetTicks()) / 1000.f,
+        { 0.f, 0.f }
     };
 
     struct LightingCullUniforms {
@@ -2332,6 +2392,59 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     SDL_DispatchGPUCompute(computePass, groupsX, groupsY, 1);
     SDL_EndGPUComputePass(computePass);
     frameStats_.computeDispatchCount++;
+
+    struct LightingBlurUniforms {
+        uint32_t lightingSize[2];
+        int32_t direction[2];
+        float ambientIntensity;
+        float exposure;
+        uint32_t pad0[2];
+    };
+
+    auto dispatchBlur = [&](SDL_GPUTexture* source,
+                            SDL_GPUTexture* target,
+                            int32_t dirX,
+                            int32_t dirY) {
+        LightingBlurUniforms blurUniforms{
+            { static_cast<uint32_t>(lighting2DTextureWidth_),
+              static_cast<uint32_t>(lighting2DTextureHeight_) },
+            { dirX, dirY },
+            params.ambientIntensity,
+            params.exposure,
+            { 0u, 0u }
+        };
+
+        SDL_GPUStorageTextureReadWriteBinding blurWrite{};
+        blurWrite.texture = target;
+        blurWrite.mip_level = 0;
+        blurWrite.layer = 0;
+        blurWrite.cycle = false;
+
+        SDL_GPUComputePass* blurPass =
+            SDL_BeginGPUComputePass(gpuCmdBuf_, &blurWrite, 1, nullptr, 0);
+        if (!blurPass) {
+            core::logError("submitLighting2DPass: SDL_BeginGPUComputePass(blur) failed: %s",
+                           SDL_GetError());
+            return false;
+        }
+
+        // Blur reads one storage texture and writes a different storage texture.
+        // The two dispatches below ping-pong between lightingTex and blurTex,
+        // which keeps read/write hazards clear without needing simultaneous
+        // storage read-write texture support.
+        SDL_BindGPUComputePipeline(blurPass, blurCompute.pipeline);
+        SDL_GPUTexture* readonlyTextures[1] = { source };
+        SDL_BindGPUComputeStorageTextures(blurPass, 0, readonlyTextures, 1);
+        SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &blurUniforms, sizeof(blurUniforms));
+        SDL_DispatchGPUCompute(blurPass, groupsX, groupsY, 1);
+        SDL_EndGPUComputePass(blurPass);
+        frameStats_.computeDispatchCount++;
+        return true;
+    };
+
+    if (!dispatchBlur(lightingTex.gpuTex, blurTex.gpuTex, 1, 0)) return;
+    if (!dispatchBlur(blurTex.gpuTex, lightingTex.gpuTex, 0, 1)) return;
+    lighting2DFrameIndex_++;
 
     // Composite: draw the compute-produced dynamic-light/shadow overlay over
     // the world. This is not the final lighting model, but it proves the chain:
