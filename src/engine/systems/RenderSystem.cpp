@@ -107,13 +107,15 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
     out.viewportW = viewportW;
     out.viewportH = viewportH;
 
-    // L2 prototype deliberately uploads only the first visible point light.
-    // The shader and acceptance target are scoped to one light + up to 64
-    // segments so we can validate hard-shadow correctness before tiled culling.
+    // L3 uploads every visible point light. Culling by screen tile is now a GPU
+    // responsibility; the CPU side only filters obviously invalid lights and
+    // copies stable ECS data into the backend-facing POD layout.
     auto lightView = ctx.world.view<Transform, Light2D>();
     for (auto [ent, tf, light] : lightView.each()) {
         (void)ent;
         if (!light.visible || light.radius <= 0.f) continue;
+        if (light.type != Light2DType::Point) continue;
+        if ((light.layerMask & renderPassBit(RenderPass::World)) == 0u) continue;
         backend::IRenderDevice::Light2DPoint gpu{};
         gpu.x = tf.x;
         gpu.y = tf.y;
@@ -123,12 +125,12 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
         gpu.colorG = light.color.g / 255.f;
         gpu.colorB = light.color.b / 255.f;
         gpu.colorA = light.color.a / 255.f;
+        gpu.layerMask = light.layerMask;
+        gpu.castsShadow = light.castsShadow ? 1u : 0u;
         out.lights.push_back(gpu);
-        break;
     }
 
     auto pushSegment = [&](float ax, float ay, float bx, float by, float opacity) {
-        if (out.segments.size() >= 64) return;
         backend::IRenderDevice::Light2DSegment seg{};
         seg.ax = ax;
         seg.ay = ay;

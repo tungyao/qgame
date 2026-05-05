@@ -236,14 +236,20 @@ public:
 
     virtual void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) = 0;
 
-    // L2 2D lighting prototype. A compute shader writes a half-resolution
-    // black-alpha shadow overlay texture; the backend then draws that texture
-    // over the world color. This keeps the first hard-shadow milestone small
-    // while preserving the data contract needed by later full composite passes.
+    // L3 2D lighting prototype. The CPU only uploads scene-space light and
+    // occluder data; the SDL_GPU/Vulkan path builds per-screen-tile light lists
+    // and shades the half-resolution dynamic-light + hard-shadow overlay
+    // entirely on the GPU. The public contract is intentionally still small so
+    // later RenderGraph work can replace the alpha-blended overlay composite
+    // without changing ECS collection code.
     struct Light2DPoint {
         float x = 0.f, y = 0.f;
         float radius = 1.f, intensity = 1.f;
         float colorR = 1.f, colorG = 1.f, colorB = 1.f, colorA = 1.f;
+        uint32_t layerMask = 0xFFFFFFFFu;
+        uint32_t castsShadow = 1u;
+        uint32_t pad0 = 0u;
+        uint32_t pad1 = 0u;
     };
 
     struct Light2DSegment {

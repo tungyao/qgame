@@ -56,7 +56,8 @@
 #include "sprite_gpu_frag_spv.h"      // GPU-driven 片段着色器
 #include "particle_gpu_vert_spv.h"    // GPU 粒子顶点着色器: 从 storage buffer 展开 quad
 #include "particle_gpu_frag_spv.h"    // GPU 粒子片段着色器
-#include "lighting2d_spv.h"           // L2 2D lighting compute shader
+#include "lighting2d_spv.h"           // L3 2D lighting compute shader
+#include "lighting2d_cull_spv.h"      // L3 screen-tile light-list builder
 #ifdef QGAME_HAS_DXIL_SHADERS
 #include "sprite_vert_dxil.h"         // DXIL 版本的着色器 (Windows D3D12 后端)
 #include "sprite_frag_dxil.h"
@@ -64,9 +65,26 @@
 #include "particle_gpu_vert_dxil.h"
 #include "particle_gpu_frag_dxil.h"
 #include "lighting2d_dxil.h"
+#include "lighting2d_cull_dxil.h"
 #endif
 
 namespace backend {
+
+namespace {
+
+// L3 tiled lighting uses screen-space tiles, not lighting-texture texels, so a
+// tile stays stable if the lighting overlay changes resolution later. 32 px is
+// deliberately conservative for 2D: it keeps tile counts small while still
+// rejecting most small-radius lights before the expensive segment ray tests.
+constexpr uint32_t kLighting2DTileSize = 32;
+
+// The fixed per-tile list keeps the first L3 implementation simple and avoids
+// global atomics/prefix sums. Overflow is handled by clamping; tiny dynamic
+// lights still behave well, while pathological cases degrade by ignoring the
+// least recently scanned lights in an overcrowded tile.
+constexpr uint32_t kLighting2DMaxLightsPerTile = 64;
+
+} // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 构造 / 析构
@@ -269,6 +287,10 @@ void SDLGPURenderDevice::shutdown() {
         destroyComputePipeline(lighting2DComputePipeline_);
         lighting2DComputePipeline_ = {};
     }
+    if (lighting2DCullPipeline_.valid()) {
+        destroyComputePipeline(lighting2DCullPipeline_);
+        lighting2DCullPipeline_ = {};
+    }
     if (textures_.valid(lighting2DTexture_)) {
         destroyTexture(lighting2DTexture_);
         lighting2DTexture_ = {};
@@ -280,6 +302,14 @@ void SDLGPURenderDevice::shutdown() {
     if (buffers_.valid(lighting2DSegmentBuffer_)) {
         destroyBuffer(lighting2DSegmentBuffer_);
         lighting2DSegmentBuffer_ = {};
+    }
+    if (buffers_.valid(lighting2DTileRangeBuffer_)) {
+        destroyBuffer(lighting2DTileRangeBuffer_);
+        lighting2DTileRangeBuffer_ = {};
+    }
+    if (buffers_.valid(lighting2DTileIndexBuffer_)) {
+        destroyBuffer(lighting2DTileIndexBuffer_);
+        lighting2DTileIndexBuffer_ = {};
     }
 
     // 释放批处理缓冲 (vertex + index + transfer)
@@ -1571,12 +1601,39 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         desc.threadCountX = 8;
         desc.threadCountY = 8;
         desc.threadCountZ = 1;
-        desc.numReadonlyStorageBuffers = 2;
+        // Lighting reads scene lights, occluder segments, tile ranges, and the
+        // per-tile light index list produced by the cull pass directly before
+        // it. SDL_GPU inserts the required pass ordering for this command buffer.
+        desc.numReadonlyStorageBuffers = 4;
         desc.numReadwriteStorageTextures = 1;
         desc.numUniformBuffers = 1;
         lighting2DComputePipeline_ = createComputePipeline(desc);
         if (!lighting2DComputePipeline_.valid()) {
             core::logError("ensureLighting2DResources: failed to create lighting2d compute pipeline");
+            return false;
+        }
+    }
+
+    if (!lighting2DCullPipeline_.valid()) {
+        ComputePipelineDesc desc{};
+        desc.spirvCode = lighting2d_cull_spv;
+        desc.spirvSize = lighting2d_cull_spv_size;
+#ifdef QGAME_HAS_DXIL_SHADERS
+        desc.dxilCode = lighting2d_cull_dxil;
+        desc.dxilSize = lighting2d_cull_dxil_size;
+#endif
+        desc.entryPoint = "main";
+        desc.threadCountX = 64;
+        desc.threadCountY = 1;
+        desc.threadCountZ = 1;
+        // Culling reads only the light array and writes two compact buffers:
+        // a uint2 range per tile and a fixed-size uint index list per tile.
+        desc.numReadonlyStorageBuffers = 1;
+        desc.numReadwriteStorageBuffers = 2;
+        desc.numUniformBuffers = 1;
+        lighting2DCullPipeline_ = createComputePipeline(desc);
+        if (!lighting2DCullPipeline_.valid()) {
+            core::logError("ensureLighting2DResources: failed to create lighting2d cull pipeline");
             return false;
         }
     }
@@ -1619,6 +1676,35 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         lighting2DSegmentBuffer_ = createBuffer(bd);
         lighting2DSegmentCapacity_ = segmentCapacity;
         if (!lighting2DSegmentBuffer_.valid()) return false;
+    }
+
+    const uint32_t tileCols = (viewportW + kLighting2DTileSize - 1u) / kLighting2DTileSize;
+    const uint32_t tileRows = (viewportH + kLighting2DTileSize - 1u) / kLighting2DTileSize;
+    const uint32_t tileCapacity = std::max(1u, tileCols * tileRows);
+    if (!buffers_.valid(lighting2DTileRangeBuffer_) || lighting2DTileCapacity_ < tileCapacity) {
+        if (buffers_.valid(lighting2DTileRangeBuffer_)) {
+            destroyBuffer(lighting2DTileRangeBuffer_);
+        }
+        BufferDesc bd{};
+        bd.size = sizeof(uint32_t) * 2u * tileCapacity;
+        bd.usage = BufferUsage::Storage;
+        lighting2DTileRangeBuffer_ = createBuffer(bd);
+        lighting2DTileCapacity_ = tileCapacity;
+        if (!lighting2DTileRangeBuffer_.valid()) return false;
+    }
+
+    const uint32_t tileIndexCapacity = std::max(1u, tileCapacity * kLighting2DMaxLightsPerTile);
+    if (!buffers_.valid(lighting2DTileIndexBuffer_) ||
+        lighting2DTileIndexCapacity_ < tileIndexCapacity) {
+        if (buffers_.valid(lighting2DTileIndexBuffer_)) {
+            destroyBuffer(lighting2DTileIndexBuffer_);
+        }
+        BufferDesc bd{};
+        bd.size = sizeof(uint32_t) * tileIndexCapacity;
+        bd.usage = BufferUsage::Storage;
+        lighting2DTileIndexBuffer_ = createBuffer(bd);
+        lighting2DTileIndexCapacity_ = tileIndexCapacity;
+        if (!lighting2DTileIndexBuffer_.valid()) return false;
     }
 
     return true;
@@ -2101,10 +2187,11 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     if (cam.viewportH == 0) cam.viewportH = static_cast<int>(params.viewportH ? params.viewportH : swapH_);
     if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
 
-    // L2 acceptance target is one light + up to 64 segments. Keep the upload
-    // bounded now so shader cost and data layout stay obvious while profiling.
-    const uint32_t lightCount = 1u;
-    const uint32_t segmentCount = static_cast<uint32_t>(std::min<size_t>(params.segments.size(), 64));
+    // L3 uploads all lights and all expanded occluder segments. The expensive
+    // per-pixel loop no longer scans every light: a short compute pass first
+    // writes a compact fixed-size light list for each screen-space tile.
+    const uint32_t lightCount = static_cast<uint32_t>(params.lights.size());
+    const uint32_t segmentCount = static_cast<uint32_t>(params.segments.size());
     if (!ensureLighting2DResources(static_cast<uint32_t>(cam.viewportW),
                                    static_cast<uint32_t>(cam.viewportH),
                                    lightCount,
@@ -2112,7 +2199,8 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         return;
     }
 
-    uploadToBuffer(lighting2DLightBuffer_, params.lights.data(), sizeof(Light2DPoint), 0);
+    uploadToBuffer(lighting2DLightBuffer_, params.lights.data(),
+                   sizeof(Light2DPoint) * lightCount, 0);
     if (segmentCount > 0) {
         uploadToBuffer(lighting2DSegmentBuffer_, params.segments.data(),
                        sizeof(Light2DSegment) * segmentCount, 0);
@@ -2122,14 +2210,26 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     }
 
     if (!computePipelines_.valid(lighting2DComputePipeline_)) return;
+    if (!computePipelines_.valid(lighting2DCullPipeline_)) return;
     if (!textures_.valid(lighting2DTexture_)) return;
     if (!buffers_.valid(lighting2DLightBuffer_)) return;
     if (!buffers_.valid(lighting2DSegmentBuffer_)) return;
+    if (!buffers_.valid(lighting2DTileRangeBuffer_)) return;
+    if (!buffers_.valid(lighting2DTileIndexBuffer_)) return;
 
     ComputePipelineEntry& compute = computePipelines_.get(lighting2DComputePipeline_);
+    ComputePipelineEntry& cullCompute = computePipelines_.get(lighting2DCullPipeline_);
     TextureEntry& lightingTex = textures_.get(lighting2DTexture_);
     BufferEntry& lightBuffer = buffers_.get(lighting2DLightBuffer_);
     BufferEntry& segmentBuffer = buffers_.get(lighting2DSegmentBuffer_);
+    BufferEntry& tileRangeBuffer = buffers_.get(lighting2DTileRangeBuffer_);
+    BufferEntry& tileIndexBuffer = buffers_.get(lighting2DTileIndexBuffer_);
+
+    const uint32_t tileCols =
+        (static_cast<uint32_t>(cam.viewportW) + kLighting2DTileSize - 1u) / kLighting2DTileSize;
+    const uint32_t tileRows =
+        (static_cast<uint32_t>(cam.viewportH) + kLighting2DTileSize - 1u) / kLighting2DTileSize;
+    const uint32_t tileCount = std::max(1u, tileCols * tileRows);
 
     struct LightingUniforms {
         float cameraPos[2];
@@ -2137,19 +2237,73 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         float lightingSize[2];
         uint32_t lightCount;
         uint32_t segmentCount;
+        uint32_t tileCols;
+        uint32_t tileRows;
         float zoom;
         float shadowStrength;
-        float pad0[2];
+        uint32_t tileSize;
+        uint32_t maxLightsPerTile;
+        uint32_t pad0[2];
     } uniforms{
         { cam.x, cam.y },
         { static_cast<float>(cam.viewportW), static_cast<float>(cam.viewportH) },
         { static_cast<float>(lighting2DTextureWidth_), static_cast<float>(lighting2DTextureHeight_) },
         lightCount,
         segmentCount,
+        tileCols,
+        tileRows,
         (cam.zoom > 0.f) ? cam.zoom : 1.f,
         0.72f,
-        { 0.f, 0.f }
+        kLighting2DTileSize,
+        kLighting2DMaxLightsPerTile,
+        { 0u, 0u }
     };
+
+    struct LightingCullUniforms {
+        float cameraPos[2];
+        float viewportSize[2];
+        uint32_t lightCount;
+        uint32_t tileCols;
+        uint32_t tileRows;
+        uint32_t tileSize;
+        float zoom;
+        uint32_t maxLightsPerTile;
+        uint32_t pad0[2];
+    } cullUniforms{
+        { cam.x, cam.y },
+        { static_cast<float>(cam.viewportW), static_cast<float>(cam.viewportH) },
+        lightCount,
+        tileCols,
+        tileRows,
+        kLighting2DTileSize,
+        (cam.zoom > 0.f) ? cam.zoom : 1.f,
+        kLighting2DMaxLightsPerTile,
+        { 0u, 0u }
+    };
+
+    SDL_GPUStorageBufferReadWriteBinding cullRwBuffers[2]{};
+    cullRwBuffers[0].buffer = tileRangeBuffer.gpuBuffer;
+    cullRwBuffers[0].cycle = false;
+    cullRwBuffers[1].buffer = tileIndexBuffer.gpuBuffer;
+    cullRwBuffers[1].cycle = false;
+
+    SDL_GPUComputePass* cullPass = SDL_BeginGPUComputePass(gpuCmdBuf_, nullptr, 0,
+                                                           cullRwBuffers, 2);
+    if (!cullPass) {
+        core::logError("submitLighting2DPass: SDL_BeginGPUComputePass(cull) failed: %s", SDL_GetError());
+        return;
+    }
+
+    // One shader invocation owns one tile, so the list for that tile is written
+    // sequentially without atomics. This is intentionally easier to debug than
+    // a global append buffer and is enough for the 32-light L3 acceptance scene.
+    SDL_BindGPUComputePipeline(cullPass, cullCompute.pipeline);
+    SDL_GPUBuffer* cullReadonlyBuffers[1] = { lightBuffer.gpuBuffer };
+    SDL_BindGPUComputeStorageBuffers(cullPass, 0, cullReadonlyBuffers, 1);
+    SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &cullUniforms, sizeof(cullUniforms));
+    SDL_DispatchGPUCompute(cullPass, (tileCount + 63u) / 64u, 1, 1);
+    SDL_EndGPUComputePass(cullPass);
+    frameStats_.computeDispatchCount++;
 
     SDL_GPUStorageTextureReadWriteBinding rwTexture{};
     rwTexture.texture = lightingTex.gpuTex;
@@ -2164,8 +2318,13 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     }
 
     SDL_BindGPUComputePipeline(computePass, compute.pipeline);
-    SDL_GPUBuffer* readonlyBuffers[2] = { lightBuffer.gpuBuffer, segmentBuffer.gpuBuffer };
-    SDL_BindGPUComputeStorageBuffers(computePass, 0, readonlyBuffers, 2);
+    SDL_GPUBuffer* readonlyBuffers[4] = {
+        lightBuffer.gpuBuffer,
+        segmentBuffer.gpuBuffer,
+        tileRangeBuffer.gpuBuffer,
+        tileIndexBuffer.gpuBuffer
+    };
+    SDL_BindGPUComputeStorageBuffers(computePass, 0, readonlyBuffers, 4);
     SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &uniforms, sizeof(uniforms));
 
     const uint32_t groupsX = static_cast<uint32_t>((lighting2DTextureWidth_ + 7) / 8);
@@ -2174,8 +2333,8 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     SDL_EndGPUComputePass(computePass);
     frameStats_.computeDispatchCount++;
 
-    // Composite: draw the compute-produced black-alpha overlay over the world.
-    // This is not the final lighting model, but it proves the resource chain:
+    // Composite: draw the compute-produced dynamic-light/shadow overlay over
+    // the world. This is not the final lighting model, but it proves the chain:
     // ECS data -> storage buffers -> compute storage texture -> sampled overlay.
     DrawSpriteCmd overlay{};
     overlay.texture = lighting2DTexture_;

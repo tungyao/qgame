@@ -82,6 +82,7 @@ public:
 
     void submitGPUDrivenPass(const PassSubmitInfo&, const GPURenderParams&) override {}
     void submitGPUParticlePass(const PassSubmitInfo&, const GPUParticleParams&) override {}
+    void submitLighting2DPass(const PassSubmitInfo&, const Lighting2DParams&) override {}
 
 private:
     struct TextureInfo {
