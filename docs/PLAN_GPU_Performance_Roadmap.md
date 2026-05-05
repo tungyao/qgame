@@ -188,15 +188,17 @@ compute pass 生成 draw 参数：
 
 ## 阶段 7：Compute Lighting / 2D Ray Shadow
 
-在硬件光追之前，先做 SDL GPU 能承载的 compute lighting：
+详细设计见：`docs/PLAN_Vulkan_2D_Lighting.md`。
+
+在硬件光追之前，先做 Vulkan-first 的 2D compute lighting。SDL GPU 仍可作为短中期承载层，但实现与 shader 设计以 SPIR-V/Vulkan compute 为第一验证目标：
 
 - light buffer；
-- occluder buffer / tile collision mask / SDF texture；
+- occluder segment buffer / tile collision mask；
 - compute pass 生成 lighting texture；
-- sprite composite pass 采样 lighting texture；
-- 扩展 2D ray marching shadow 和软阴影。
+- world composite pass 采样 lighting texture；
+- 扩展 2D ray casting shadow、软阴影、夜晚环境和显式 Reflector2D 反射。
 
-这条路径与 SDL GPU 的 compute 能力匹配，也能为未来原生硬件光追后端积累资源图和光照数据结构。
+这条路径与现有 compute/storage buffer 抽象匹配，也能为未来原生 Vulkan ray query / hardware RT 后端积累资源图和光照数据结构。注意：当前 `supportsStorageTexture` 仍为 false，阶段 7 的第一项工作是验证并补齐 lighting texture / render target sample / pass barrier 能力。
 
 ---
 
@@ -222,6 +224,5 @@ compute pass 生成 draw 参数：
 6. GPU bucketing / sorting。
 7. 纹理绑定优化。
 8. GPU tilemap。
-9. Compute lighting / 2D ray shadow。
+9. Vulkan-first compute lighting / 2D ray shadow / reflection。
 10. 评估原生 Vulkan/D3D12 光追后端。
-

@@ -3,6 +3,7 @@
 > 目标：从当前的"CPU 录制 + Pass 分桶"演进到"GPU-Driven + Compute-First"，为 2D 光追与 GPU 计算（物理/粒子/AI）打底。
 > 原则：**数据导向、CPU/GPU 对称、Pass 即节点、保留软件 fallback**。
 > GPU 性能专项计划见：`docs/PLAN_GPU_Performance_Roadmap.md`。该计划明确 OpenGL/CPU-batch 仅作为 fallback 与正确性测试，不作为性能优化目标。
+> 2D 光照、遮挡、反射和夜晚环境专项计划见：`docs/PLAN_Vulkan_2D_Lighting.md`。
 
 ---
 
@@ -129,13 +130,14 @@
 **交付物**：RenderGraph 框架；至少 3 个示例节点（cull / light / composite）跑通完整一帧。
 
 ### L2. 2D 光追 Pass
-基于 L1 的 SDF 与 RenderGraph 实现 2D 光线追踪：
-- **基础版**：SDF ray marching，在 compute shader 里发射射线、采样光源、累积辐射；
-- **进阶版**：实现 Radiance Cascades（2024 Pavel Panchekha），分级 probe + 二次反弹；
-- **硬件加速 fallback**：检测 RTX/RDNA 光追支持，对显式几何使用 `VK_KHR_ray_tracing` / `DXR`，否则走 SDF 软件实现。
-- 光照结果作为输入贴回主 composite 节点。
+基于 L1 的 RenderGraph 与显式 2D 几何实现光照：
+- **基础版**：Vulkan compute 2D ray casting，对 `LightOccluder2D` segment 做可见性查询，输出 lighting texture；
+- **进阶版**：tiled light culling、area light sampling、temporal accumulation 和 blur，实现软阴影；
+- **反射版**：对显式 `Reflector2D` 区域做 screen-space reflection / 一次几何反射；
+- **硬件加速评估**：原生 Vulkan 后端成熟后，再评估 `VK_KHR_ray_query` / `VK_KHR_ray_tracing_pipeline`。SDL GPU 与 OpenGL 不承诺硬件 RT。
+- 光照结果作为输入贴回主 composite 节点，Text/UI 默认在 world lighting 后叠加。
 
-**交付物**：动态光源在 sprite 间产生正确遮挡 + 软阴影；性能预算 <3ms / 1080p / RTX 3060 级。
+**交付物**：动态光源在 sprite/tile/occluder 间产生正确遮挡 + 软阴影；夜晚湿地/水面有可控反射；性能预算 <3ms / 1080p / RTX 3060 级。
 
 ### L3. Bindless + Mesh Shader（视后端能力）
 - 等 SDL_GPU 支持 descriptor indexing / mesh shader 后启用：
