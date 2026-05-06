@@ -146,6 +146,11 @@ private:
 
     // 1×1 R8 dummy region 纹理（uHasRegion=0 时绑定，避免 sampler 未绑定 UB）
     TextureHandle dummyRegionTex_{};
+
+    // 1×1 white RGBA texture used by the OpenGL lighting fallback. The Vulkan
+    // path writes a compute overlay texture; old OpenGL machines do not have
+    // that path, so reflector highlights are drawn as ordinary tinted quads.
+    TextureHandle lightingFallbackWhiteTex_{};
     
     // MSDF font shader
     unsigned int msdfShaderProgram_ = 0;

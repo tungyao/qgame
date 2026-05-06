@@ -97,7 +97,8 @@ private:
     void createPipeline();
     bool probeStorageTextureSupport();
     bool ensureLighting2DResources(uint32_t viewportW, uint32_t viewportH,
-                                   uint32_t lightCount, uint32_t segmentCount);
+                                   uint32_t lightCount, uint32_t segmentCount,
+                                   uint32_t reflectorCount);
     TextureHandle createStorageTexture(int width, int height);
     SDL_GPUGraphicsPipeline* createPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);
@@ -148,12 +149,14 @@ private:
     TextureHandle            lighting2DBlurTexture_{};
     BufferHandle             lighting2DLightBuffer_{};
     BufferHandle             lighting2DSegmentBuffer_{};
+    BufferHandle             lighting2DReflectorBuffer_{};
     BufferHandle             lighting2DTileRangeBuffer_{};
     BufferHandle             lighting2DTileIndexBuffer_{};
     int                      lighting2DTextureWidth_ = 0;
     int                      lighting2DTextureHeight_ = 0;
     uint32_t                 lighting2DLightCapacity_ = 0;
     uint32_t                 lighting2DSegmentCapacity_ = 0;
+    uint32_t                 lighting2DReflectorCapacity_ = 0;
     uint32_t                 lighting2DTileCapacity_ = 0;
     uint32_t                 lighting2DTileIndexCapacity_ = 0;
     uint32_t                 lighting2DFrameIndex_ = 0;

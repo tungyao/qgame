@@ -262,7 +262,11 @@ void GLRenderDevice::init() {
     capabilities_.supportsTimestampQuery = false;
     capabilities_.supportsWorldOffscreenColor = true;
     capabilities_.supportsSampledRenderTarget = true;
-    capabilities_.supportsLighting2D = false;
+    // OpenGL does not support the compute lighting path, but it now provides a
+    // visible L5 reflection fallback in submitLighting2DPass(). Keep compute
+    // capabilities false; this flag only tells demos/tools that the high-level
+    // 2D lighting hook produces an effect on this backend.
+    capabilities_.supportsLighting2D = true;
     capabilities_.backendName = "OpenGL";
 
     // 1×1 R8 dummy region 纹理（id=0），无 region 时绑定它
@@ -276,6 +280,20 @@ void GLRenderDevice::init() {
         dd.format = TextureFormat::R8;
         dd.filter = TextureFilter::Nearest;
         dummyRegionTex_ = createTexture(dd);
+    }
+    {
+        // OpenGL fallback reflections are ordinary alpha-blended quads. Keeping
+        // a dedicated white texture avoids depending on demo assets and lets the
+        // lighting fallback run in any scene that has Light2D/Reflector2D data.
+        TextureDesc dd{};
+        const uint8_t white[4] = {255, 255, 255, 255};
+        dd.data = white;
+        dd.width = 1;
+        dd.height = 1;
+        dd.channels = 4;
+        dd.format = TextureFormat::RGBA8;
+        dd.filter = TextureFilter::Linear;
+        lightingFallbackWhiteTex_ = createTexture(dd);
     }
 
     core::logInfo("GLRenderDevice initialized");
@@ -298,6 +316,10 @@ void GLRenderDevice::shutdown() {
     if (offscreenFbo_.fbo) destroyFbo(offscreenFbo_, offscreenTarget_);
 
     if (dummyRegionTex_.valid()) { destroyTexture(dummyRegionTex_); dummyRegionTex_ = {}; }
+    if (lightingFallbackWhiteTex_.valid()) {
+        destroyTexture(lightingFallbackWhiteTex_);
+        lightingFallbackWhiteTex_ = {};
+    }
 
     if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
     if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
@@ -1060,10 +1082,347 @@ void GLRenderDevice::submitGPUParticlePass(const PassSubmitInfo&,
     // GPU particle pass intentionally stays unsupported on the OpenGL fallback.
 }
 
-void GLRenderDevice::submitLighting2DPass(const PassSubmitInfo&,
-                                          const Lighting2DParams&) {
-    // L2 lighting is a Vulkan/SDL_GPU compute prototype. OpenGL remains a
-    // simple correctness fallback and deliberately ignores this pass.
+void GLRenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
+                                          const Lighting2DParams& params) {
+    if (!lightingFallbackWhiteTex_.valid()) return;
+    if (!params.enabled || params.lights.empty()) return;
+
+    // OpenGL fallback for L5 reflections.
+    //
+    // The SDL_GPU/Vulkan path produces lighting/reflection in a compute-written
+    // overlay texture. Old OpenGL 3.3 machines do not have the storage texture
+    // path, but they can still show the authored Reflector2D intent by drawing
+    // a few translucent quads after the World pass and before the UI camera.
+    //
+    // This is intentionally not a full compute-equivalent lighting implementation:
+    // - Light2D decides the reflected color and brightness.
+    // - LightOccluder2D has already been expanded by RenderSystem into world
+    //   segments; each segment extrudes a translucent shadow quad away from the
+    //   light. This is a geometric fallback, not per-pixel ray casting, but it
+    //   makes blockers visibly cast shadows on old OpenGL-only machines.
+    // - Reflector2D AABB produces vertical wet-road/water streaks.
+    // - Reflector2D Segment produces a thin shimmering water-edge highlight.
+    // - Environment2D::wetness is the scene-wide weather multiplier.
+    //
+    // Because RenderSystem invokes this pass only for World cameras, and UI/Text
+    // are drawn by the later UI camera/pass, the fallback keeps the L5 contract:
+    // reflections do not affect UI/Text readability.
+    CameraData cam = params.camera;
+    if (cam.viewportW == 0) cam.viewportW = info.camera.viewportW;
+    if (cam.viewportH == 0) cam.viewportH = info.camera.viewportH;
+    if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
+
+    auto clamp01 = [](float v) {
+        return std::max(0.f, std::min(1.f, v));
+    };
+    auto toByte = [&](float v) -> uint8_t {
+        return static_cast<uint8_t>(std::max(0.f, std::min(255.f, v * 255.f + 0.5f)));
+    };
+    auto luma = [](const Light2DPoint& l) {
+        return l.colorR * 0.2126f + l.colorG * 0.7152f + l.colorB * 0.0722f;
+    };
+
+    static std::vector<RenderCmd> overlayCmds;
+    static std::vector<const RenderCmd*> overlayPtrs;
+    overlayCmds.clear();
+    overlayPtrs.clear();
+
+    batchVerts_.clear();
+    batchIdx_.clear();
+    auto pushShadowVolume = [&](float ax, float ay,
+                                float bx, float by,
+                                float farBx, float farBy,
+                                float farAx, float farAy,
+                                uint8_t alpha) {
+        // Shadows need real quadrilateral geometry. Using DrawSpriteCmd would
+        // collapse this into a rectangular sprite and produce the blocky tiles
+        // the user reported. Here we write the four vertices directly into the
+        // GL streaming buffers; the existing sprite shader can still draw them
+        // because it only needs position, UV, and vertex color.
+        const uint16_t base = static_cast<uint16_t>(batchVerts_.size());
+        batchVerts_.push_back({ ax,    ay,    0.f, 0.f, 4, 7, 13, alpha });
+        batchVerts_.push_back({ bx,    by,    1.f, 0.f, 4, 7, 13, alpha });
+        batchVerts_.push_back({ farBx, farBy, 1.f, 1.f, 4, 7, 13, 0 });
+        batchVerts_.push_back({ farAx, farAy, 0.f, 1.f, 4, 7, 13, 0 });
+        batchIdx_.insert(batchIdx_.end(), {
+            base,
+            static_cast<uint16_t>(base + 1),
+            static_cast<uint16_t>(base + 2),
+            base,
+            static_cast<uint16_t>(base + 2),
+            static_cast<uint16_t>(base + 3)
+        });
+    };
+
+    auto drawShadowBatch = [&]() {
+        if (batchVerts_.empty()) return;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, cam.viewportW, cam.viewportH);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(batchVerts_.size() * sizeof(SpriteVertex)),
+                     batchVerts_.data(), GL_STREAM_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(batchIdx_.size() * sizeof(uint16_t)),
+                     batchIdx_.data(), GL_STREAM_DRAW);
+        frameStats_.uploadBytes +=
+            static_cast<uint64_t>(batchVerts_.size() * sizeof(SpriteVertex)) +
+            static_cast<uint64_t>(batchIdx_.size() * sizeof(uint16_t));
+        frameStats_.uploadCallCount++;
+
+        float proj[16];
+        float view[16];
+        float mvp[16];
+        const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+        buildOrthoProjectionMatrix(static_cast<float>(cam.viewportW),
+                                   static_cast<float>(cam.viewportH), proj);
+        buildViewMatrix(cam.x, cam.y, zoom, cam.rotation, view);
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                mvp[i * 4 + j] = 0.f;
+                for (int k = 0; k < 4; ++k) {
+                    mvp[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
+                }
+            }
+        }
+
+        glUseProgram(shaderProgram_);
+        glUniformMatrix4fv(uProjLoc_, 1, GL_FALSE, mvp);
+        glUniform1i(uTexLoc_, 0);
+        if (uHasRegionLoc_ >= 0) glUniform1i(uHasRegionLoc_, 0);
+        if (uRegionTexLoc_ >= 0) glUniform1i(uRegionTexLoc_, 1);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, textures_.get(lightingFallbackWhiteTex_).glTex);
+        frameStats_.textureBindCount++;
+
+        glDrawElementsBaseVertex(GL_TRIANGLES,
+                                 static_cast<GLsizei>(batchIdx_.size()),
+                                 GL_UNSIGNED_SHORT,
+                                 reinterpret_cast<const void*>(0),
+                                 0);
+        frameStats_.drawCallCount++;
+        glBindVertexArray(0);
+        glUseProgram(0);
+        batchVerts_.clear();
+        batchIdx_.clear();
+    };
+
+    // Shadow fallback. We generate it before reflections so wet/water highlights
+    // can still appear over darkened ground, matching the SDL_GPU overlay order.
+    for (const Light2DPoint& light : params.lights) {
+        if (light.radius <= 0.f || light.intensity <= 0.f || light.castsShadow == 0u) continue;
+        if ((light.layerMask & engine::renderPassBit(engine::RenderPass::World)) == 0u) continue;
+
+        for (const Light2DSegment& seg : params.segments) {
+            const float sx = seg.bx - seg.ax;
+            const float sy = seg.by - seg.ay;
+            const float segLenSq = sx * sx + sy * sy;
+            if (segLenSq < 1.f || seg.opacity <= 0.f) continue;
+
+            const float midX = (seg.ax + seg.bx) * 0.5f;
+            const float midY = (seg.ay + seg.by) * 0.5f;
+            const float toMidX = midX - light.x;
+            const float toMidY = midY - light.y;
+            const float midDist = std::sqrt(toMidX * toMidX + toMidY * toMidY);
+            if (midDist >= light.radius) continue;
+
+            // RenderSystem expands AABB occluders in a stable clockwise order.
+            // The outward normal below points away from the blocker. Casting
+            // only the edge whose outward normal is away from the light avoids
+            // the previous "all four sides cast a block" artifact and keeps the
+            // shadow from starting on the front face of the object.
+            float nx = sy;
+            float ny = -sx;
+            const float nLen = std::max(0.0001f, std::sqrt(nx * nx + ny * ny));
+            nx /= nLen;
+            ny /= nLen;
+            const float lightSide = (light.x - midX) * nx + (light.y - midY) * ny;
+            if (lightSide >= 0.f) continue;
+
+            const float remaining = std::max(0.f, light.radius - midDist);
+            const float shadowLen = remaining * (0.75f + 0.25f * clamp01(light.intensity));
+            if (shadowLen <= 1.f) continue;
+
+            // Extrude both endpoints away from the light. This approximates the
+            // same geometric idea as ray-cast shadow volumes, but stays within
+            // a single alpha quad per segment so old GL hardware can handle it.
+            auto extrudePoint = [&](float x, float y, float& ox, float& oy) {
+                float vx = x - light.x;
+                float vy = y - light.y;
+                const float vl = std::max(0.0001f, std::sqrt(vx * vx + vy * vy));
+                vx /= vl;
+                vy /= vl;
+                ox = x + vx * shadowLen;
+                oy = y + vy * shadowLen;
+            };
+
+            // Start a little behind the casting edge. Since this fallback is
+            // composited after world geometry, this offset prevents the shadow
+            // from visibly painting over the occluder itself.
+            const float startOffset = std::min(42.f, std::max(10.f, shadowLen * 0.18f));
+            float sax = 0.f, say = 0.f, sbx = 0.f, sby = 0.f;
+            float ex0 = 0.f, ey0 = 0.f, ex1 = 0.f, ey1 = 0.f;
+            auto offsetPoint = [&](float x, float y, float dist, float& ox, float& oy) {
+                float vx = x - light.x;
+                float vy = y - light.y;
+                const float vl = std::max(0.0001f, std::sqrt(vx * vx + vy * vy));
+                vx /= vl;
+                vy /= vl;
+                ox = x + vx * dist;
+                oy = y + vy * dist;
+            };
+            offsetPoint(seg.ax, seg.ay, startOffset, sax, say);
+            offsetPoint(seg.bx, seg.by, startOffset, sbx, sby);
+            extrudePoint(seg.ax, seg.ay, ex0, ey0);
+            extrudePoint(seg.bx, seg.by, ex1, ey1);
+
+            const float attenuation = 1.f - clamp01(midDist / light.radius);
+            const float alpha = clamp01(seg.opacity) * attenuation *
+                                (0.18f + 0.12f * clamp01(light.intensity));
+            if (alpha <= 0.01f) continue;
+
+            // Draw a dark blue-black shadow, not pure black. This preserves the
+            // night-scene ambient floor and avoids making old-GL fallback harsher
+            // than the compute path.
+            pushShadowVolume(sax, say, sbx, sby, ex1, ey1, ex0, ey0, toByte(alpha));
+        }
+    }
+
+    drawShadowBatch();
+
+    const float sceneWetness = clamp01(params.wetness);
+    if (sceneWetness > 0.f) {
+        for (const Reflector2DRegion& refl : params.reflectors) {
+            if (!refl.visible || refl.reflectivity <= 0.f) continue;
+
+            for (const Light2DPoint& light : params.lights) {
+                if (light.radius <= 0.f || light.intensity <= 0.f) continue;
+                if ((light.layerMask & engine::renderPassBit(engine::RenderPass::World)) == 0u) continue;
+
+                const float sourceBrightness = luma(light) * light.intensity;
+                const float brightGate = clamp01((sourceBrightness - 0.12f) / 0.70f);
+                if (brightGate <= 0.f) continue;
+
+                const float roughness = clamp01(refl.roughness);
+                const float baseStrength =
+                    clamp01(refl.reflectivity) * sceneWetness * brightGate *
+                    std::max(0.f, light.intensity);
+                if (baseStrength <= 0.f) continue;
+
+                const float tintR = light.colorR * refl.tintR * refl.tintA;
+                const float tintG = light.colorG * refl.tintG * refl.tintA;
+                const float tintB = light.colorB * refl.tintB * refl.tintA;
+
+                if (refl.shape == 1u) {
+                    // AABB wet patch. The reflector's a point is its center,
+                    // which matches RenderSystem's upload for
+                    // Reflector2D::Shape::AABB. We draw several nested vertical
+                    // streaks so roughness reads as blur/spread even on
+                    // fixed-function OpenGL blending.
+                    const float halfW = std::max(1.f, refl.width * 0.5f);
+                    const float halfH = std::max(1.f, refl.height * 0.5f);
+                    const float minX = refl.ax - halfW;
+                    const float maxX = refl.ax + halfW;
+                    const float topY = refl.ay - halfH;
+                    if (light.x < minX - light.radius * 0.25f ||
+                        light.x > maxX + light.radius * 0.25f) {
+                        continue;
+                    }
+
+                    const float lightAbove =
+                        clamp01((topY - light.y + light.radius * 0.18f) /
+                                std::max(light.radius, 1.f));
+                    if (lightAbove <= 0.f) continue;
+
+                    const int taps = 5;
+                    for (int i = 0; i < taps; ++i) {
+                        const float t = static_cast<float>(i) / static_cast<float>(taps - 1);
+                        const float spread = 1.f + t * (1.2f + roughness * 2.4f);
+                        const float width = (18.f + light.radius * (0.08f + roughness * 0.28f)) * spread;
+                        const float height = refl.height * (1.08f - t * 0.11f);
+                        const float y = topY + height * 0.48f + t * refl.height * 0.05f;
+                        const float x = std::max(minX, std::min(maxX, light.x));
+                        const float fade = std::exp(-t * (1.15f + roughness));
+                        const float alpha = baseStrength * lightAbove * fade *
+                                            (0.34f - roughness * 0.10f);
+                        if (alpha <= 0.01f) continue;
+
+                        DrawSpriteCmd cmd{};
+                        cmd.texture = lightingFallbackWhiteTex_;
+                        cmd.x = x;
+                        cmd.y = y;
+                        cmd.scaleX = width;
+                        cmd.scaleY = height;
+                        cmd.pivotX = 0.5f;
+                        cmd.pivotY = 0.5f;
+                        cmd.srcRect = core::Rect{0.f, 0.f, 1.f, 1.f};
+                        cmd.layer = 10000 + i;
+                        cmd.pass = engine::RenderPass::World;
+                        cmd.tint = core::Color{
+                            toByte(tintR),
+                            toByte(tintG),
+                            toByte(tintB),
+                            toByte(clamp01(alpha))
+                        };
+                        overlayCmds.push_back(cmd);
+                    }
+                } else {
+                    // Segment reflector. Draw a rotated translucent strip
+                    // centered on the segment, strongest near the light's
+                    // projection onto the segment.
+                    const float ax = refl.ax;
+                    const float ay = refl.ay;
+                    const float bx = refl.bx;
+                    const float by = refl.by;
+                    const float dx = bx - ax;
+                    const float dy = by - ay;
+                    const float lenSq = std::max(dx * dx + dy * dy, 1.f);
+                    const float len = std::sqrt(lenSq);
+                    const float t = clamp01(((light.x - ax) * dx + (light.y - ay) * dy) / lenSq);
+                    const float px = ax + dx * t;
+                    const float py = ay + dy * t;
+                    const float alongWidth = std::min(len, 36.f + light.radius * (0.18f + roughness * 0.5f));
+                    const float thickness = 5.f + roughness * 36.f;
+                    const float sideDist = std::abs((light.x - px) * (-dy / len) + (light.y - py) * (dx / len));
+                    const float sideWeight = clamp01(sideDist / std::max(light.radius * 0.35f, 1.f));
+                    const float alpha = baseStrength * sideWeight * (0.28f - roughness * 0.08f);
+                    if (alpha <= 0.01f) continue;
+
+                    DrawSpriteCmd cmd{};
+                    cmd.texture = lightingFallbackWhiteTex_;
+                    cmd.x = px;
+                    cmd.y = py;
+                    cmd.rotation = std::atan2(dy, dx);
+                    cmd.scaleX = alongWidth;
+                    cmd.scaleY = thickness;
+                    cmd.pivotX = 0.5f;
+                    cmd.pivotY = 0.5f;
+                    cmd.srcRect = core::Rect{0.f, 0.f, 1.f, 1.f};
+                    cmd.layer = 10050;
+                    cmd.pass = engine::RenderPass::World;
+                    cmd.tint = core::Color{
+                        toByte(tintR),
+                        toByte(tintG),
+                        toByte(tintB),
+                        toByte(clamp01(alpha))
+                    };
+                    overlayCmds.push_back(cmd);
+                }
+            }
+        }
+    }
+
+    if (overlayCmds.empty()) return;
+    overlayPtrs.reserve(overlayCmds.size());
+    for (const RenderCmd& cmd : overlayCmds) {
+        overlayPtrs.push_back(&cmd);
+    }
+
+    renderCmdsToTarget(overlayPtrs, cam, false, core::Color::Black, 0,
+                       cam.viewportW, cam.viewportH);
 }
 
 } // namespace backend

@@ -313,6 +313,10 @@ void SDLGPURenderDevice::shutdown() {
         destroyBuffer(lighting2DSegmentBuffer_);
         lighting2DSegmentBuffer_ = {};
     }
+    if (buffers_.valid(lighting2DReflectorBuffer_)) {
+        destroyBuffer(lighting2DReflectorBuffer_);
+        lighting2DReflectorBuffer_ = {};
+    }
     if (buffers_.valid(lighting2DTileRangeBuffer_)) {
         destroyBuffer(lighting2DTileRangeBuffer_);
         lighting2DTileRangeBuffer_ = {};
@@ -1596,7 +1600,8 @@ bool SDLGPURenderDevice::probeStorageTextureSupport() {
 }
 
 bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t viewportH,
-                                                   uint32_t lightCount, uint32_t segmentCount) {
+                                                   uint32_t lightCount, uint32_t segmentCount,
+                                                   uint32_t reflectorCount) {
     if (!capabilities_.supportsStorageTexture || viewportW == 0 || viewportH == 0) {
         return false;
     }
@@ -1613,10 +1618,11 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         desc.threadCountX = 8;
         desc.threadCountY = 8;
         desc.threadCountZ = 1;
-        // Lighting reads scene lights, occluder segments, tile ranges, and the
-        // per-tile light index list produced by the cull pass directly before
-        // it. SDL_GPU inserts the required pass ordering for this command buffer.
-        desc.numReadonlyStorageBuffers = 4;
+        // Lighting reads scene lights, occluder segments, reflector regions,
+        // tile ranges, and the per-tile light index list produced by the cull
+        // pass directly before it. SDL_GPU inserts the required pass ordering
+        // for this command buffer.
+        desc.numReadonlyStorageBuffers = 5;
         desc.numReadwriteStorageTextures = 1;
         desc.numUniformBuffers = 1;
         lighting2DComputePipeline_ = createComputePipeline(desc);
@@ -1722,6 +1728,20 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         lighting2DSegmentBuffer_ = createBuffer(bd);
         lighting2DSegmentCapacity_ = segmentCapacity;
         if (!lighting2DSegmentBuffer_.valid()) return false;
+    }
+
+    const uint32_t reflectorCapacity = std::max(1u, reflectorCount);
+    if (!buffers_.valid(lighting2DReflectorBuffer_) ||
+        lighting2DReflectorCapacity_ < reflectorCapacity) {
+        if (buffers_.valid(lighting2DReflectorBuffer_)) {
+            destroyBuffer(lighting2DReflectorBuffer_);
+        }
+        BufferDesc bd{};
+        bd.size = sizeof(IRenderDevice::Reflector2DRegion) * reflectorCapacity;
+        bd.usage = BufferUsage::Storage;
+        lighting2DReflectorBuffer_ = createBuffer(bd);
+        lighting2DReflectorCapacity_ = reflectorCapacity;
+        if (!lighting2DReflectorBuffer_.valid()) return false;
     }
 
     const uint32_t tileCols = (viewportW + kLighting2DTileSize - 1u) / kLighting2DTileSize;
@@ -2238,10 +2258,12 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     // writes a compact fixed-size light list for each screen-space tile.
     const uint32_t lightCount = static_cast<uint32_t>(params.lights.size());
     const uint32_t segmentCount = static_cast<uint32_t>(params.segments.size());
+    const uint32_t reflectorCount = static_cast<uint32_t>(params.reflectors.size());
     if (!ensureLighting2DResources(static_cast<uint32_t>(cam.viewportW),
                                    static_cast<uint32_t>(cam.viewportH),
                                    lightCount,
-                                   std::max(1u, segmentCount))) {
+                                   std::max(1u, segmentCount),
+                                   std::max(1u, reflectorCount))) {
         return;
     }
 
@@ -2254,6 +2276,13 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         Light2DSegment dummy{};
         uploadToBuffer(lighting2DSegmentBuffer_, &dummy, sizeof(dummy), 0);
     }
+    if (reflectorCount > 0) {
+        uploadToBuffer(lighting2DReflectorBuffer_, params.reflectors.data(),
+                       sizeof(IRenderDevice::Reflector2DRegion) * reflectorCount, 0);
+    } else {
+        IRenderDevice::Reflector2DRegion dummy{};
+        uploadToBuffer(lighting2DReflectorBuffer_, &dummy, sizeof(dummy), 0);
+    }
 
     if (!computePipelines_.valid(lighting2DComputePipeline_)) return;
     if (!computePipelines_.valid(lighting2DCullPipeline_)) return;
@@ -2262,6 +2291,7 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     if (!textures_.valid(lighting2DBlurTexture_)) return;
     if (!buffers_.valid(lighting2DLightBuffer_)) return;
     if (!buffers_.valid(lighting2DSegmentBuffer_)) return;
+    if (!buffers_.valid(lighting2DReflectorBuffer_)) return;
     if (!buffers_.valid(lighting2DTileRangeBuffer_)) return;
     if (!buffers_.valid(lighting2DTileIndexBuffer_)) return;
 
@@ -2272,6 +2302,7 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     TextureEntry& blurTex = textures_.get(lighting2DBlurTexture_);
     BufferEntry& lightBuffer = buffers_.get(lighting2DLightBuffer_);
     BufferEntry& segmentBuffer = buffers_.get(lighting2DSegmentBuffer_);
+    BufferEntry& reflectorBuffer = buffers_.get(lighting2DReflectorBuffer_);
     BufferEntry& tileRangeBuffer = buffers_.get(lighting2DTileRangeBuffer_);
     BufferEntry& tileIndexBuffer = buffers_.get(lighting2DTileIndexBuffer_);
 
@@ -2287,36 +2318,44 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         float lightingSize[2];
         uint32_t lightCount;
         uint32_t segmentCount;
+        uint32_t reflectorCount;
+        uint32_t padCounts;
         uint32_t tileCols;
         uint32_t tileRows;
         uint32_t tileSize;
         uint32_t maxLightsPerTile;
+        uint32_t padTile[2];
         float ambientColor[4];
         float zoom;
         float shadowStrength;
         float ambientIntensity;
         float exposure;
+        float wetness;
         uint32_t frameIndex;
         float time;
-        float pad0[2];
+        float pad0;
     } uniforms{
         { cam.x, cam.y },
         { static_cast<float>(cam.viewportW), static_cast<float>(cam.viewportH) },
         { static_cast<float>(lighting2DTextureWidth_), static_cast<float>(lighting2DTextureHeight_) },
         lightCount,
         segmentCount,
+        reflectorCount,
+        0u,
         tileCols,
         tileRows,
         kLighting2DTileSize,
         kLighting2DMaxLightsPerTile,
+        { 0u, 0u },
         { params.ambientR, params.ambientG, params.ambientB, params.ambientA },
         (cam.zoom > 0.f) ? cam.zoom : 1.f,
         0.72f,
         params.ambientIntensity,
         params.exposure,
+        params.wetness,
         lighting2DFrameIndex_,
         params.time > 0.f ? params.time : static_cast<float>(SDL_GetTicks()) / 1000.f,
-        { 0.f, 0.f }
+        0.f
     };
 
     struct LightingCullUniforms {
@@ -2378,13 +2417,14 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     }
 
     SDL_BindGPUComputePipeline(computePass, compute.pipeline);
-    SDL_GPUBuffer* readonlyBuffers[4] = {
+    SDL_GPUBuffer* readonlyBuffers[5] = {
         lightBuffer.gpuBuffer,
         segmentBuffer.gpuBuffer,
+        reflectorBuffer.gpuBuffer,
         tileRangeBuffer.gpuBuffer,
         tileIndexBuffer.gpuBuffer
     };
-    SDL_BindGPUComputeStorageBuffers(computePass, 0, readonlyBuffers, 4);
+    SDL_BindGPUComputeStorageBuffers(computePass, 0, readonlyBuffers, 5);
     SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &uniforms, sizeof(uniforms));
 
     const uint32_t groupsX = static_cast<uint32_t>((lighting2DTextureWidth_ + 7) / 8);

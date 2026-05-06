@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
     const bool autoExit = hasArg(argc, argv, "--auto-exit");
 
     engine::EngineConfig cfg;
-    cfg.windowTitle = "QGame Demo3 - Vulkan 2D Lighting L4";
+    cfg.windowTitle = "QGame Demo3 - Vulkan 2D Lighting L5";
     cfg.windowWidth = 1280;
     cfg.windowHeight = 720;
     cfg.vsync = true;
@@ -332,14 +332,14 @@ int main(int argc, char** argv) {
     edge.tint = core::Color{130, 200, 255, 255};
     api.addComponent(waterEdge, edge);
 
-    auto title = makeText(api, font, "Demo3: 2D Lighting L4 - Soft Shadows + Night Presets", 28.f, 34.f, 24.f,
+    auto title = makeText(api, font, "Demo3: 2D Lighting L5 - Reflections", 28.f, 34.f, 24.f,
                           core::Color{235, 242, 255, 255});
     (void)title;
     makeText(api, font,
-             "Compute path: tiled culling, area samples, temporal jitter, separable blur, Environment2D.",
+             "Compute path: tiled culling, soft shadows, Reflector2D wet street/water edge, roughness blur.",
              28.f, 66.f, 14.f, core::Color{170, 188, 210, 255});
     makeText(api, font,
-             "Press 1 Torch | 2 StreetLamp | 3 Moonlight. All presets run in the same scene.",
+             "Press 1 Torch | 2 StreetLamp | 3 Moonlight. Presets change wetness and reflected light.",
              28.f, 88.f, 14.f, core::Color{170, 188, 210, 255});
     auto statusText = makeText(api, font, "", 28.f, 116.f, 14.f,
                                core::Color{145, 225, 180, 255});

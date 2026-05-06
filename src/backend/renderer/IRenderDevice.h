@@ -257,9 +257,21 @@ public:
         float opacity = 1.f, pad0 = 0.f, pad1 = 0.f, pad2 = 0.f;
     };
 
+    struct Reflector2DRegion {
+        float ax = 0.f, ay = 0.f, bx = 0.f, by = 0.f;
+        float width = 0.f, height = 0.f;
+        float reflectivity = 0.5f, roughness = 0.35f;
+        float tintR = 1.f, tintG = 1.f, tintB = 1.f, tintA = 1.f;
+        uint32_t shape = 0u;
+        uint32_t visible = 1u;
+        uint32_t pad0 = 0u;
+        uint32_t pad1 = 0u;
+    };
+
     struct Lighting2DParams {
         std::vector<Light2DPoint> lights;
         std::vector<Light2DSegment> segments;
+        std::vector<Reflector2DRegion> reflectors;
         CameraData camera;
         uint32_t viewportW = 0;
         uint32_t viewportH = 0;

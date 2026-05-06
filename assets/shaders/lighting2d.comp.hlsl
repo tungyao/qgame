@@ -32,14 +32,29 @@ struct Light2DSegment {
     float  pad2;
 };
 
+struct Reflector2DRegion {
+    float2 a;
+    float2 b;
+    float  width;
+    float  height;
+    float  reflectivity;
+    float  roughness;
+    float4 tint;
+    uint   shape;
+    uint   visible;
+    uint   pad0;
+    uint   pad1;
+};
+
 // SDL_GPU HLSL convention used elsewhere in the engine:
 //   t#,space0: readonly storage buffers
 //   u#,space1: readwrite storage buffers/textures
 //   b#,space2: push uniform data
 StructuredBuffer<Light2DPoint>   Lights   : register(t0, space0);
 StructuredBuffer<Light2DSegment> Segments : register(t1, space0);
-StructuredBuffer<uint2>          TileRanges : register(t2, space0);
-StructuredBuffer<uint>           TileLightIndices : register(t3, space0);
+StructuredBuffer<Reflector2DRegion> Reflectors : register(t2, space0);
+StructuredBuffer<uint2>          TileRanges : register(t3, space0);
+StructuredBuffer<uint>           TileLightIndices : register(t4, space0);
 RWTexture2D<float4>              ShadowOverlay : register(u0, space1);
 
 cbuffer Lighting2DParams : register(b0, space2)
@@ -49,18 +64,22 @@ cbuffer Lighting2DParams : register(b0, space2)
     float2 lightingSize;
     uint   lightCount;
     uint   segmentCount;
+    uint   reflectorCount;
+    uint   padCounts;
     uint   tileCols;
     uint   tileRows;
     uint   tileSize;
     uint   maxLightsPerTile;
+    uint2  padTile;
     float4 ambientColor;
     float  zoom;
     float  shadowStrength;
     float  ambientIntensity;
     float  exposure;
+    float  wetness;
     uint   frameIndex;
     float  time;
-    float2 pad0;
+    float  pad0;
 };
 
 float cross2(float2 a, float2 b)
@@ -140,6 +159,155 @@ float sampleVisibility(float2 world, Light2DPoint light, float2 pixel)
     return visibility * 0.25;
 }
 
+float segmentDistance(float2 p, float2 a, float2 b, out float t)
+{
+    float2 ab = b - a;
+    float lenSq = max(dot(ab, ab), 0.0001);
+    t = saturate(dot(p - a, ab) / lenSq);
+    float2 closest = a + ab * t;
+    return length(p - closest);
+}
+
+float aabbReflectionWeight(float2 world, Reflector2DRegion refl,
+                           Light2DPoint light, out float3 tint)
+{
+    // AABB reflectors are wet ground or shallow water. They do not trace true
+    // world geometry yet; instead they create a screen-space-looking vertical
+    // streak from bright lights above/near the rectangle. This matches the L5
+    // target for controllable road/water reflections while keeping reflection
+    // opt-in through Reflector2D data.
+    float roughness = saturate(refl.roughness);
+    float2 halfSize = max(float2(refl.width, refl.height) * 0.5, float2(1.0, 1.0));
+    float2 rectMin = refl.a - halfSize;
+    float2 rectMax = refl.a + halfSize;
+
+    float inside =
+        step(rectMin.x, world.x) * step(world.x, rectMax.x) *
+        step(rectMin.y, world.y) * step(world.y, rectMax.y);
+    if (inside <= 0.0) {
+        tint = 0.0;
+        return 0.0;
+    }
+
+    float topY = rectMin.y;
+    float depth = saturate((world.y - topY) / max(refl.height, 1.0));
+    float lightAbove = saturate((topY - light.position.y + light.radius * 0.18) /
+                                max(light.radius, 1.0));
+
+    // Rougher surfaces spread the reflection horizontally and vertically. The
+    // wider footprint behaves like a blur kernel baked into the reflection
+    // sample itself; the later separable lighting blur softens the result once
+    // more. Peak energy is reduced so high roughness looks hazy, not brighter.
+    float halfWidth = 14.0 + light.radius * (0.08 + roughness * 0.34);
+    float dx = abs(world.x - light.position.x) / max(halfWidth, 1.0);
+    float xWeight = exp(-dx * dx);
+
+    float verticalSharpness = lerp(4.6, 1.35, roughness);
+    float yWeight = exp(-depth * verticalSharpness);
+
+    // A subtle procedural ripple prevents the reflection patch from reading as
+    // a static copied ellipse. It is deterministic, cheap, and driven only by
+    // world position/time, so no extra normal/roughness texture is required.
+    float ripple =
+        0.78 +
+        0.14 * sin(world.x * 0.045 + time * 2.3) +
+        0.08 * sin((world.x + world.y) * 0.026 - time * 1.7);
+
+    float alphaEdge = smoothstep(0.0, 0.08, depth) * smoothstep(1.0, 0.72, depth);
+    float roughEnergy = lerp(1.0, 0.42, roughness);
+    tint = refl.tint.rgb * refl.tint.a;
+    return inside * lightAbove * xWeight * yWeight * ripple * alphaEdge * roughEnergy;
+}
+
+float segmentReflectionWeight(float2 world, Reflector2DRegion refl,
+                              Light2DPoint light, out float3 tint)
+{
+    // Segment reflectors are thin water edges or mirror lines. The contribution
+    // lives near the segment and stretches along it underneath the light. This
+    // gives designers a controllable highlight line without forcing every water
+    // body to be a filled rectangle.
+    float tPixel = 0.0;
+    float dist = segmentDistance(world, refl.a, refl.b, tPixel);
+    float roughness = saturate(refl.roughness);
+    float thickness = 4.0 + roughness * 58.0;
+    float band = saturate(1.0 - dist / max(thickness, 1.0));
+    if (band <= 0.0) {
+        tint = 0.0;
+        return 0.0;
+    }
+
+    float2 ab = refl.b - refl.a;
+    float lenSq = max(dot(ab, ab), 0.0001);
+    float tLight = saturate(dot(light.position - refl.a, ab) / lenSq);
+    float along = abs(tPixel - tLight) * sqrt(lenSq);
+    float alongWidth = 18.0 + light.radius * (0.12 + roughness * 0.42);
+    float alongWeight = exp(-pow(along / max(alongWidth, 1.0), 2.0));
+
+    // Prefer lights on the upper side of a horizontal water edge, but keep the
+    // formula generic enough for angled mirror-like segments.
+    float2 n = normalize(float2(-ab.y, ab.x));
+    float side = dot(light.position - (refl.a + ab * tLight), n);
+    float lightSideWeight = saturate(abs(side) / max(light.radius * 0.35, 1.0));
+
+    float shimmer =
+        0.72 +
+        0.18 * sin(tPixel * 42.0 + time * 2.1) +
+        0.10 * sin((world.x - world.y) * 0.038 + time * 1.4);
+    float roughEnergy = lerp(1.0, 0.48, roughness);
+    tint = refl.tint.rgb * refl.tint.a;
+    return band * band * alongWeight * lightSideWeight * shimmer * roughEnergy;
+}
+
+float3 sampleReflections(float2 world, out float reflectionAlpha)
+{
+    float3 reflected = 0.0;
+    reflectionAlpha = 0.0;
+
+    // Wetness is scene weather: 0 disables wet-ground reflections, 1 lets each
+    // Reflector2D use its own reflectivity. Keeping both controls is useful in
+    // demo3 presets: the same geometry can look dry, damp, or rain-soaked.
+    float sceneWetness = saturate(wetness);
+    if (sceneWetness <= 0.0 || reflectorCount == 0u) {
+        return reflected;
+    }
+
+    [loop]
+    for (uint ri = 0; ri < reflectorCount; ++ri) {
+        Reflector2DRegion refl = Reflectors[ri];
+        if (refl.visible == 0u || refl.reflectivity <= 0.0) {
+            continue;
+        }
+
+        [loop]
+        for (uint li = 0; li < lightCount; ++li) {
+            Light2DPoint light = Lights[li];
+            if ((light.layerMask & 1u) == 0u || light.radius <= 0.0 || light.intensity <= 0.0) {
+                continue;
+            }
+
+            float3 reflTint = 1.0;
+            float weight = (refl.shape == 1u)
+                ? aabbReflectionWeight(world, refl, light, reflTint)
+                : segmentReflectionWeight(world, refl, light, reflTint);
+            if (weight <= 0.0) {
+                continue;
+            }
+
+            // Reflections only amplify bright sources. This keeps wet ground
+            // from becoming a second copy of the whole scene and matches the
+            // plan's "night lamp on water/wetland" acceptance target.
+            float sourceLuma = dot(light.color.rgb, float3(0.2126, 0.7152, 0.0722));
+            float brightGate = smoothstep(0.12, 0.82, sourceLuma * light.intensity);
+            float strength = weight * saturate(refl.reflectivity) * sceneWetness *
+                             max(light.intensity, 0.0) * brightGate;
+            reflected += light.color.rgb * reflTint * strength;
+            reflectionAlpha = max(reflectionAlpha, strength * 0.42);
+        }
+    }
+
+    return reflected;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_DispatchThreadID)
 {
@@ -154,6 +322,7 @@ void main(uint3 gid : SV_DispatchThreadID)
     float2 world = (screen - viewportSize * 0.5) / max(zoom, 0.0001) + cameraPos;
 
     float3 lightAccum = float3(0.0, 0.0, 0.0);
+    float  reflectionAlpha = 0.0;
     float  glowAlpha = 0.0;
     float  shadowAlpha = 0.0;
     float  strongestVisibilityLoss = 0.0;
@@ -202,10 +371,12 @@ void main(uint3 gid : SV_DispatchThreadID)
     // Exposure scales both direct light and ambient, while shadowAlpha can still
     // win and draw a dark soft-edged shape when a light is occluded.
     float3 ambient = ambientColor.rgb * saturate(ambientIntensity) * max(exposure, 0.0);
+    float3 reflectionAccum = sampleReflections(world, reflectionAlpha);
     lightAccum = lightAccum * max(exposure, 0.0) + ambient;
+    lightAccum += reflectionAccum * max(exposure, 0.0);
 
     float luminance = dot(lightAccum, float3(0.2126, 0.7152, 0.0722));
-    float finalGlowAlpha = saturate(min(max(glowAlpha, luminance * 0.24), 0.62));
+    float finalGlowAlpha = saturate(min(max(max(glowAlpha, reflectionAlpha), luminance * 0.24), 0.68));
     float finalShadowAlpha = saturate(min(shadowAlpha, 0.82));
     float ambientAlpha = saturate(ambientIntensity * 0.32 + ambientColor.a * 0.04);
 

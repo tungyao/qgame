@@ -166,6 +166,34 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
         }
     }
 
+    // L5 reflection handoff. Reflector2D is uploaded as explicit geometry
+    // instead of inferred from sprite color, so wet streets/water are opt-in
+    // and UI/Text cannot accidentally become reflective. The backend shader
+    // treats AABB as a rectangular wet patch and Segment as a thin water edge
+    // or mirror line; both are in world pixels like lights and occluders.
+    auto reflView = ctx.world.view<Transform, Reflector2D>();
+    for (auto [ent, tf, refl] : reflView.each()) {
+        (void)ent;
+        if (!refl.visible || refl.reflectivity <= 0.f) continue;
+
+        backend::IRenderDevice::Reflector2DRegion gpu{};
+        gpu.ax = tf.x + refl.ax;
+        gpu.ay = tf.y + refl.ay;
+        gpu.bx = tf.x + refl.bx;
+        gpu.by = tf.y + refl.by;
+        gpu.width = refl.width;
+        gpu.height = refl.height;
+        gpu.reflectivity = refl.reflectivity;
+        gpu.roughness = refl.roughness;
+        gpu.tintR = refl.tint.r / 255.f;
+        gpu.tintG = refl.tint.g / 255.f;
+        gpu.tintB = refl.tint.b / 255.f;
+        gpu.tintA = refl.tint.a / 255.f;
+        gpu.shape = (refl.shape == Reflector2D::Shape::AABB) ? 1u : 0u;
+        gpu.visible = refl.visible ? 1u : 0u;
+        out.reflectors.push_back(gpu);
+    }
+
     out.enabled = !out.lights.empty();
     // L4 environment handoff: RenderSystem still does not decide how lighting
     // should look, but it does select the active scene Environment2D and copy
