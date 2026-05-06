@@ -114,14 +114,35 @@ public:
     void unloadSound(SoundHandle) override {}
     void playSound(SoundHandle, float = 1.f) override {}
     void stopSound(SoundHandle) override {}
+    void stopAllSounds() override {}
+    void playMusic(SoundHandle, bool) override { musicPlaying_ = true; musicPaused_ = false; }
     void playStream(const char*, bool) override {}
-    void stopStream() override {}
+    void stopStream() override { musicPlaying_ = false; musicPaused_ = false; }
+    void pauseMusic() override { if (musicPlaying_) musicPaused_ = true; }
+    void resumeMusic() override { if (musicPlaying_) musicPaused_ = false; }
+    void seekMusic(float seconds) override { musicPosition_ = seconds; }
+    void setMasterVolume(float volume) override { masterVolume_ = volume; }
+    void setSoundVolume(float volume) override { soundVolume_ = volume; }
+    void setMusicVolume(float volume) override { musicVolume_ = volume; }
+    float masterVolume() const override { return masterVolume_; }
+    float soundVolume() const override { return soundVolume_; }
+    float musicVolume() const override { return musicVolume_; }
+    float musicPositionSeconds() const override { return musicPosition_; }
+    float musicDurationSeconds() const override { return 0.f; }
+    bool musicPlaying() const override { return musicPlaying_; }
+    bool musicPaused() const override { return musicPaused_; }
     void setSpatialPos(SoundHandle, float, float) override {}
     void setListener(float, float) override {}
     void update() override {}
 
 private:
     uint32_t nextSound_ = 1;
+    float masterVolume_ = 1.f;
+    float soundVolume_ = 1.f;
+    float musicVolume_ = 1.f;
+    float musicPosition_ = 0.f;
+    bool musicPlaying_ = false;
+    bool musicPaused_ = false;
 };
 
 } // namespace

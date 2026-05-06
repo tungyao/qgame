@@ -3,6 +3,7 @@
 #include "../components/RenderComponents.h"
 #include "../components/UIComponents.h"
 #include "../systems/SceneSystem.h"
+#include "../systems/AudioSystem.h"
 #include "../systems/UISystem.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../backend/audio/AudioCommandQueue.h"
@@ -30,52 +31,103 @@ void GameAPI::destroyEntity(entt::entity e) {
 // ── Audio ────────────────────────────────────────────────────────────────────
 
 SoundHandle GameAPI::loadSound(const char* path) {
-    return ctx_.assetManager.loadSound(path ? path : "");
+    return ctx_.systems.get<AudioSystem>().loadSound(path);
 }
 
 SoundHandle GameAPI::loadSoundById(const char* assetId) {
-    return ctx_.assetManager.loadSoundById(assetId ? assetId : "");
+    return ctx_.systems.get<AudioSystem>().loadSoundById(assetId);
 }
 
 void GameAPI::releaseSound(SoundHandle h) {
-    ctx_.assetManager.releaseSound(h);
+    ctx_.systems.get<AudioSystem>().releaseSound(h);
 }
 
 void GameAPI::playSound(SoundHandle h, float vol) {
-    backend::AudioCmd cmd{};
-    cmd.type   = backend::AudioCmd::Type::PLAY;
-    cmd.handle = h;
-    cmd.vol    = vol;
-    ctx_.audioCommandQueue().push(cmd);
+    ctx_.systems.get<AudioSystem>().playSound(h, vol);
 }
 
 void GameAPI::stopSound(SoundHandle h) {
-    backend::AudioCmd cmd{};
-    cmd.type   = backend::AudioCmd::Type::STOP;
-    cmd.handle = h;
-    ctx_.audioCommandQueue().push(cmd);
+    ctx_.systems.get<AudioSystem>().stopSound(h);
+}
+
+void GameAPI::stopAllSounds() {
+    ctx_.systems.get<AudioSystem>().stopAllSounds();
+}
+
+void GameAPI::playMusic(SoundHandle h, bool loop) {
+    ctx_.systems.get<AudioSystem>().playMusic(h, loop);
 }
 
 void GameAPI::playMusic(const char* path, bool loop) {
-    backend::AudioCmd cmd{};
-    cmd.type = backend::AudioCmd::Type::PLAY_STREAM;
-    cmd.loop = loop;
-    std::strncpy(cmd.path, path, sizeof(cmd.path) - 1);
-    ctx_.audioCommandQueue().push(cmd);
+    ctx_.systems.get<AudioSystem>().playMusic(path, loop);
+}
+
+void GameAPI::playMusicById(const char* assetId, bool loop) {
+    ctx_.systems.get<AudioSystem>().playMusicById(assetId, loop);
+}
+
+void GameAPI::pauseMusic() {
+    ctx_.systems.get<AudioSystem>().pauseMusic();
+}
+
+void GameAPI::resumeMusic() {
+    ctx_.systems.get<AudioSystem>().resumeMusic();
+}
+
+void GameAPI::seekMusic(float seconds) {
+    ctx_.systems.get<AudioSystem>().seekMusic(seconds);
 }
 
 void GameAPI::stopMusic() {
-    backend::AudioCmd cmd{};
-    cmd.type = backend::AudioCmd::Type::STOP_STREAM;
-    ctx_.audioCommandQueue().push(cmd);
+    ctx_.systems.get<AudioSystem>().stopMusic();
+}
+
+void GameAPI::setMasterVolume(float volume) {
+    ctx_.systems.get<AudioSystem>().setMasterVolume(volume);
+}
+
+void GameAPI::setSoundVolume(float volume) {
+    ctx_.systems.get<AudioSystem>().setSoundVolume(volume);
+}
+
+void GameAPI::setMusicVolume(float volume) {
+    ctx_.systems.get<AudioSystem>().setMusicVolume(volume);
+}
+
+float GameAPI::masterVolume() const {
+    return ctx_.systems.get<AudioSystem>().masterVolume();
+}
+
+float GameAPI::soundVolume() const {
+    return ctx_.systems.get<AudioSystem>().soundVolume();
+}
+
+float GameAPI::musicVolume() const {
+    return ctx_.systems.get<AudioSystem>().musicVolume();
+}
+
+float GameAPI::musicPositionSeconds() const {
+    return ctx_.systems.get<AudioSystem>().musicPositionSeconds();
+}
+
+float GameAPI::musicDurationSeconds() const {
+    return ctx_.systems.get<AudioSystem>().musicDurationSeconds();
+}
+
+float GameAPI::musicProgress() const {
+    return ctx_.systems.get<AudioSystem>().musicProgress();
+}
+
+bool GameAPI::musicPlaying() const {
+    return ctx_.systems.get<AudioSystem>().musicPlaying();
+}
+
+bool GameAPI::musicPaused() const {
+    return ctx_.systems.get<AudioSystem>().musicPaused();
 }
 
 void GameAPI::setSpatialListener(float x, float y) {
-    backend::AudioCmd cmd{};
-    cmd.type = backend::AudioCmd::Type::SET_LISTENER;
-    cmd.x    = x;
-    cmd.y    = y;
-    ctx_.audioCommandQueue().push(cmd);
+    ctx_.systems.get<AudioSystem>().setSpatialListener(x, y);
 }
 
 // ── Input ────────────────────────────────────────────────────────────────────

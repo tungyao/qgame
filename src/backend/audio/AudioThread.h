@@ -44,17 +44,41 @@ private:
         case AudioCmd::Type::STOP:
             device_.stopSound(cmd.handle);
             break;
+        case AudioCmd::Type::STOP_ALL_SOUNDS:
+            device_.stopAllSounds();
+            break;
         case AudioCmd::Type::SET_SPATIAL:
             device_.setSpatialPos(cmd.handle, cmd.x, cmd.y);
             break;
         case AudioCmd::Type::SET_LISTENER:
             device_.setListener(cmd.x, cmd.y);
             break;
+        case AudioCmd::Type::PLAY_MUSIC:
+            device_.playMusic(cmd.handle, cmd.loop);
+            break;
         case AudioCmd::Type::PLAY_STREAM:
             device_.playStream(cmd.path, cmd.loop);
             break;
         case AudioCmd::Type::STOP_STREAM:
             device_.stopStream();
+            break;
+        case AudioCmd::Type::PAUSE_MUSIC:
+            device_.pauseMusic();
+            break;
+        case AudioCmd::Type::RESUME_MUSIC:
+            device_.resumeMusic();
+            break;
+        case AudioCmd::Type::SEEK_MUSIC:
+            device_.seekMusic(cmd.x);
+            break;
+        case AudioCmd::Type::SET_MASTER_VOLUME:
+            device_.setMasterVolume(cmd.vol);
+            break;
+        case AudioCmd::Type::SET_SOUND_VOLUME:
+            device_.setSoundVolume(cmd.vol);
+            break;
+        case AudioCmd::Type::SET_MUSIC_VOLUME:
+            device_.setMusicVolume(cmd.vol);
             break;
         }
     }

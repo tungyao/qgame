@@ -20,6 +20,16 @@
       "id": "animation.demo.test",
       "type": "animation",
       "source": "test_anim.json"
+    },
+    {
+      "id": "audio.demo4.music",
+      "type": "sound",
+      "source": "audio/demo4_music.wav"
+    },
+    {
+      "id": "audio.demo4.click",
+      "type": "sound",
+      "source": "audio/demo4_click.wav"
     }
   ]
 }

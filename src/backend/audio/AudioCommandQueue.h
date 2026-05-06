@@ -6,7 +6,22 @@
 namespace backend {
 
 struct AudioCmd {
-    enum class Type { PLAY, STOP, SET_SPATIAL, SET_LISTENER, PLAY_STREAM, STOP_STREAM };
+    enum class Type {
+        PLAY,
+        STOP,
+        STOP_ALL_SOUNDS,
+        SET_SPATIAL,
+        SET_LISTENER,
+        PLAY_MUSIC,
+        PLAY_STREAM,
+        STOP_STREAM,
+        PAUSE_MUSIC,
+        RESUME_MUSIC,
+        SEEK_MUSIC,
+        SET_MASTER_VOLUME,
+        SET_SOUND_VOLUME,
+        SET_MUSIC_VOLUME
+    };
     // LOAD/UNLOAD 无返回通道，走 GameAPI 同步路径，不经过命令队列
 
     Type        type;

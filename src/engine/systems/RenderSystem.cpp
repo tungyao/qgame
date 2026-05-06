@@ -902,12 +902,11 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         dev.submitGPUDrivenPass(info, params);
         submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
 
-        // ========== Step 2: CPU 渲染 Text 和 Tile (叠加在 Sprite 之上) ==========
+        // ========== Step 2: CPU 渲染 Text / Tile / UI (叠加在 Sprite 之上) ==========
+        static std::vector<backend::RenderCmd> textCommands;
+        textCommands.clear();
+
         if (!nonSpriteDrawables.empty()) {
-            // 存储实际的 RenderCmd 对象
-            static std::vector<backend::RenderCmd> textCommands;
-            textCommands.clear();
-            
             for (const Drawable& d : nonSpriteDrawables) {
                 // 检查 Pass 是否匹配
                 if ((cam.layerMask & renderPassBit(d.pass)) == 0) continue;
@@ -935,34 +934,35 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                     textCommands.push_back(cmd);
                 }
             }
+        }
 
-            // 注入 UI 命令（pass=Screen，按本相机 layerMask 过滤）
-            if (ctx_.systems.has<UISystem>()) {
-                std::vector<const backend::RenderCmd*> uiPtrs;
-                ctx_.systems.get<UISystem>().appendDrawCommandPtrs(uiPtrs);
-                for (const backend::RenderCmd* p : uiPtrs) {
-                    const RenderPass pp = cmdPass(*p);
-                    if ((cam.layerMask & renderPassBit(pp)) == 0) continue;
-                    textCommands.push_back(*p);
-                }
+        // 注入 UI 命令（pass=Screen，按本相机 layerMask 过滤）。纯 UI 场景没有
+        // nonSpriteDrawables，也必须提交这一批命令。
+        if (ctx_.systems.has<UISystem>()) {
+            std::vector<const backend::RenderCmd*> uiPtrs;
+            ctx_.systems.get<UISystem>().appendDrawCommandPtrs(uiPtrs);
+            for (const backend::RenderCmd* p : uiPtrs) {
+                const RenderPass pp = cmdPass(*p);
+                if ((cam.layerMask & renderPassBit(pp)) == 0) continue;
+                textCommands.push_back(*p);
+            }
+        }
+
+        if (!textCommands.empty()) {
+            // 创建指针数组
+            static std::vector<const backend::RenderCmd*> cmdPtrs;
+            cmdPtrs.clear();
+            cmdPtrs.reserve(textCommands.size());
+            for (const auto& cmd : textCommands) {
+                cmdPtrs.push_back(&cmd);
             }
 
-            if (!textCommands.empty()) {
-                // 创建指针数组
-                static std::vector<const backend::RenderCmd*> cmdPtrs;
-                cmdPtrs.clear();
-                cmdPtrs.reserve(textCommands.size());
-                for (const auto& cmd : textCommands) {
-                    cmdPtrs.push_back(&cmd);
-                }
-                
-                // 不清除，直接叠加渲染
-                backend::IRenderDevice::PassSubmitInfo textInfo;
-                textInfo.camera       = info.camera;
-                textInfo.clearEnabled = false;
-                textInfo.clearColor   = core::Color::Black;
-                dev.submitPass(textInfo, cmdPtrs);
-            }
+            // 不清除，直接叠加渲染
+            backend::IRenderDevice::PassSubmitInfo textInfo;
+            textInfo.camera       = info.camera;
+            textInfo.clearEnabled = false;
+            textInfo.clearColor   = core::Color::Black;
+            dev.submitPass(textInfo, cmdPtrs);
         }
 
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {

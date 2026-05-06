@@ -35,7 +35,7 @@ void SDLMixerAudioDevice::shutdown() {
     MIX_StopAllTracks(mixer_, 0);
 
     for (auto& [idx, entry] : soundEntries_) {
-        for (MIX_Track* t : entry.tracks) MIX_DestroyTrack(t);
+        for (const auto& inst : entry.tracks) MIX_DestroyTrack(inst.track);
         MIX_DestroyAudio(entry.audio);
     }
     soundEntries_.clear();
@@ -88,7 +88,10 @@ void SDLMixerAudioDevice::unloadSound(SoundHandle h) {
     if (!initialized_) return;
     auto it = soundEntries_.find(h.index);
     if (it == soundEntries_.end()) return;
-    for (MIX_Track* t : it->second.tracks) MIX_DestroyTrack(t);
+    if (musicUsesLoadedSound_ && musicSound_.index == h.index && musicSound_.version == h.version) {
+        stopStream();
+    }
+    for (const auto& inst : it->second.tracks) MIX_DestroyTrack(inst.track);
     MIX_DestroyAudio(it->second.audio);
     soundEntries_.erase(it);
 }
@@ -115,7 +118,9 @@ void SDLMixerAudioDevice::gcTracks() {
         // 从所有 soundEntry 的 tracks 向量中移除
         for (auto& [idx, entry] : soundEntries_) {
             auto& tv = entry.tracks;
-            auto it = std::find(tv.begin(), tv.end(), t);
+            auto it = std::find_if(tv.begin(), tv.end(), [t](const SoundEntry::TrackInstance& inst) {
+                return inst.track == t;
+            });
             if (it != tv.end()) {
                 tv.erase(it);
                 break;
@@ -123,6 +128,29 @@ void SDLMixerAudioDevice::gcTracks() {
         }
         MIX_DestroyTrack(t);
     }
+}
+
+float SDLMixerAudioDevice::effectiveSoundGain(float baseVolume) const {
+    return std::clamp(baseVolume, 0.f, 1.f) *
+           std::clamp(soundVolume_, 0.f, 1.f) *
+           std::clamp(masterVolume_, 0.f, 1.f);
+}
+
+float SDLMixerAudioDevice::effectiveMusicGain() const {
+    return std::clamp(musicVolume_, 0.f, 1.f) *
+           std::clamp(masterVolume_, 0.f, 1.f);
+}
+
+void SDLMixerAudioDevice::applySoundGains() {
+    for (auto& [idx, entry] : soundEntries_) {
+        for (const auto& inst : entry.tracks) {
+            if (inst.track) MIX_SetTrackGain(inst.track, effectiveSoundGain(inst.baseVolume));
+        }
+    }
+}
+
+void SDLMixerAudioDevice::applyMusicGain() {
+    if (musicTrack_) MIX_SetTrackGain(musicTrack_, effectiveMusicGain());
 }
 
 void SDLMixerAudioDevice::playSound(SoundHandle h, float vol) {
@@ -133,21 +161,45 @@ void SDLMixerAudioDevice::playSound(SoundHandle h, float vol) {
     MIX_Track* track = MIX_CreateTrack(mixer_);
     if (!track) return;
     MIX_SetTrackAudio(track, it->second.audio);
-    MIX_SetTrackGain(track, vol);
+    MIX_SetTrackGain(track, effectiveSoundGain(vol));
     MIX_SetTrackStoppedCallback(track, trackStoppedCallback, this);
     MIX_PlayTrack(track, 0);
-    it->second.tracks.push_back(track);
+    it->second.tracks.push_back({track, std::clamp(vol, 0.f, 1.f)});
 }
 
 void SDLMixerAudioDevice::stopSound(SoundHandle h) {
     if (!initialized_) return;
     auto it = soundEntries_.find(h.index);
     if (it == soundEntries_.end()) return;
-    for (MIX_Track* t : it->second.tracks) {
-        MIX_StopTrack(t, 0);
+    for (const auto& inst : it->second.tracks) {
+        MIX_StopTrack(inst.track, 0);
         // stop 触发 onTrackStopped → gcTracks() 里销毁；不在此处 DestroyTrack
     }
     // tracks 将在下一帧 gcTracks() 里清空
+}
+
+void SDLMixerAudioDevice::stopAllSounds() {
+    if (!initialized_) return;
+    for (auto& [idx, entry] : soundEntries_) {
+        for (const auto& inst : entry.tracks) MIX_StopTrack(inst.track, 0);
+    }
+}
+
+void SDLMixerAudioDevice::playMusic(SoundHandle h, bool loop) {
+    if (!initialized_) return;
+    auto it = soundEntries_.find(h.index);
+    if (it == soundEntries_.end()) return;
+    stopStream();
+
+    musicTrack_ = MIX_CreateTrack(mixer_);
+    if (!musicTrack_) return;
+
+    musicUsesLoadedSound_ = true;
+    musicSound_ = h;
+    MIX_SetTrackAudio(musicTrack_, it->second.audio);
+    MIX_SetTrackLoops(musicTrack_, loop ? -1 : 0);
+    applyMusicGain();
+    MIX_PlayTrack(musicTrack_, 0);
 }
 
 void SDLMixerAudioDevice::playStream(const char* path, bool loop) {
@@ -164,6 +216,9 @@ void SDLMixerAudioDevice::playStream(const char* path, bool loop) {
 
     MIX_SetTrackAudio(musicTrack_, musicAudio_);
     MIX_SetTrackLoops(musicTrack_, loop ? -1 : 0);
+    musicUsesLoadedSound_ = false;
+    musicSound_ = {};
+    applyMusicGain();
     MIX_PlayTrack(musicTrack_, 0);
 }
 
@@ -171,6 +226,61 @@ void SDLMixerAudioDevice::stopStream() {
     if (!initialized_) return;
     if (musicTrack_) { MIX_StopTrack(musicTrack_, 0); MIX_DestroyTrack(musicTrack_); musicTrack_ = nullptr; }
     if (musicAudio_) { MIX_DestroyAudio(musicAudio_); musicAudio_ = nullptr; }
+    musicSound_ = {};
+    musicUsesLoadedSound_ = false;
+}
+
+void SDLMixerAudioDevice::pauseMusic() {
+    if (initialized_ && musicTrack_) MIX_PauseTrack(musicTrack_);
+}
+
+void SDLMixerAudioDevice::resumeMusic() {
+    if (initialized_ && musicTrack_) MIX_ResumeTrack(musicTrack_);
+}
+
+void SDLMixerAudioDevice::seekMusic(float seconds) {
+    if (!initialized_ || !musicTrack_) return;
+    const Sint64 ms = static_cast<Sint64>(std::max(0.f, seconds) * 1000.f);
+    const Sint64 frames = MIX_TrackMSToFrames(musicTrack_, ms);
+    if (frames >= 0) MIX_SetTrackPlaybackPosition(musicTrack_, frames);
+}
+
+void SDLMixerAudioDevice::setMasterVolume(float volume) {
+    masterVolume_ = std::clamp(volume, 0.f, 1.f);
+    applySoundGains();
+    applyMusicGain();
+}
+
+void SDLMixerAudioDevice::setSoundVolume(float volume) {
+    soundVolume_ = std::clamp(volume, 0.f, 1.f);
+    applySoundGains();
+}
+
+void SDLMixerAudioDevice::setMusicVolume(float volume) {
+    musicVolume_ = std::clamp(volume, 0.f, 1.f);
+    applyMusicGain();
+}
+
+float SDLMixerAudioDevice::musicPositionSeconds() const {
+    if (!initialized_ || !musicTrack_) return 0.f;
+    const Sint64 frames = MIX_GetTrackPlaybackPosition(musicTrack_);
+    if (frames < 0) return 0.f;
+    const Sint64 ms = MIX_TrackFramesToMS(musicTrack_, frames);
+    return ms >= 0 ? static_cast<float>(ms) / 1000.f : 0.f;
+}
+
+float SDLMixerAudioDevice::musicDurationSeconds() const {
+    if (!initialized_ || !musicTrack_) return 0.f;
+    MIX_Audio* audio = musicUsesLoadedSound_ ? MIX_GetTrackAudio(musicTrack_) : musicAudio_;
+    if (!audio) return 0.f;
+    const Sint64 frames = MIX_GetAudioDuration(audio);
+    if (frames < 0) return 0.f;
+    const Sint64 ms = MIX_AudioFramesToMS(audio, frames);
+    return ms >= 0 ? static_cast<float>(ms) / 1000.f : 0.f;
+}
+
+bool SDLMixerAudioDevice::musicPaused() const {
+    return initialized_ && musicTrack_ && MIX_TrackPaused(musicTrack_);
 }
 
 void SDLMixerAudioDevice::setSpatialPos(SoundHandle h, float x, float y) {
@@ -180,8 +290,8 @@ void SDLMixerAudioDevice::setSpatialPos(SoundHandle h, float x, float y) {
 
     // Listener 固定 (0,0,0)，转为相对坐标
     MIX_Point3D pos{x - listenerX_, y - listenerY_, 0.f};
-    for (MIX_Track* t : it->second.tracks) {
-        MIX_SetTrack3DPosition(t, &pos);
+    for (const auto& inst : it->second.tracks) {
+        MIX_SetTrack3DPosition(inst.track, &pos);
     }
 }
 
