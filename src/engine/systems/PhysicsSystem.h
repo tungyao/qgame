@@ -135,6 +135,7 @@ private:
 
     void integrateVelocities(float dt);  // 速度积分
     void resolveCollisions();            // 碰撞解决
+    void resolveTileCollisions();        // TileMap 静态碰撞解决
     bool canCollide(const Collider& a, const Collider& b) const;  // 碰撞过滤
 };
 

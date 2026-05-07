@@ -94,6 +94,7 @@ static Json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
     j["h"]    = tm.height;
     j["ts"]   = tm.tileSize;
     j["cols"] = tm.tilesetCols;
+    j["collisionLayerMask"] = tm.collisionLayerMask;
     if (const std::string& id = mgr.textureAssetId(tm.tileset); !id.empty()) {
         j["assetId"] = id;
     }
@@ -110,6 +111,7 @@ static TileMap tilemapFromJson(const Json& j, AssetManager& mgr) {
     tm.height      = j.value("h",    0);
     tm.tileSize    = j.value("ts",   16);
     tm.tilesetCols = j.value("cols", 1);
+    tm.collisionLayerMask = j.value("collisionLayerMask", 0u);
     const std::string texId = j.value("assetId", "");
     const std::string texPath = j.value("tex", "");
     if (!texId.empty()) tm.tileset = mgr.loadTextureById(texId);

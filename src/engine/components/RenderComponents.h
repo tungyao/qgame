@@ -56,6 +56,7 @@ struct TileMap {
     int           height   = 0;    // tile 行数
     int           tileSize = 16;   // 每个 tile 的像素大小
     int           tilesetCols = 1; // tileset 横向有多少列
+    uint32_t      collisionLayerMask = 0; // bit N=layers[N] 中非空 tile 参与静态碰撞
     TextureHandle tileset;
 
     // layers[0]=地面 [1]=物体 [2]=顶层遮挡，-1 表示空 tile
@@ -68,6 +69,20 @@ struct TileMap {
         size_t idx = static_cast<size_t>(y) * width + x;
         if (idx >= layers[layer].size()) return -1;
         return layers[layer][idx];
+    }
+
+    bool collisionLayerEnabled(int layer) const {
+        if (layer < 0 || layer >= MAX_LAYERS) return false;
+        return (collisionLayerMask & (1u << static_cast<uint32_t>(layer))) != 0;
+    }
+
+    bool solidTileAt(int x, int y) const {
+        for (int layer = 0; layer < MAX_LAYERS; ++layer) {
+            if (collisionLayerEnabled(layer) && tileAt(layer, x, y) >= 0) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 

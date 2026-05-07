@@ -230,6 +230,79 @@ void PhysicsSystem::resolveCollisions() {
             ej.aabb = makeAABB(world_.get<Transform>(ej.e), cj);
         }
     }
+
+    resolveTileCollisions();
+}
+
+/**
+ * TileMap 静态碰撞 - 只检查动态刚体当前 AABB 覆盖到的 tile 范围。
+ *
+ * TileMap::collisionLayerMask 决定哪些渲染层参与碰撞；这些层里非空 tile
+ * 会被视为 COLLISION_LAYER_STATIC 的实心 AABB。该路径适合星露谷式俯视地图：
+ * 墙、树、建筑、栅栏等静态阻挡物直接由 tile 数据驱动。
+ */
+void PhysicsSystem::resolveTileCollisions() {
+    auto tilemaps = world_.view<Transform, TileMap>();
+    if (tilemaps.begin() == tilemaps.end()) return;
+
+    Collider tileCollider{};
+    tileCollider.layer = COLLISION_LAYER_STATIC;
+    tileCollider.mask = COLLISION_LAYER_ALL;
+
+    auto actors = world_.view<Transform, Collider, RigidBody>();
+    for (auto [actor, tf, col, rb] : actors.each()) {
+        if (col.isTrigger || rb.isKinematic) continue;
+        if (!canCollide(col, tileCollider)) continue;
+
+        AABB actorBox = makeAABB(tf, col);
+
+        for (auto [mapEntity, mapTf, tmap] : tilemaps.each()) {
+            if (tmap.tileSize <= 0 || tmap.width <= 0 || tmap.height <= 0 ||
+                tmap.collisionLayerMask == 0) {
+                continue;
+            }
+
+            const float tileSize = static_cast<float>(tmap.tileSize);
+            int minTileX = static_cast<int>(std::floor((actorBox.minX - mapTf.x) / tileSize));
+            int maxTileX = static_cast<int>(std::floor((actorBox.maxX - mapTf.x) / tileSize));
+            int minTileY = static_cast<int>(std::floor((actorBox.minY - mapTf.y) / tileSize));
+            int maxTileY = static_cast<int>(std::floor((actorBox.maxY - mapTf.y) / tileSize));
+
+            minTileX = std::max(0, minTileX);
+            minTileY = std::max(0, minTileY);
+            maxTileX = std::min(tmap.width - 1, maxTileX);
+            maxTileY = std::min(tmap.height - 1, maxTileY);
+            if (minTileX > maxTileX || minTileY > maxTileY) continue;
+
+            for (int ty = minTileY; ty <= maxTileY; ++ty) {
+                for (int tx = minTileX; tx <= maxTileX; ++tx) {
+                    if (!tmap.solidTileAt(tx, ty)) continue;
+
+                    AABB tileBox{
+                        mapTf.x + static_cast<float>(tx * tmap.tileSize),
+                        mapTf.y + static_cast<float>(ty * tmap.tileSize),
+                        mapTf.x + static_cast<float>((tx + 1) * tmap.tileSize),
+                        mapTf.y + static_cast<float>((ty + 1) * tmap.tileSize)
+                    };
+                    if (!overlaps(actorBox, tileBox)) continue;
+
+                    float sepX = 0.f, sepY = 0.f;
+                    minSeparation(actorBox, tileBox, sepX, sepY);
+
+                    dispatcher_.trigger(CollisionInfo{actor, mapEntity, sepX, sepY});
+                    dispatcher_.trigger(CollisionInfo{mapEntity, actor, -sepX, -sepY});
+
+                    tf.x += sepX;
+                    tf.y += sepY;
+
+                    if (sepX != 0.f && rb.velocityX * sepX < 0.f) rb.velocityX = 0.f;
+                    if (sepY != 0.f && rb.velocityY * sepY < 0.f) rb.velocityY = 0.f;
+
+                    actorBox = makeAABB(tf, col);
+                }
+            }
+        }
+    }
 }
 
 /**
