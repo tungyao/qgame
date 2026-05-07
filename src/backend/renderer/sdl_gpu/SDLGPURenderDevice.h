@@ -61,6 +61,7 @@ public:
     void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) override;
     void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) override;
     void submitLighting2DPass(const PassSubmitInfo& info, const Lighting2DParams& params) override;
+    void submitWorldLightingGraph(const WorldLightingSubmitInfo& info) override;
 
     // 供 RenderSystem 查询设备，上传纹理用
     SDL_GPUDevice* gpuDevice() const { return device_; }
@@ -104,6 +105,7 @@ private:
     SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createGPUDrivenPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createParticlePipelineForFormat(SDL_GPUTextureFormat format);
+    SDL_GPUGraphicsPipeline* createLightingCompositePipelineForFormat(SDL_GPUTextureFormat format);
     void                     createGPUDrivenIndexBuffer();
     SDL_GPUShader* loadShader(const uint8_t* code, size_t size,
                               SDL_GPUShaderStage stage,
@@ -142,6 +144,7 @@ private:
     SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* gpuDrivenPipeline_  = nullptr;
     SDL_GPUGraphicsPipeline* particlePipeline_   = nullptr;
+    SDL_GPUGraphicsPipeline* lightingCompositePipeline_ = nullptr;
     ComputePipelineHandle    lighting2DComputePipeline_{};
     ComputePipelineHandle    lighting2DCullPipeline_{};
     ComputePipelineHandle    lighting2DBlurPipeline_{};
@@ -194,6 +197,13 @@ private:
     TextureHandle             offscreenRenderTarget_{};
     int                       offscreenRenderTargetWidth_ = 0;
     int                       offscreenRenderTargetHeight_ = 0;
+
+    // RenderGraph WorldColor target. This is separate from editor/offscreen
+    // helpers because it is reused every frame by the lighting graph and must
+    // remain alive across graph submissions.
+    TextureHandle             worldColorTarget_{};
+    int                       worldColorTargetWidth_ = 0;
+    int                       worldColorTargetHeight_ = 0;
 
     // 当前帧 command buffer（SDL3 GPU 概念，不是我们的 backend::CommandBuffer）
     SDL_GPUCommandBuffer* gpuCmdBuf_ = nullptr;

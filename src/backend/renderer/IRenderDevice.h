@@ -78,6 +78,9 @@ struct RenderFrameStats {
     uint32_t computeDispatchCount = 0;
     uint32_t textureBindCount = 0;
     uint32_t lighting2DSubmitCount = 0;
+    uint32_t renderGraphPassCount = 0;
+    uint32_t worldColorPassCount = 0;
+    uint32_t lightingCompositeCount = 0;
 
     // Phase L0/L1 lighting counters. These do not imply that lighting is
     // rendered yet; they prove the ECS data path is visible to RenderSystem and
@@ -289,6 +292,18 @@ public:
     };
 
     virtual void submitLighting2DPass(const PassSubmitInfo& info, const Lighting2DParams& params) = 0;
+
+    // First RenderGraph-facing submission used by the SDL GPU lighting upgrade.
+    // It deliberately passes command pointers instead of owning command storage:
+    // RenderSystem already owns stable per-frame command vectors, and avoiding
+    // copies keeps this bridge small while the graph abstraction is still young.
+    struct WorldLightingSubmitInfo {
+        PassSubmitInfo worldPass;
+        std::vector<const RenderCmd*> worldCommands;
+        Lighting2DParams lighting;
+    };
+
+    virtual void submitWorldLightingGraph(const WorldLightingSubmitInfo& info) = 0;
 
     bool debug_ = false;
 };

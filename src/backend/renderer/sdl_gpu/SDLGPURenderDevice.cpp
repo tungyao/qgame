@@ -46,6 +46,7 @@
 #include <SDL3/SDL.h>
 
 #include "../CommandBuffer.h"
+#include "../RenderGraph.h"
 #include "../../../core/Assert.h"
 #include "../../../core/Logger.h"
 
@@ -60,6 +61,7 @@
 #include "lighting2d_spv.h"           // L3 2D lighting compute shader
 #include "lighting2d_cull_spv.h"      // L3 screen-tile light-list builder
 #include "lighting2d_blur_spv.h"      // L4 separable blur for soft lighting
+#include "lighting2d_composite_frag_spv.h" // WorldColor * Lighting composite
 #ifdef QGAME_HAS_DXIL_SHADERS
 #include "sprite_vert_dxil.h"         // DXIL 版本的着色器 (Windows D3D12 后端)
 #include "sprite_frag_dxil.h"
@@ -69,6 +71,7 @@
 #include "lighting2d_dxil.h"
 #include "lighting2d_cull_dxil.h"
 #include "lighting2d_blur_dxil.h"
+#include "lighting2d_composite_frag_dxil.h"
 #endif
 
 namespace backend {
@@ -318,6 +321,10 @@ void SDLGPURenderDevice::shutdown() {
         destroyTexture(offscreenRenderTarget_);
         offscreenRenderTarget_ = {};
     }
+    if (textures_.valid(worldColorTarget_)) {
+        destroyTexture(worldColorTarget_);
+        worldColorTarget_ = {};
+    }
 
     // 释放 graphics pipelines
     if (pipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, pipeline_); pipeline_ = nullptr; }
@@ -326,6 +333,7 @@ void SDLGPURenderDevice::shutdown() {
     if (msdfOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfOffscreenPipeline_); msdfOffscreenPipeline_ = nullptr; }
     if (gpuDrivenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenPipeline_); gpuDrivenPipeline_ = nullptr; }
     if (particlePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particlePipeline_); particlePipeline_ = nullptr; }
+    if (lightingCompositePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, lightingCompositePipeline_); lightingCompositePipeline_ = nullptr; }
     if (gpuDrivenQuadIndexBuf_) { SDL_ReleaseGPUBuffer(device_, gpuDrivenQuadIndexBuf_); gpuDrivenQuadIndexBuf_ = nullptr; }
 
     if (lighting2DComputePipeline_.valid()) {
@@ -1598,10 +1606,16 @@ void SDLGPURenderDevice::createPipeline() {
         createGPUDrivenIndexBuffer();
     }
 
-    core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8, gpuDriven: %s, particles: %s)",
+    lightingCompositePipeline_ = createLightingCompositePipelineForFormat(swapchainFormat);
+    if (!lightingCompositePipeline_) {
+        core::logError("createPipeline: failed to create lighting composite pipeline");
+    }
+
+    core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8, gpuDriven: %s, particles: %s, lightingComposite: %s)",
                   static_cast<int>(swapchainFormat),
                   gpuDrivenPipeline_ ? "yes" : "no",
-                  particlePipeline_ ? "yes" : "no");
+                  particlePipeline_ ? "yes" : "no",
+                  lightingCompositePipeline_ ? "yes" : "no");
 }
 
 bool SDLGPURenderDevice::probeStorageTextureSupport() {
@@ -2161,6 +2175,66 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createParticlePipelineForFormat(SDL
     return pipeline;
 }
 
+SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createLightingCompositePipelineForFormat(SDL_GPUTextureFormat format) {
+    // The composite pass reuses the normal sprite vertex format so we can draw
+    // one full-screen/world-aligned quad with the same CPU vertex upload path.
+    // The fragment shader differs: it samples WorldColor and LightingTexture
+    // and produces final scene color, replacing the old swapchain overlay.
+    SDL_GPUShader* vs = nullptr;
+    SDL_GPUShader* fs = nullptr;
+    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+        vs = loadShader(sprite_vert_spv, sprite_vert_spv_size,
+                        SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+        fs = loadShader(lighting2d_composite_frag_spv, lighting2d_composite_frag_spv_size,
+                        SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+#ifdef QGAME_HAS_DXIL_SHADERS
+    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
+        vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size,
+                        SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
+        fs = loadShader(lighting2d_composite_frag_dxil, lighting2d_composite_frag_dxil_size,
+                        SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_DXIL);
+#endif
+    }
+    if (!vs || !fs) {
+        if (vs) SDL_ReleaseGPUShader(device_, vs);
+        if (fs) SDL_ReleaseGPUShader(device_, fs);
+        return nullptr;
+    }
+
+    SDL_GPUVertexBufferDescription vbDesc{};
+    vbDesc.slot = 0;
+    vbDesc.pitch = sizeof(SpriteVertex);
+    vbDesc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    vbDesc.instance_step_rate = 0;
+
+    SDL_GPUVertexAttribute attrs[3]{};
+    attrs[0] = { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(SpriteVertex, x) };
+    attrs[1] = { 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(SpriteVertex, u) };
+    attrs[2] = { 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(SpriteVertex, r) };
+
+    SDL_GPUColorTargetDescription colorTarget{};
+    colorTarget.format = format;
+    colorTarget.blend_state.enable_blend = false;
+
+    SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+    pipeInfo.vertex_shader = vs;
+    pipeInfo.fragment_shader = fs;
+    pipeInfo.vertex_input_state.vertex_buffer_descriptions = &vbDesc;
+    pipeInfo.vertex_input_state.num_vertex_buffers = 1;
+    pipeInfo.vertex_input_state.vertex_attributes = attrs;
+    pipeInfo.vertex_input_state.num_vertex_attributes = 3;
+    pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    pipeInfo.target_info.color_target_descriptions = &colorTarget;
+    pipeInfo.target_info.num_color_targets = 1;
+
+    SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
+    SDL_ReleaseGPUShader(device_, vs);
+    SDL_ReleaseGPUShader(device_, fs);
+    return pipeline;
+}
+
 void SDLGPURenderDevice::createGPUDrivenIndexBuffer() {
     // 6 个索引、复用 4 个 quad 顶点 (vertIdx = gl_VertexIndex & 3)
     static const uint16_t quadIdx[6] = { 0, 1, 2, 0, 2, 3 };
@@ -2649,6 +2723,182 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     renderCmdsToTarget(gpuCmdBuf_, pipeline_, cmds, cam, false, core::Color::Black,
                        swapchainTex_, swapW_, swapH_);
     submitRadialLightComposite();
+}
+
+void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo& info) {
+    if (!gpuCmdBuf_ || !swapchainTex_) return;
+
+    CameraData cam = info.worldPass.camera;
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(swapW_);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(swapH_);
+    if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
+
+    // The graph object is currently a declaration/debug record. Execution is
+    // still explicit below so the first migration stays easy to review: every
+    // pass in the graph maps to one obvious block of backend work.
+    RenderGraph graph;
+    const uint32_t swapchain = graph.addResource({
+        RenderGraphResourceType::Swapchain, "Swapchain", swapW_, swapH_
+    });
+    const uint32_t worldColor = graph.addResource({
+        RenderGraphResourceType::Texture, "WorldColor",
+        static_cast<uint32_t>(cam.viewportW), static_cast<uint32_t>(cam.viewportH)
+    });
+    const uint32_t lighting = graph.addResource({
+        RenderGraphResourceType::Texture, "LightingTexture",
+        static_cast<uint32_t>((cam.viewportW + 1) / 2),
+        static_cast<uint32_t>((cam.viewportH + 1) / 2)
+    });
+    graph.addPass({"WorldColorPass", {}, {{worldColor, RenderGraphAccess::WriteColor}}});
+    graph.addPass({"LightVisibilityCompute",
+                   {{worldColor, RenderGraphAccess::ReadSampled}},
+                   {{lighting, RenderGraphAccess::WriteStorage}}});
+    graph.addPass({"LightingCompositePass",
+                   {{worldColor, RenderGraphAccess::ReadSampled},
+                    {lighting, RenderGraphAccess::ReadSampled}},
+                   {{swapchain, RenderGraphAccess::WriteColor}}});
+    frameStats_.renderGraphPassCount += static_cast<uint32_t>(graph.passes().size());
+
+    // Pass 1: render the world into an offscreen color target. This is the key
+    // behavioral change from the old overlay path: World no longer writes the
+    // swapchain before lighting has had a chance to composite.
+    if (!textures_.valid(worldColorTarget_) ||
+        worldColorTargetWidth_ != cam.viewportW ||
+        worldColorTargetHeight_ != cam.viewportH) {
+        if (textures_.valid(worldColorTarget_)) {
+            destroyTexture(worldColorTarget_);
+        }
+        worldColorTarget_ = createRenderTargetTexture(cam.viewportW, cam.viewportH);
+        worldColorTargetWidth_ = cam.viewportW;
+        worldColorTargetHeight_ = cam.viewportH;
+    }
+    TextureEntry* worldEntry = textures_.tryGet(worldColorTarget_);
+    if (!worldEntry || !worldEntry->gpuTex) {
+        // If the offscreen target cannot be created, fall back to the old direct
+        // path instead of dropping the frame. The stats make this visible.
+        frameStats_.fallbackReason = "world color target unavailable";
+        submitPass(info.worldPass, info.worldCommands);
+        submitLighting2DPass(info.worldPass, info.lighting);
+        return;
+    }
+
+    renderCmdsToTarget(gpuCmdBuf_, offscreenPipeline_, info.worldCommands, cam,
+                       info.worldPass.clearEnabled, info.worldPass.clearColor,
+                       worldEntry->gpuTex,
+                       static_cast<uint32_t>(cam.viewportW),
+                       static_cast<uint32_t>(cam.viewportH));
+    frameStats_.worldColorPassCount++;
+
+    // Pass 2: run the existing lighting compute path. It still contains the old
+    // swapchain overlay for compatibility; the composite pass below clears and
+    // overwrites the swapchain, so the graph output is determined by
+    // WorldColor+LightingTexture rather than overlay blending.
+    submitLighting2DPass(info.worldPass, info.lighting);
+    if (!lightingCompositePipeline_ ||
+        !textures_.valid(lighting2DTexture_) ||
+        !textures_.valid(worldColorTarget_)) {
+        // Composite is the new main path. If it is unavailable, keep a visible
+        // frame using the old copy/overlay behavior and expose the reason.
+        frameStats_.fallbackReason = "lighting composite unavailable";
+        return;
+    }
+
+    TextureEntry& lightingEntry = textures_.get(lighting2DTexture_);
+    worldEntry = textures_.tryGet(worldColorTarget_);
+    if (!worldEntry) return;
+
+    // Pass 3: draw one world-aligned quad to the swapchain. The vertex shader
+    // uses the same camera matrix as sprites, so the quad exactly covers the
+    // current camera's visible world rectangle.
+    const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+    const float visibleW = static_cast<float>(cam.viewportW) / zoom;
+    const float visibleH = static_cast<float>(cam.viewportH) / zoom;
+    const float hw = visibleW * 0.5f;
+    const float hh = visibleH * 0.5f;
+
+    SpriteVertex verts[4]{
+        {cam.x - hw, cam.y - hh, 0.f, 0.f, 255, 255, 255, 255},
+        {cam.x + hw, cam.y - hh, 1.f, 0.f, 255, 255, 255, 255},
+        {cam.x + hw, cam.y + hh, 1.f, 1.f, 255, 255, 255, 255},
+        {cam.x - hw, cam.y + hh, 0.f, 1.f, 255, 255, 255, 255},
+    };
+    uint16_t indices[6]{0, 1, 2, 0, 2, 3};
+
+    uint8_t* mapped = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(device_, transferBuf_, true));
+    std::memcpy(mapped, verts, sizeof(verts));
+    std::memcpy(mapped + sizeof(verts), indices, sizeof(indices));
+    SDL_UnmapGPUTransferBuffer(device_, transferBuf_);
+    frameStats_.uploadBytes += sizeof(verts) + sizeof(indices);
+    frameStats_.uploadCallCount++;
+
+    SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(gpuCmdBuf_);
+    SDL_GPUTransferBufferLocation vSrc{ transferBuf_, 0 };
+    SDL_GPUBufferRegion vDst{ vertexBuf_, 0, sizeof(verts) };
+    SDL_UploadToGPUBuffer(copyPass, &vSrc, &vDst, true);
+    SDL_GPUTransferBufferLocation iSrc{ transferBuf_, static_cast<uint32_t>(sizeof(verts)) };
+    SDL_GPUBufferRegion iDst{ indexBuf_, 0, sizeof(indices) };
+    SDL_UploadToGPUBuffer(copyPass, &iSrc, &iDst, true);
+    SDL_EndGPUCopyPass(copyPass);
+
+    float proj[16], view[16], mvp[16];
+    buildOrthoProjectionMatrix(static_cast<float>(swapW_), static_cast<float>(swapH_), proj);
+    buildViewMatrix(cam.x, cam.y, zoom, cam.rotation, view);
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            mvp[i * 4 + j] = 0.f;
+            for (int k = 0; k < 4; ++k) {
+                mvp[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
+            }
+        }
+    }
+
+    SDL_GPUColorTargetInfo colorTarget{};
+    colorTarget.texture = swapchainTex_;
+    colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+    colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+    colorTarget.clear_color = SDL_FColor{0.f, 0.f, 0.f, 1.f};
+
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
+    if (!pass) {
+        core::logError("submitWorldLightingGraph: composite render pass failed: %s", SDL_GetError());
+        return;
+    }
+
+    SDL_BindGPUGraphicsPipeline(pass, lightingCompositePipeline_);
+    SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, mvp, sizeof(mvp));
+
+    SDL_GPUTextureSamplerBinding samplers[2]{
+        {worldEntry->gpuTex, worldEntry->sampler},
+        {lightingEntry.gpuTex, lightingEntry.sampler},
+    };
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers, 2);
+    frameStats_.textureBindCount += 2;
+
+    struct CompositeUniforms {
+        float ambientColor[4];
+        float ambientIntensity;
+        float exposure;
+        uint32_t debugMode;
+        float pad0;
+    } uniforms{
+        {info.lighting.ambientR, info.lighting.ambientG,
+         info.lighting.ambientB, info.lighting.ambientA},
+        info.lighting.ambientIntensity,
+        info.lighting.exposure,
+        0u,
+        0.f
+    };
+    SDL_PushGPUFragmentUniformData(gpuCmdBuf_, 0, &uniforms, sizeof(uniforms));
+
+    SDL_GPUBufferBinding vertexBinding{ vertexBuf_, 0 };
+    SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+    SDL_GPUBufferBinding indexBinding{ indexBuf_, 0 };
+    SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+    SDL_DrawGPUIndexedPrimitives(pass, 6, 1, 0, 0, 0);
+    SDL_EndGPURenderPass(pass);
+
+    frameStats_.drawCallCount++;
+    frameStats_.lightingCompositeCount++;
 }
 
 void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,

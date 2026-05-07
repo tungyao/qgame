@@ -251,6 +251,240 @@ Text/UI Pass
 
 推荐短期用第 1 种，避免在上层暴露太多 SDL GPU 纹理细节。中期 RenderGraph 完成后再把这些 pass 拆成显式节点。
 
+### 5.1 Render Graph 管理升级计划
+
+当前实现的问题是 pass 顺序靠 `RenderSystem` 手工调用后端接口维持，资源也由后端临时管理：
+
+- World sprite/tile、particle、lighting overlay、UI/Text 直接或间接写 swapchain。
+- lighting fallback 目前通过 alpha-blended overlay 近似暗化和径向加亮。
+- SDL GPU compute lighting texture 已能生成，但还没有严格的 `WorldColor -> Lighting -> Composite` 数据流。
+- 多 camera / World+UI 混合时，后续 pass 覆盖前面 pass 的风险较高，缺少统一依赖描述和调试输出。
+
+升级目标是引入一个轻量 Render Graph，把“要渲染什么”和“写到哪里、读什么资源”显式化。第一版不追求复杂泛型框架，只解决 2D lighting 需要的资源生命周期、pass 顺序和调试可见性。
+
+#### 核心抽象
+
+```cpp
+enum class RGResourceType {
+    Texture,
+    Buffer,
+    Swapchain,
+};
+
+enum class RGAccess {
+    ReadSampled,
+    ReadStorage,
+    WriteColor,
+    WriteStorage,
+    Present,
+};
+
+struct RGTextureDesc {
+    uint32_t width;
+    uint32_t height;
+    TextureFormat format;
+    TextureUsage usage;
+    const char* debugName;
+};
+
+struct RGPass {
+    const char* name;
+    std::vector<RGResourceUse> reads;
+    std::vector<RGResourceUse> writes;
+    ExecuteFn execute;
+};
+```
+
+第一阶段 Render Graph 可以是 immediate builder：
+
+1. `RenderSystem` 每个 camera 构建一组 pass 描述。
+2. 后端根据 pass 描述顺序执行，不做复杂重排。
+3. SDL GPU 后端根据 resource use 插入正确的 render/compute/copy pass 边界。
+4. debug overlay 显示 graph pass 名称、resource 尺寸、lighting 是否 composite 到 swapchain。
+
+#### 资源模型
+
+World lighting 至少需要以下 transient resources：
+
+```text
+WorldColor      RGBA8, full resolution, COLOR_TARGET | SAMPLER
+LightingTexture RGBA8/RGBA16F, half/full resolution, STORAGE_WRITE | STORAGE_READ | SAMPLER
+LightingBlur    RGBA8/RGBA16F, half/full resolution, STORAGE_WRITE | STORAGE_READ
+CompositeColor  optional, full resolution, COLOR_TARGET | SAMPLER
+```
+
+短期可以不引入 `CompositeColor`，`LightingCompositePass` 直接写 swapchain；后续接 Bloom/Tonemap 时再把 composite 输出改成中间纹理。
+
+#### Pass 顺序
+
+```text
+AcquireSwapchain
+
+WorldColorPass
+    writes: WorldColor
+    reads: sprite textures, tile textures, particle buffers
+
+LightUploadPass
+    writes: LightBuffer, SegmentBuffer, ReflectorBuffer
+
+LightCullingCompute
+    reads: LightBuffer
+    writes: TileRanges, TileLightIndices
+
+LightVisibilityCompute
+    reads: LightBuffer, SegmentBuffer, ReflectorBuffer, TileRanges, TileLightIndices
+    writes: LightingTexture
+
+LightingBlurCompute
+    reads/writes: LightingTexture, LightingBlur
+
+LightingCompositePass
+    reads: WorldColor, LightingTexture
+    writes: Swapchain or CompositeColor
+
+UIPass
+    reads: font/sprite textures
+    writes: Swapchain or CompositeColor
+
+Present
+```
+
+#### RenderSystem 侧改造
+
+- World camera 不再直接 `submitPass(..., swapchain)`。
+- RenderSystem 把 World draw commands 交给 `submitWorldGraph()` 或 `submitFrameGraph()`。
+- UI/Text camera 保持独立 pass，默认在 lighting composite 后执行。
+- `RenderFrameStats` 增加：
+  - `renderGraphPassCount`
+  - `worldColorPassCount`
+  - `lightingCompositeCount`
+  - `lighting2DSubmitCount`
+  - `lightingDebugMode`
+
+#### 后端边界
+
+短期接口建议：
+
+```cpp
+struct WorldLightingSubmitInfo {
+    CameraData camera;
+    std::vector<const RenderCmd*> worldCommands;
+    std::vector<const RenderCmd*> uiCommands;
+    Lighting2DParams lighting;
+    bool clearEnabled;
+    core::Color clearColor;
+};
+
+virtual void submitWorldLightingGraph(const WorldLightingSubmitInfo& info) = 0;
+```
+
+这样 SDL GPU 可以在内部拥有 `WorldColor/Lighting/Composite` 资源，不把 SDL 原生 texture 暴露给 engine 层。OpenGL 后端可以先用同样接口走 fallback：WorldColor FBO + fragment/fullscreen composite 或继续 alpha fallback，但必须保持 pass 顺序一致。
+
+### 5.2 SDL GPU Offscreen WorldColor + Lighting Composite 计划
+
+当前 SDL GPU lighting 的最大缺口是 composite 仍是 swapchain overlay。正确目标是：
+
+```text
+finalColor = WorldColor * Lighting + Reflection + Emissive
+```
+
+#### 阶段 A：WorldColor offscreen
+
+交付：
+
+- 在 `SDLGPURenderDevice` 中新增/复用 full-res `worldColorTexture_`。
+- `WorldColorPass` 将 World sprite/tile/particle 渲染到 `worldColorTexture_`，不写 swapchain。
+- UI/Text 暂时仍写 swapchain，但必须在 composite 后执行。
+
+验收：
+
+- 关闭 lighting 时，`WorldColor -> Composite(copy) -> Swapchain` 与原直接渲染视觉一致。
+- demo3 状态栏显示 `worldColor=1 composite=1`。
+
+#### 阶段 B：Fragment composite shader
+
+新增 shader：
+
+```text
+assets/shaders/lighting2d_composite.frag.hlsl
+assets/shaders/lighting2d_composite.frag.glsl
+```
+
+输入：
+
+- `WorldColor` sampled texture。
+- `LightingTexture` sampled texture。
+- uniform：ambient/exposure/debugMode。
+
+输出：
+
+```hlsl
+float3 world = WorldColor.Sample(...).rgb;
+float4 light = LightingTexture.Sample(...);
+float3 lit = world * max(light.rgb, ambient.rgb) * exposure;
+float3 reflection = light.a/reflection channel policy 或单独 ReflectionTexture;
+return float4(saturate(lit + reflection), worldAlpha);
+```
+
+第一版如果 `LightingTexture` 仍是 RGBA8 overlay 语义，可以临时约定：
+
+- `rgb` = light color multiplier / tint。
+- `a` = light strength。
+- composite 中转成 `lighting = ambient + rgb * a`。
+
+验收：
+
+- 删除 `Light2D` 时 World 只剩环境暗度。
+- `patrolLight.intensity = 100.f` 必须明显改变 `WorldColor * Lighting` 结果。
+- UI/Text 不被暗化。
+
+#### 阶段 C：替换 overlay fallback
+
+删除或降级当前路径：
+
+- 不再把 `lighting2DTexture_` 当普通 sprite 画到 swapchain。
+- 不再用 “黑色 full-screen sprite + radial sprite” 作为 SDL GPU 主路径。
+- 保留 fallback 只在 `supportsStorageTexture == false` 或 composite pipeline 创建失败时启用，并在状态栏显示 fallback reason。
+
+验收：
+
+- `lighting2DSubmitCount > 0` 且 `lightingCompositeCount > 0`。
+- RenderDoc/日志中能看到 `WorldColorPass -> LightVisibilityCompute -> LightingCompositePass -> UIPass`。
+- demo3 A/B：按键关闭全部 Light2D 后，局部光照消失但 UI 保持可读。
+
+#### 阶段 D：Debug views
+
+增加 lighting debug mode：
+
+```text
+0 final composite
+1 WorldColor only
+2 LightingTexture only
+3 Tile light count
+4 Shadow/visibility
+5 Reflection only
+```
+
+demo3 按键建议：
+
+- `L` toggle Light2D visible。
+- `G` cycle lighting debug mode。
+- `O` toggle occluders。
+- `R` toggle reflectors。
+
+验收：
+
+- 用户能直接区分 ECS 数据未提交、compute 输出为空、composite 没执行、UI 覆盖等问题。
+
+#### 阶段 E：Render Graph 固化
+
+当 SDL GPU offscreen composite 稳定后，把内部 hardcoded 顺序迁移为 Render Graph builder：
+
+- 资源按 viewport size 自动 resize。
+- pass 名称和 resource use 可导出到日志。
+- 多 camera 时每个 World camera 建独立 graph scope，UI camera 在最后统一提交。
+- 后续 Bloom/Tonemap/ColorGrading 只作为 graph pass 添加。
+
 ---
 
 ## 6. 2D Ray Casting 算法
@@ -427,6 +661,7 @@ SDL GPU 仍可作为短中期主后端，但文档和代码应把它视为 “Vu
 - `assets/shaders/lighting2d.comp.glsl` 已加入；构建链当前使用同语义的 `lighting2d.comp.hlsl` 生成 SPIR-V/DXIL。
 - SDL GPU 后端已接入单光源硬阴影 compute：Light2D/segment storage buffer -> 1/2 resolution storage texture -> sprite overlay composite。
 - `supportsLighting2D` 在 compute/storage texture 能力通过时启用；demo3 状态行会显示 lighting2D 与 compute dispatch 计数。
+- 2026-05 最新诊断：`Light2D` 数据链路已能到达后端，demo3 可显示 `lights=32 submit=1`。但当前主路径仍是 swapchain overlay/fallback，不是最终的 `WorldColor * Lighting` composite。下一步必须迁移到 Render Graph 管理的 offscreen WorldColor + LightingCompositePass。
 
 ### L0：文档和能力探针
 
@@ -462,12 +697,16 @@ SDL GPU 仍可作为短中期主后端，但文档和代码应把它视为 “Vu
 - `assets/shaders/lighting2d.comp.glsl`。
 - light buffer / occluder segment buffer。
 - 1/2 分辨率 lighting texture。
-- composite 到 world color。
+- 临时 overlay composite 可用于 bring-up，但不能作为最终验收。
+- SDL GPU 新增 WorldColor offscreen，并通过 fragment composite 输出到 swapchain。
 
 验收：
 
 - 一个点光被 AABB 遮挡后产生稳定阴影。
 - 1080p 下 1/2 分辨率、1 light、64 segments 预算 < 1ms 作为初始目标。
+- 关闭 lighting 时 `WorldColor -> Composite(copy)` 与原直接渲染一致。
+- 打开 lighting 时局部光照来自 `Light2D`，删除/隐藏 `Light2D` 会明显改变大范围明暗。
+- UI/Text 在 composite 之后绘制，不被 World lighting 暗化。
 
 ### L3：多光源和 tiled culling
 
@@ -476,11 +715,15 @@ SDL GPU 仍可作为短中期主后端，但文档和代码应把它视为 “Vu
 - `tileLightList` buffer。
 - 多光源混合、半径裁剪、layerMask。
 - debug view：light tiles、shadow mask、lighting texture。
+- `lighting2d_composite.frag.hlsl/glsl`。
+- RenderFrameStats 记录 `lighting2DSubmitCount`、`lightingCompositeCount`、`worldColorPassCount`。
 
 验收：
 
 - 32 个小半径动态光源稳定运行。
 - CPU 不再为每个像素/光源做任何工作。
+- demo3 中 `lights > 0`、`submit > 0`、`composite > 0` 同时成立。
+- debug mode 可切换 WorldColor only / LightingTexture only / Final composite。
 
 ### L4：软阴影和夜晚环境
 
@@ -532,8 +775,11 @@ src/engine/components/LightComponents.h
 src/engine/resources/Light2DBuffer.h
 src/engine/resources/Light2DRenderer.h
 src/engine/resources/Light2DRenderer.cpp
+src/backend/renderer/RenderGraph.h
+src/backend/renderer/RenderGraph.cpp
 assets/shaders/lighting2d.comp.glsl
 assets/shaders/lighting2d_composite.frag.glsl
+assets/shaders/lighting2d_composite.frag.hlsl
 docs/PLAN_Vulkan_2D_Lighting.md
 ```
 
@@ -564,6 +810,9 @@ assets/manifest.json
 | 反射过度真实导致画面乱 | 只对显式 Reflector2D 区域启用，并限制亮部贡献 |
 | 与 GPU-driven sprite 迁移互相阻塞 | Lighting 第一阶段允许 WorldColorPass 使用现有 CPU/GPU-driven 任一路径 |
 | UI/Text 被错误光照影响 | Pass 顺序固定为 World lighting 后再叠加 Text/UI |
+| swapchain overlay 被后续 camera/pass 覆盖 | World pass 不再直接写 swapchain；Render Graph 固定 WorldColor -> Composite -> UI |
+| `Light2D` 已提交但画面无变化 | demo3 增加 submit/composite/debug view；增加 LightingTexture only 和 WorldColor only 诊断 |
+| offscreen composite 与原渲染有色差 | 增加 lighting disabled copy-path 验收，先保证 WorldColor 直通一致 |
 
 ---
 
@@ -574,3 +823,5 @@ assets/manifest.json
 - **Compute 先于硬件 RT**：2D shadow/reflection 的核心是 2D 可见性查询，compute ray casting 更简单、更可控。
 - **硬件 RT 后置**：只有在原生 Vulkan 后端成熟后，才评估 `VK_KHR_ray_query` 或 RT pipeline 是否带来足够收益。
 - **World 与 UI 分离**：动态光照只作用于 WorldColorPass；Text/UI 默认保持可读性。
+- **Overlay 只是过渡**：swapchain sprite overlay/fallback 只用于 bring-up 和能力不足时的降级；SDL GPU 主路径必须升级为 offscreen WorldColor + LightingCompositePass。
+- **Render Graph 先轻量后泛化**：第一版 graph 只表达 2D lighting 所需 pass 和 transient texture，稳定后再承载 Bloom/Tonemap 等后处理。

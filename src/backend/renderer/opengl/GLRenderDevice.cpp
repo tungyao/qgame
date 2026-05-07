@@ -1513,4 +1513,17 @@ void GLRenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
                        cam.viewportW, cam.viewportH);
 }
 
+void GLRenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo& info) {
+    // OpenGL keeps a compatibility implementation for the new RenderGraph-facing
+    // interface. It does not yet allocate a separate WorldColor FBO/composite
+    // shader; instead it preserves the existing correctness fallback while
+    // reporting graph-shaped stats. This keeps RenderSystem able to call one
+    // interface across backends and makes the SDL GPU graph migration isolated.
+    frameStats_.renderGraphPassCount += 3;
+    submitPass(info.worldPass, info.worldCommands);
+    frameStats_.worldColorPassCount++;
+    submitLighting2DPass(info.worldPass, info.lighting);
+    frameStats_.lightingCompositeCount++;
+}
+
 } // namespace backend

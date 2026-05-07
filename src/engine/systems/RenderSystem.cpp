@@ -269,10 +269,12 @@ void RenderSystem::update(float dt) {
     // correctness fallback; all performance work should make this branch less
     // frequent rather than faster.
     const backend::RendererCapabilities& caps = dev.capabilities();
+    const bool hasLightingWork = stats.light2DCount > 0 && caps.supportsLighting2D;
     const bool canUseGPUDriven =
         caps.supportsGPUDrivenSprite &&
         gpuRenderer_.isInitialized() &&
-        gpuRenderer_.hasCullingPipeline();
+        gpuRenderer_.hasCullingPipeline() &&
+        !hasLightingWork;
 
     if (canUseGPUDriven) {
         stats.path = backend::RenderPath::SDLGPU_GPUDriven;
@@ -286,6 +288,8 @@ void RenderSystem::update(float dt) {
             : backend::RenderPath::OpenGL_CPUBatch;
         if (!caps.supportsGPUDrivenSprite) {
             stats.fallbackReason = "gpu-driven sprite pipeline unavailable";
+        } else if (hasLightingWork) {
+            stats.fallbackReason = "lighting graph uses CPU world path";
         } else if (!gpuRenderer_.isInitialized()) {
             stats.fallbackReason = "gpu-driven renderer not initialized";
         } else if (!gpuRenderer_.hasCullingPipeline()) {
@@ -669,14 +673,24 @@ void RenderSystem::buildCommandBuffer() {
         info.camera       = toBackendCamera(tf, cam, w, h);
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
-        dev.submitPass(info, filtered);
-        submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
                                                   static_cast<uint32_t>(w),
                                                   static_cast<uint32_t>(h));
-            dev.submitLighting2DPass(info, lighting);
+            if (ctx_.renderDevice().capabilities().supportsLighting2D &&
+                !lighting.lights.empty()) {
+                backend::IRenderDevice::WorldLightingSubmitInfo graphInfo{};
+                graphInfo.worldPass = info;
+                graphInfo.worldCommands = filtered;
+                graphInfo.lighting = std::move(lighting);
+                dev.submitWorldLightingGraph(graphInfo);
+            } else {
+                dev.submitPass(info, filtered);
+            }
+        } else {
+            dev.submitPass(info, filtered);
         }
+        submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
     }
 }
 
