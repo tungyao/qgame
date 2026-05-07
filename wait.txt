@@ -19,11 +19,62 @@ ySort 排序	所有实体 O(n log n)	⚠️ 3000+ ySort 实体开始有感知
 GPU-driven 路径	仅 SDL GPU 后端走，OpenGL 回退 CPU	⚠️ 取决于后端
 结论：>2000 实体开始有压力，>5000 开始需要优化。 主要短板：
 
-短板排序与优化方向
-优先级	短板	改进方案
-🔴 P0	无静态/动态分离	静态实体标记后跳过每帧重构建
-🔴 P0	CPU 路径每帧全量上传	静态几何体复用，仅变动部分上传
-🟡 P1	无空间分区	网格/四叉树分区，按区域裁剪
-🟡 P1	暴力 O(n) 裁剪	空间分区后只遍历可见区域的实体
-🟢 P2	无遮挡剔除	建筑物/地形背后的实体不可见时应跳过
-🟢 P2	ySort O(n log n)	可改为桶排序或增量排序
+Godot TileMap 编辑器里比较值得借鉴的功能大致有这些：
+
+  - 多种绘制工具
+      - 单格画笔
+      - 橡皮擦
+      - 直线绘制
+      - 矩形绘制
+      - 桶填充
+      - 区域选择、复制、粘贴
+  - 多 tile 选择
+      - 可以一次选中多个 tile，当作一个结构刷到地图上。
+      - 空洞也会保留，适合画树、平台、房屋角落这种组合块。
+  - Patterns 模式
+      - 可以把一块已经画好的区域保存为 pattern。
+      - 后续直接作为预制图案反复放置。
+      - 很适合桥、墙角、房间模板、装饰组合。
+  - Terrains / Autotile
+      - 这是 Godot TileMap 最重要的功能之一。
+      - 支持根据周围 tile 自动选择边、角、内角、连接块。
+      - 有 Connect 和 Path 两类常用绘制逻辑：
+          - Connect：自动和周围同类地形连接。
+          - Path：只和当前笔画路径连接，适合道路、河流。
+  - 随机绘制和散布
+      - 从多个选中 tile 中随机选一个绘制。
+      - Scattering 可以让某些格子随机留空。
+      - 适合草地变化、石子、花、碎屑、地面细节。
+  - TileSet 级别属性编辑
+      - 每个 tile 可以配置：
+          - collision shape
+          - navigation shape
+          - occlusion shape
+          - physics material
+          - custom data
+          - terrain bitmask
+          - alternative tile
+      - 这点很关键：编辑器不只是画图，还负责生成引擎可直接消费的数据。
+  - Alternative Tiles
+      - 一个 tile 可以有多个变体。
+      - 可用于旋转版、破损版、随机外观、动画帧等。
+  - Scene Tiles
+      - tile 不一定只是图片，也可以是一个场景/Prefab。
+      - 适合放火把、粒子、机关、门、可交互物件。
+  - 图层编辑体验
+      - 当前编辑层正常显示，其他层半透明或灰显。
+      - 图层可独立选择、显示、锁定、排序。
+      - Godot 4 新版更倾向于用多个 TileMapLayer 分离层。
+  - 缺失 tile 占位显示
+      - 如果 TileSet 里某个 tile 被删了，但地图里还引用它，编辑器会显示 placeholder。
+      - 这对项目数据安全很有用，避免静默丢数据。
+
+  对你现在的 tools/tilemap_editor.html 来说，最值得优先补的是：
+
+  1. 图层锁定、可见、可碰撞三个独立开关。
+  2. 矩形、直线、桶填充工具。
+  3. Pattern 保存/粘贴。
+  4. 地形 autotile。
+  5. tile 自定义数据面板，例如 collision, renderLayer, tag, damage, oneWay。
+  6. 随机绘制和散布。
+  7. 缺失 tile 的明显占位提示。

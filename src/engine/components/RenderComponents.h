@@ -52,37 +52,120 @@ struct Transform {
     float scaleY   = 1.f;
 };
 
+/**
+ * TileMap 是引擎当前公开的网格地图运行时组件。
+ *
+ * 坐标约定：
+ * - Transform.x/y 是整张地图左上角的世界坐标。
+ * - 每个 cell 的世界 AABB 为：
+ *   [Transform.x + x * tileSize, Transform.y + y * tileSize,
+ *    Transform.x + (x + 1) * tileSize, Transform.y + (y + 1) * tileSize]
+ * - TileMap 自身不使用 Transform.rotation/scaleX/scaleY；当前渲染和碰撞都按
+ *   axis-aligned tile grid 处理。
+ *
+ * gid 约定：
+ * - EMPTY_GID(-1) 表示空格，不渲染、不碰撞。
+ * - gid 是全局 tile id。每个 Tileset 使用 [firstGid, firstGid + count)
+ *   的半开区间声明自己负责的 gid 范围。
+ * - localTileId = gid - firstGid，用于查找 tileset atlas 中的 tile 和 collision。
+ *
+ * 编辑器/导入导出 JSON 约定：
+ * - TileMap 组件本体使用 qgame.tilemap.v1 结构；完整资源包使用
+ *   qgame.tilemap.engine-package。
+ * - 字段名保持短名以减少地图文件体积：
+ *   w=width, h=height, ts=tileSize, cols=tileset columns。
+ * - tools/tilemap_editor.html 应按这些常量和字段语义导出，避免编辑器和运行时
+ *   对 visible/collidable/renderLayer 的含义产生分歧。
+ */
 struct TileMap {
+    static constexpr int EMPTY_GID = -1;
+    static constexpr int FORMAT_VERSION = 1;
+    static constexpr const char* FORMAT_TYPE = "qgame.tilemap.v1";
+    static constexpr const char* ENGINE_PACKAGE_TYPE = "qgame.tilemap.engine-package";
+
+    /**
+     * Tileset 描述一张 tile atlas 在全局 gid 空间中的范围。
+     *
+     * JSON:
+     * {
+     *   "id": "optional-editor-id",
+     *   "name": "optional-display-name",
+     *   "firstGid": 0,
+     *   "count": 16,
+     *   "cols": 4,
+     *   "tex": "texture asset path or display name",
+     *   "assetId": "optional AssetManager id",
+     *   "sourceKind": "builtin|image",
+     *   "sourceDataUrl": "optional editor package image data",
+     *   "collision": [0, 1, ...]
+     * }
+     */
     struct Tileset {
-        TextureHandle texture;
-        int firstGid = 0;      // 全局 tile id 起点
-        int count    = 0;      // tile 数量
-        int columns  = 1;      // tileset 横向 tile 数
-        std::vector<uint8_t> collision; // 每格碰撞属性，0=空，非0=实心
+        TextureHandle texture;              // 渲染用 atlas 纹理；加载器负责把 JSON tex/assetId 转成句柄
+        int firstGid = 0;                   // 全局 tile id 起点，包含该值
+        int count    = 0;                   // tile 数量；有效 gid 范围是 [firstGid, firstGid + count)
+        int columns  = 1;                   // atlas 横向 tile 数；localId % columns 得到 atlas x
+        std::vector<uint8_t> collision;     // 每个 local tile 的碰撞标记；0=非实心，非0=实心
     };
 
+    /**
+     * Layer 描述一层 tile 数据。
+     *
+     * JSON:
+     * {
+     *   "name": "地面",
+     *   "visible": true,
+     *   "collidable": true,
+     *   "renderLayer": 0,
+     *   "tiles": [gid, gid, -1, ...]
+     * }
+     *
+     * visible 和 collidable 是独立开关：
+     * - visible=false 只影响渲染，仍允许隐藏碰撞层。
+     * - collidable=false 只影响 PhysicsSystem，不影响渲染。
+     */
     struct Layer {
-        std::string name;
-        std::vector<int> tiles; // 全局 tile id，-1 表示空
-        bool visible = true;
-        bool collidable = true; // 是否参与 TileMap 静态碰撞；独立于 visible，允许隐藏碰撞层
-        int renderLayer = 0;
+        std::string name;        // 编辑器显示名；运行时只用于调试/序列化
+        std::vector<int> tiles;  // 行优先数组，长度应为 width * height；EMPTY_GID 表示空格
+        bool visible = true;     // 是否渲染该层
+        bool collidable = true;  // 是否参与 TileMap 静态碰撞；独立于 visible，允许隐藏碰撞层
+        int renderLayer = 0;     // 渲染排序层；和 Sprite::layer 使用同一排序维度
     };
 
-    int width    = 0;  // tile 列数
-    int height   = 0;  // tile 行数
-    int tileSize = 16; // 每个 tile 的像素大小
-    std::vector<Tileset> tilesets;
-    std::vector<Layer>   layers;
+    int width    = 0;             // 地图列数，JSON 字段 w
+    int height   = 0;             // 地图行数，JSON 字段 h
+    int tileSize = 16;            // tile 边长，单位是世界像素，JSON 字段 ts
+    std::vector<Tileset> tilesets; // gid 到纹理/collision 的映射表
+    std::vector<Layer>   layers;   // 多图层 tile 数据，按数组顺序作为默认 renderLayer
 
+    /**
+     * 返回一维行优先数组下标。调用者应先用 inBounds() 判断坐标是否合法。
+     */
+    size_t cellIndex(int x, int y) const {
+        return static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
+    }
+
+    /**
+     * 检查 cell 坐标是否位于地图范围内。
+     */
+    bool inBounds(int x, int y) const {
+        return x >= 0 && x < width && y >= 0 && y < height;
+    }
+
+    /**
+     * 指定 layer/cell 的 gid。越界或缺失数据返回 EMPTY_GID。
+     */
     int tileAt(int layer, int x, int y) const {
-        if (layer < 0 || layer >= static_cast<int>(layers.size())) return -1;
-        if (x < 0 || x >= width || y < 0 || y >= height) return -1;
-        size_t idx = static_cast<size_t>(y) * width + x;
-        if (idx >= layers[layer].tiles.size()) return -1;
+        if (layer < 0 || layer >= static_cast<int>(layers.size())) return EMPTY_GID;
+        if (!inBounds(x, y)) return EMPTY_GID;
+        size_t idx = cellIndex(x, y);
+        if (idx >= layers[layer].tiles.size()) return EMPTY_GID;
         return layers[layer].tiles[idx];
     }
 
+    /**
+     * 根据全局 gid 查找负责该 gid 的 Tileset。EMPTY_GID 或未声明 gid 返回 nullptr。
+     */
     const Tileset* tilesetForGid(int gid) const {
         for (const auto& ts : tilesets) {
             if (gid >= ts.firstGid && gid < ts.firstGid + ts.count) return &ts;
@@ -90,11 +173,17 @@ struct TileMap {
         return nullptr;
     }
 
+    /**
+     * 将全局 gid 转为 tileset 内 local id。未找到返回 -1。
+     */
     int localTileId(int gid) const {
         const Tileset* ts = tilesetForGid(gid);
         return ts ? gid - ts->firstGid : -1;
     }
 
+    /**
+     * 判断某个 gid 在 Tileset collision 表中是否为实心 tile。
+     */
     bool tileSolid(int gid) const {
         const Tileset* ts = tilesetForGid(gid);
         if (!ts) return false;
@@ -103,6 +192,9 @@ struct TileMap {
         return ts->collision[static_cast<size_t>(local)] != 0;
     }
 
+    /**
+     * 判断某个 cell 是否有任意 collidable 图层放置了实心 tile。
+     */
     bool solidTileAt(int x, int y) const {
         for (int layer = 0; layer < static_cast<int>(layers.size()); ++layer) {
             if (!layers[layer].collidable) continue;

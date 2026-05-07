@@ -90,6 +90,8 @@ static Sprite spriteFromJson(const Json& j, AssetManager& mgr) {
 
 static Json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
     Json j;
+    j["type"] = TileMap::FORMAT_TYPE;
+    j["version"] = TileMap::FORMAT_VERSION;
     j["w"]    = tm.width;
     j["h"]    = tm.height;
     j["ts"]   = tm.tileSize;
