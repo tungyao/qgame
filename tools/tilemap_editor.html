@@ -1,0 +1,907 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QGame TileMap Editor</title>
+  <style>
+    :root {
+      --bg: #101318;
+      --panel: #181d24;
+      --panel2: #202631;
+      --line: #343c49;
+      --text: #eef3f8;
+      --muted: #9ba8b7;
+      --accent: #25b7a4;
+      --warn: #f0b429;
+      --danger: #e45d5d;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button {
+      min-height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel2);
+      padding: 0 10px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 28%, var(--panel2)); }
+    button.danger:hover { border-color: var(--danger); }
+    input, select, textarea {
+      min-height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #0d1117;
+      padding: 6px 8px;
+    }
+    input[type="number"] { width: 76px; }
+    input[type="file"] { width: 100%; min-height: 0; padding: 7px; }
+    input[type="checkbox"] { min-height: 0; }
+    textarea {
+      width: 100%;
+      min-height: 170px;
+      resize: vertical;
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .app { height: 100vh; display: grid; grid-template-rows: 48px 1fr; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #141922;
+    }
+    .brand { font-weight: 700; white-space: nowrap; }
+    .toolbar { display: flex; gap: 6px; flex-wrap: wrap; }
+    .status { margin-left: auto; color: var(--muted); white-space: nowrap; font-size: 13px; }
+    .workspace { min-height: 0; display: grid; grid-template-columns: 1fr 300px 360px; }
+    .viewport {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      background-color: #0b0f14;
+      background-image:
+        linear-gradient(45deg, #0e141b 25%, transparent 25%),
+        linear-gradient(-45deg, #0e141b 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #0e141b 75%),
+        linear-gradient(-45deg, transparent 75%, #0e141b 75%);
+      background-size: 32px 32px;
+      background-position: 0 0, 0 16px, 16px -16px, -16px 0;
+    }
+    .stage-wrap { width: max-content; height: max-content; min-width: 100%; min-height: 100%; padding: 32px; }
+    #mapCanvas {
+      display: block;
+      image-rendering: pixelated;
+      background: #151a20;
+      box-shadow: 0 0 0 1px var(--line);
+      cursor: crosshair;
+    }
+    .side {
+      min-height: 0;
+      overflow: auto;
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+      padding: 12px;
+    }
+    .section { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+    .section:last-child { border-bottom: 0; margin-bottom: 0; }
+    .section h2 { margin: 0 0 10px; font-size: 13px; color: var(--muted); letter-spacing: 0; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+    .row label { color: var(--muted); min-width: 68px; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .mini { min-height: 26px; padding: 0 8px; font-size: 12px; }
+
+    .tilesets, .layers { display: grid; gap: 6px; }
+    .tileset-row, .layer-row {
+      display: grid;
+      align-items: center;
+      gap: 8px;
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #121720;
+    }
+    .tileset-row { grid-template-columns: 1fr auto; }
+    .layer-row { grid-template-columns: 1fr auto auto auto; }
+    .layer-row.active { border-color: var(--accent); }
+    .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .palette { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 6px; }
+    .tile-card { position: relative; }
+    .tile-swatch {
+      width: 100%;
+      aspect-ratio: 1;
+      min-height: 0;
+      padding: 0;
+      overflow: hidden;
+      border: 2px solid var(--line);
+      border-radius: 4px;
+      background: #0d1117;
+    }
+    .tile-swatch.selected { border-color: var(--warn); }
+    .tile-swatch canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+    .remove-tile {
+      position: absolute;
+      right: -4px;
+      top: -4px;
+      width: 20px;
+      height: 20px;
+      min-height: 20px;
+      padding: 0;
+      border-color: var(--danger);
+      background: #33171a;
+      font-size: 12px;
+      line-height: 18px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">QGame TileMap Editor</div>
+      <div class="toolbar">
+        <button id="newBtn">新建地图</button>
+        <button id="brushBtn" class="active">画笔</button>
+        <button id="eraserBtn">橡皮擦</button>
+        <button id="saveBtn">保存</button>
+        <button id="loadBtn">读取</button>
+        <button id="exportBtn">导出给引擎</button>
+      </div>
+      <div id="status" class="status">Ready</div>
+    </header>
+
+    <main class="workspace">
+      <section class="viewport">
+        <div class="stage-wrap">
+          <canvas id="mapCanvas"></canvas>
+        </div>
+      </section>
+
+      <aside class="side">
+        <div class="section">
+          <h2>Tileset</h2>
+          <input id="tilesetFile" type="file" accept="image/*" multiple>
+          <div class="row">
+            <label>Tile 大小</label>
+            <input id="tileSizeInput" type="number" min="4" max="256" value="32">
+          </div>
+          <div class="row">
+            <label>列数</label>
+            <input id="tilesetColsInput" type="number" min="1" value="4">
+          </div>
+          <div id="tilesets" class="tilesets"></div>
+          <div class="hint">可多选或多次导入；新 tileset 追加到 Palette，不覆盖旧 tileset。</div>
+        </div>
+
+        <div class="section">
+          <h2>Palette</h2>
+          <div id="palette" class="palette"></div>
+          <div class="hint">点击 tile 选为画笔；右上角 x 会从 Palette 移除并清掉地图中的该 tile。</div>
+        </div>
+      </aside>
+
+      <aside class="side">
+        <div class="section">
+          <h2>地图</h2>
+          <div class="row">
+            <label>宽</label>
+            <input id="mapWInput" type="number" min="1" max="512" value="20">
+            <label>高</label>
+            <input id="mapHInput" type="number" min="1" max="512" value="15">
+          </div>
+          <div class="row">
+            <label>缩放</label>
+            <select id="zoomInput">
+              <option value="1">100%</option>
+              <option value="2" selected>200%</option>
+              <option value="3">300%</option>
+              <option value="4">400%</option>
+            </select>
+          </div>
+          <div class="row">
+            <button id="resizeBtn">应用尺寸</button>
+            <button id="clearLayerBtn" class="danger">清空当前层</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>多图层</h2>
+          <div class="row">
+            <button id="addLayerBtn">添加图层</button>
+          </div>
+          <div id="layers" class="layers"></div>
+          <div class="hint">当前引擎 `TileMap` 只读取前 3 层；编辑器项目可保存更多层用于研究。</div>
+        </div>
+
+        <div class="section">
+          <h2>JSON</h2>
+          <textarea id="jsonBox" spellcheck="false"></textarea>
+          <div class="row">
+            <button id="copyJsonBtn">复制 JSON</button>
+            <button id="importJsonBtn">从文本读取</button>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <input id="loadFile" type="file" accept=".json,application/json" hidden>
+
+  <script>
+    const canvas = document.getElementById("mapCanvas");
+    const ctx = canvas.getContext("2d");
+    const paletteEl = document.getElementById("palette");
+    const layersEl = document.getElementById("layers");
+    const tilesetsEl = document.getElementById("tilesets");
+    const jsonBox = document.getElementById("jsonBox");
+    const statusEl = document.getElementById("status");
+
+    const builtinColors = [
+      "#5a9f4d", "#6fb85f", "#a47b48", "#7f5f3b",
+      "#4a8cbf", "#3d76a3", "#c9b36a", "#d9cf8f",
+      "#6d737a", "#89919a", "#9c5d4e", "#bd7a69",
+      "#2f6f43", "#255838", "#b7b7b7", "#e3e3e3"
+    ];
+
+    const state = {
+      width: 20,
+      height: 15,
+      tileSize: 32,
+      tilesetCols: 4,
+      zoom: 2,
+      tool: "brush",
+      activeLayer: 0,
+      selectedTile: 0,
+      nextGid: builtinColors.length,
+      removedTiles: new Set(),
+      tileCollision: new Set(),
+      tilesets: [{
+        id: "builtin",
+        name: "内置色块",
+        firstGid: 0,
+        count: builtinColors.length,
+        cols: 4,
+        tileSize: 32,
+        builtin: true
+      }],
+      layers: []
+    };
+
+    function setStatus(text) { statusEl.textContent = text; }
+    function clampInt(value, min, max) {
+      const n = Number.parseInt(value, 10);
+      return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : min;
+    }
+    function index(x, y) { return y * state.width + x; }
+    function blankTiles() { return Array(state.width * state.height).fill(-1); }
+    function makeLayer(name, collision = false) {
+      return { name, collision, tiles: blankTiles() };
+    }
+    function resetLayers() {
+      state.layers = [makeLayer("地面"), makeLayer("物体"), makeLayer("顶层")];
+      state.activeLayer = 0;
+    }
+    function activeLayer() { return state.layers[state.activeLayer]; }
+
+    function findTileset(gid) {
+      return state.tilesets.find(ts => gid >= ts.firstGid && gid < ts.firstGid + ts.count) || null;
+    }
+    function firstVisibleTile() {
+      for (const ts of state.tilesets) {
+        for (let gid = ts.firstGid; gid < ts.firstGid + ts.count; gid++) {
+          if (!state.removedTiles.has(gid)) return gid;
+        }
+      }
+      return -1;
+    }
+
+    function drawTile(target, gid, dx, dy, size) {
+      if (gid < 0 || state.removedTiles.has(gid)) return;
+      const ts = findTileset(gid);
+      if (!ts) return;
+      const local = gid - ts.firstGid;
+      if (ts.builtin) {
+        target.fillStyle = builtinColors[local % builtinColors.length];
+        target.fillRect(dx, dy, size, size);
+        target.fillStyle = "rgba(255,255,255,0.16)";
+        target.fillRect(dx + 3, dy + 3, size - 6, Math.max(2, size * 0.16));
+        return;
+      }
+      const sx = (local % ts.cols) * ts.tileSize;
+      const sy = Math.floor(local / ts.cols) * ts.tileSize;
+      target.drawImage(ts.image, sx, sy, ts.tileSize, ts.tileSize, dx, dy, size, size);
+    }
+
+    function renderMap() {
+      const cell = state.tileSize * state.zoom;
+      canvas.width = state.width * cell;
+      canvas.height = state.height * cell;
+      canvas.style.width = `${canvas.width}px`;
+      canvas.style.height = `${canvas.height}px`;
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      state.layers.forEach((layer, li) => {
+        ctx.globalAlpha = li === state.activeLayer ? 1 : 0.58;
+        for (let y = 0; y < state.height; y++) {
+          for (let x = 0; x < state.width; x++) {
+            drawTile(ctx, layer.tiles[index(x, y)], x * cell, y * cell, cell);
+          }
+        }
+      });
+      ctx.globalAlpha = 1;
+
+      for (let x = 0; x <= state.width; x++) {
+        ctx.strokeStyle = x % 5 === 0 ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.10)";
+        ctx.beginPath();
+        ctx.moveTo(x * cell + 0.5, 0);
+        ctx.lineTo(x * cell + 0.5, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= state.height; y++) {
+        ctx.strokeStyle = y % 5 === 0 ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.10)";
+        ctx.beginPath();
+        ctx.moveTo(0, y * cell + 0.5);
+        ctx.lineTo(canvas.width, y * cell + 0.5);
+        ctx.stroke();
+      }
+      drawCollisionOverlay(cell);
+      updateJsonBox();
+    }
+
+    function drawCollisionOverlay(cell) {
+      state.layers.forEach(layer => {
+        for (let y = 0; y < state.height; y++) {
+          for (let x = 0; x < state.width; x++) {
+            if (!state.tileCollision.has(layer.tiles[index(x, y)])) continue;
+            ctx.fillStyle = "rgba(228,93,93,0.22)";
+            ctx.fillRect(x * cell, y * cell, cell, cell);
+            ctx.strokeStyle = "rgba(228,93,93,0.8)";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
+          }
+        }
+      });
+      ctx.lineWidth = 1;
+    }
+
+    function renderTilesets() {
+      tilesetsEl.innerHTML = "";
+      state.tilesets.forEach(ts => {
+        const row = document.createElement("div");
+        row.className = "tileset-row";
+        const label = document.createElement("div");
+        label.className = "name";
+        label.textContent = `${ts.name}  #${ts.firstGid}-${ts.firstGid + ts.count - 1}`;
+        const remove = document.createElement("button");
+        remove.className = "mini danger";
+        remove.textContent = ts.builtin ? "保留" : "删除";
+        remove.disabled = !!ts.builtin;
+        remove.addEventListener("click", () => removeTileset(ts.id));
+        row.append(label, remove);
+        tilesetsEl.appendChild(row);
+      });
+    }
+
+    function renderPalette() {
+      paletteEl.innerHTML = "";
+      for (const ts of state.tilesets) {
+        for (let gid = ts.firstGid; gid < ts.firstGid + ts.count; gid++) {
+          if (state.removedTiles.has(gid)) continue;
+          const card = document.createElement("div");
+          card.className = "tile-card";
+          const btn = document.createElement("button");
+          btn.className = `tile-swatch${gid === state.selectedTile ? " selected" : ""}`;
+          btn.title = `${ts.name} / Tile ${gid}`;
+          if (state.tileCollision.has(gid)) btn.style.boxShadow = "0 0 0 2px rgba(228,93,93,0.75) inset";
+          const swatch = document.createElement("canvas");
+          swatch.width = state.tileSize;
+          swatch.height = state.tileSize;
+          const sctx = swatch.getContext("2d");
+          sctx.imageSmoothingEnabled = false;
+          drawTile(sctx, gid, 0, 0, state.tileSize);
+          btn.appendChild(swatch);
+          btn.addEventListener("click", () => {
+            state.selectedTile = gid;
+            renderPalette();
+            setStatus(`Tile ${gid}`);
+          });
+          const remove = document.createElement("button");
+          remove.className = "remove-tile";
+          remove.textContent = "x";
+          remove.title = "从 Palette 移除";
+          remove.addEventListener("click", (event) => {
+            event.stopPropagation();
+            removePaletteTile(gid);
+          });
+          const collision = document.createElement("button");
+          collision.className = "remove-tile";
+          collision.style.left = "-4px";
+          collision.style.right = "auto";
+          collision.style.borderColor = state.tileCollision.has(gid) ? "var(--danger)" : "var(--line)";
+          collision.style.background = state.tileCollision.has(gid) ? "#33171a" : "#171d25";
+          collision.textContent = "C";
+          collision.title = "切换 tile 碰撞";
+          collision.addEventListener("click", (event) => {
+            event.stopPropagation();
+            if (state.tileCollision.has(gid)) state.tileCollision.delete(gid);
+            else state.tileCollision.add(gid);
+            renderPalette();
+            renderMap();
+          });
+          card.append(btn, remove, collision);
+          paletteEl.appendChild(card);
+        }
+      }
+    }
+
+    function renderLayers() {
+      layersEl.innerHTML = "";
+      state.layers.forEach((layer, i) => {
+        const row = document.createElement("div");
+        row.className = `layer-row${i === state.activeLayer ? " active" : ""}`;
+        const name = document.createElement("input");
+        name.className = "name";
+        name.value = layer.name;
+        name.addEventListener("change", () => {
+          layer.name = name.value.trim() || `图层 ${i + 1}`;
+          updateJsonBox();
+        });
+        const select = document.createElement("button");
+        select.className = "mini";
+        select.textContent = i === state.activeLayer ? "编辑中" : "编辑";
+        select.addEventListener("click", () => {
+          state.activeLayer = i;
+          renderLayers();
+          renderMap();
+        });
+        const del = document.createElement("button");
+        del.className = "mini danger";
+        del.textContent = "删除";
+        del.disabled = state.layers.length <= 1;
+        del.addEventListener("click", () => {
+          state.layers.splice(i, 1);
+          state.activeLayer = Math.min(state.activeLayer, state.layers.length - 1);
+          renderLayers();
+          renderMap();
+        });
+        row.append(name, select, document.createElement("span"), del);
+        layersEl.appendChild(row);
+      });
+    }
+
+    function paintFromEvent(event) {
+      const rect = canvas.getBoundingClientRect();
+      const cell = state.tileSize * state.zoom;
+      const x = Math.floor((event.clientX - rect.left) / cell);
+      const y = Math.floor((event.clientY - rect.top) / cell);
+      if (x < 0 || x >= state.width || y < 0 || y >= state.height) return;
+      activeLayer().tiles[index(x, y)] = state.tool === "eraser" ? -1 : state.selectedTile;
+      renderMap();
+    }
+
+    function removePaletteTile(gid) {
+      state.removedTiles.add(gid);
+      for (const layer of state.layers) {
+        layer.tiles = layer.tiles.map(id => id === gid ? -1 : id);
+      }
+      if (state.selectedTile === gid) state.selectedTile = firstVisibleTile();
+      renderPalette();
+      renderMap();
+      setStatus(`已移除 Tile ${gid}`);
+    }
+
+    function removeTileset(id) {
+      const ts = state.tilesets.find(t => t.id === id);
+      if (!ts || ts.builtin) return;
+      state.tilesets = state.tilesets.filter(t => t.id !== id);
+      for (let gid = ts.firstGid; gid < ts.firstGid + ts.count; gid++) {
+        state.removedTiles.add(gid);
+      }
+      for (const layer of state.layers) {
+        layer.tiles = layer.tiles.map(gid => findTileset(gid) ? gid : -1);
+      }
+      if (!findTileset(state.selectedTile)) state.selectedTile = firstVisibleTile();
+      renderTilesets();
+      renderPalette();
+      renderMap();
+      setStatus(`已删除 ${ts.name}`);
+    }
+
+    function engineJson() {
+      return {
+        w: state.width,
+        h: state.height,
+        ts: state.tileSize,
+        tilesets: state.tilesets.map(ts => ({
+          id: ts.id,
+          name: ts.name,
+          firstGid: ts.firstGid,
+          count: ts.count,
+          cols: ts.cols,
+          tex: ts.name,
+          sourceDataUrl: ts.dataUrl || "",
+          sourceKind: ts.builtin ? "builtin" : "image",
+          collision: Array.from({ length: ts.count }, (_, i) => state.tileCollision.has(ts.firstGid + i) ? 1 : 0)
+        })),
+        layers: state.layers.map((layer, i) => ({
+          name: layer.name,
+          visible: true,
+          renderLayer: i,
+          tiles: layer.tiles.slice()
+        }))
+      };
+    }
+
+    function enginePackageJson() {
+      return {
+        type: "qgame.tilemap.engine-package",
+        version: 1,
+        tileMap: engineJson(),
+        resources: state.tilesets
+          .filter(ts => !ts.builtin)
+          .map(ts => ({
+            id: ts.id,
+            name: ts.name,
+            kind: "tileset",
+            dataUrl: ts.dataUrl || "",
+            tileSize: ts.tileSize,
+            cols: ts.cols,
+            firstGid: ts.firstGid,
+            count: ts.count
+          }))
+      };
+    }
+
+    function projectJson() {
+      return {
+        type: "qgame.tilemap.editor",
+        version: 2,
+        width: state.width,
+        height: state.height,
+        tileSize: state.tileSize,
+        tilesetCols: state.tilesetCols,
+        zoom: state.zoom,
+        activeLayer: state.activeLayer,
+        selectedTile: state.selectedTile,
+        nextGid: state.nextGid,
+        removedTiles: Array.from(state.removedTiles),
+        tileCollision: Array.from(state.tileCollision),
+        tilesets: state.tilesets.map(ts => ({
+          id: ts.id,
+          name: ts.name,
+          firstGid: ts.firstGid,
+          count: ts.count,
+          cols: ts.cols,
+          tileSize: ts.tileSize,
+          dataUrl: ts.dataUrl || "",
+          builtin: !!ts.builtin
+        })),
+        layers: state.layers.map(layer => ({
+          name: layer.name,
+          tiles: layer.tiles.slice()
+        })),
+        engineTileMap: engineJson()
+      };
+    }
+
+    function updateJsonBox() {
+      jsonBox.value = JSON.stringify(engineJson(), null, 2);
+    }
+
+    function syncInputs() {
+      document.getElementById("mapWInput").value = state.width;
+      document.getElementById("mapHInput").value = state.height;
+      document.getElementById("tileSizeInput").value = state.tileSize;
+      document.getElementById("tilesetColsInput").value = state.tilesetCols;
+      document.getElementById("zoomInput").value = String(state.zoom);
+    }
+
+    function resizeMap(newW, newH) {
+      const oldW = state.width;
+      const oldH = state.height;
+      const oldLayers = state.layers.map(layer => layer.tiles.slice());
+      state.width = newW;
+      state.height = newH;
+      state.layers.forEach((layer, li) => {
+        layer.tiles = Array(newW * newH).fill(-1);
+        for (let y = 0; y < Math.min(oldH, newH); y++) {
+          for (let x = 0; x < Math.min(oldW, newW); x++) {
+            layer.tiles[y * newW + x] = oldLayers[li][y * oldW + x];
+          }
+        }
+      });
+      renderMap();
+    }
+
+    function loadEngineTileMap(tileMap) {
+      state.width = clampInt(tileMap.w ?? tileMap.width, 1, 512);
+      state.height = clampInt(tileMap.h ?? tileMap.height, 1, 512);
+      state.tileSize = clampInt(tileMap.ts ?? tileMap.tileSize, 4, 256);
+      state.removedTiles = new Set();
+      state.tileCollision = new Set();
+      state.tilesets = [];
+      const tilesetSpecs = Array.isArray(tileMap.tilesets) ? tileMap.tilesets : [];
+      for (const spec of tilesetSpecs) {
+        const firstGid = Number(spec.firstGid ?? 0);
+        const count = Number(spec.count ?? 0);
+        const cols = Number(spec.cols ?? 1);
+        state.tilesets.push({
+          id: spec.id || `${firstGid}`,
+          name: spec.tex || spec.name || `tileset-${firstGid}`,
+          firstGid,
+          count,
+          cols,
+          tileSize: state.tileSize,
+          builtin: false
+        });
+        const collision = Array.isArray(spec.collision) ? spec.collision : [];
+        collision.forEach((solid, local) => {
+          if (solid) state.tileCollision.add(firstGid + local);
+        });
+      }
+      state.nextGid = state.tilesets.reduce((next, ts) => Math.max(next, ts.firstGid + ts.count), builtinColors.length);
+      const srcLayers = Array.isArray(tileMap.layers) ? tileMap.layers : [];
+      state.layers = [];
+      for (let i = 0; i < Math.max(1, srcLayers.length); i++) {
+        const spec = srcLayers[i] || {};
+        const src = Array.isArray(spec) ? spec : (Array.isArray(spec.tiles) ? spec.tiles : []);
+        const layer = makeLayer(spec.name || ["地面", "物体", "顶层"][i] || `图层 ${i + 1}`);
+        for (let n = 0; n < Math.min(src.length, layer.tiles.length); n++) {
+          const gid = Number(src[n]);
+          layer.tiles[n] = Number.isFinite(gid) ? gid : -1;
+        }
+        state.layers.push(layer);
+      }
+      state.activeLayer = 0;
+      state.selectedTile = firstVisibleTile();
+      syncInputs();
+      renderAll();
+    }
+
+    async function loadProject(data) {
+      if (!data || data.type !== "qgame.tilemap.editor") {
+        loadEngineTileMap(data.tileMap ?? data.engineTileMap ?? data);
+        return;
+      }
+      if (!Array.isArray(data.layers) && data.tileMap) {
+        if (data.tilesetDataUrl) {
+          const image = await loadImage(data.tilesetDataUrl);
+          const tileSize = clampInt(data.tileMap.ts ?? data.tileMap.tileSize ?? 32, 4, 256);
+          const cols = Math.max(1, Math.floor(image.width / tileSize));
+          const rows = Math.max(1, Math.floor(image.height / tileSize));
+          state.tilesets = [{
+            id: "legacy-tileset",
+            name: "旧项目 tileset",
+            firstGid: 0,
+            count: cols * rows,
+            cols,
+            tileSize,
+            dataUrl: data.tilesetDataUrl,
+            image
+          }];
+          state.nextGid = cols * rows;
+        }
+        loadEngineTileMap(data.tileMap);
+        return;
+      }
+      state.width = clampInt(data.width, 1, 512);
+      state.height = clampInt(data.height, 1, 512);
+      state.tileSize = clampInt(data.tileSize, 4, 256);
+      state.tilesetCols = clampInt(data.tilesetCols, 1, 1024);
+      state.zoom = clampInt(data.zoom ?? 2, 1, 4);
+      state.nextGid = clampInt(data.nextGid ?? builtinColors.length, builtinColors.length, 999999);
+      state.removedTiles = new Set(Array.isArray(data.removedTiles) ? data.removedTiles.map(Number) : []);
+      state.tileCollision = new Set(Array.isArray(data.tileCollision) ? data.tileCollision.map(Number) : []);
+      state.tilesets = [];
+      const specs = Array.isArray(data.tilesets) ? data.tilesets : [];
+      for (const spec of specs) {
+        if (spec.builtin) {
+          state.tilesets.push({
+            id: "builtin",
+            name: spec.name || "内置色块",
+            firstGid: Number(spec.firstGid ?? 0),
+            count: builtinColors.length,
+            cols: 4,
+            tileSize: 32,
+            builtin: true
+          });
+        } else if (spec.dataUrl) {
+          const image = await loadImage(spec.dataUrl);
+          state.tilesets.push({
+            id: spec.id || crypto.randomUUID(),
+            name: spec.name || "tileset",
+            firstGid: Number(spec.firstGid),
+            count: Number(spec.count),
+            cols: Number(spec.cols),
+            tileSize: Number(spec.tileSize),
+            dataUrl: spec.dataUrl,
+            image
+          });
+        }
+      }
+      if (!state.tilesets.some(ts => ts.builtin)) {
+        state.tilesets.unshift({ id: "builtin", name: "内置色块", firstGid: 0, count: builtinColors.length, cols: 4, tileSize: 32, builtin: true });
+      }
+      state.layers = (Array.isArray(data.layers) ? data.layers : []).map((layer, i) => {
+        const out = makeLayer(layer.name || `图层 ${i + 1}`);
+        const src = Array.isArray(layer.tiles) ? layer.tiles : [];
+        for (let n = 0; n < Math.min(src.length, out.tiles.length); n++) {
+          const gid = Number(src[n]);
+          out.tiles[n] = Number.isFinite(gid) ? gid : -1;
+        }
+        return out;
+      });
+      if (state.layers.length === 0) resetLayers();
+      state.activeLayer = Math.min(clampInt(data.activeLayer ?? 0, 0, 999), state.layers.length - 1);
+      state.selectedTile = findTileset(Number(data.selectedTile)) ? Number(data.selectedTile) : firstVisibleTile();
+      syncInputs();
+      renderAll();
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = src;
+      });
+    }
+
+    function downloadJson(filename, data) {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function setTool(tool) {
+      state.tool = tool;
+      document.getElementById("brushBtn").classList.toggle("active", tool === "brush");
+      document.getElementById("eraserBtn").classList.toggle("active", tool === "eraser");
+    }
+
+    function renderAll() {
+      renderTilesets();
+      renderPalette();
+      renderLayers();
+      renderMap();
+    }
+
+    document.getElementById("newBtn").addEventListener("click", () => {
+      state.width = clampInt(document.getElementById("mapWInput").value, 1, 512);
+      state.height = clampInt(document.getElementById("mapHInput").value, 1, 512);
+      state.tileSize = clampInt(document.getElementById("tileSizeInput").value, 4, 256);
+      state.tilesetCols = clampInt(document.getElementById("tilesetColsInput").value, 1, 1024);
+      resetLayers();
+      renderAll();
+      setStatus("新建地图完成");
+    });
+    document.getElementById("brushBtn").addEventListener("click", () => setTool("brush"));
+    document.getElementById("eraserBtn").addEventListener("click", () => setTool("eraser"));
+    document.getElementById("resizeBtn").addEventListener("click", () => {
+      resizeMap(clampInt(document.getElementById("mapWInput").value, 1, 512), clampInt(document.getElementById("mapHInput").value, 1, 512));
+      setStatus("地图尺寸已应用");
+    });
+    document.getElementById("clearLayerBtn").addEventListener("click", () => {
+      activeLayer().tiles.fill(-1);
+      renderMap();
+      setStatus(`已清空 ${activeLayer().name}`);
+    });
+    document.getElementById("addLayerBtn").addEventListener("click", () => {
+      state.layers.push(makeLayer(`图层 ${state.layers.length + 1}`));
+      state.activeLayer = state.layers.length - 1;
+      renderLayers();
+      renderMap();
+      setStatus("已添加图层");
+    });
+    document.getElementById("zoomInput").addEventListener("change", event => {
+      state.zoom = clampInt(event.target.value, 1, 4);
+      renderMap();
+    });
+    document.getElementById("tileSizeInput").addEventListener("change", event => {
+      state.tileSize = clampInt(event.target.value, 4, 256);
+      renderMap();
+      renderPalette();
+    });
+    document.getElementById("tilesetColsInput").addEventListener("change", event => {
+      state.tilesetCols = clampInt(event.target.value, 1, 1024);
+      updateJsonBox();
+    });
+    document.getElementById("tilesetFile").addEventListener("change", event => {
+      const files = Array.from(event.target.files || []);
+      files.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const image = await loadImage(reader.result);
+          const tileSize = state.tileSize;
+          const cols = Math.max(1, Math.floor(image.width / tileSize));
+          const rows = Math.max(1, Math.floor(image.height / tileSize));
+          const count = cols * rows;
+          state.tilesets.push({
+            id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+            name: file.name,
+            firstGid: state.nextGid,
+            count,
+            cols,
+            tileSize,
+            dataUrl: reader.result,
+            image
+          });
+          state.nextGid += count;
+          state.tilesetCols = cols;
+          syncInputs();
+          renderAll();
+          setStatus(`已追加 ${file.name}`);
+        };
+        reader.readAsDataURL(file);
+      });
+      event.target.value = "";
+    });
+    document.getElementById("saveBtn").addEventListener("click", () => {
+      downloadJson("tilemap_project.json", projectJson());
+      setStatus("项目已保存");
+    });
+    document.getElementById("exportBtn").addEventListener("click", () => {
+      downloadJson("tilemap_engine_package.json", enginePackageJson());
+      setStatus("引擎包已导出，包含 TileMap 和源 tileset 图片");
+    });
+    document.getElementById("loadBtn").addEventListener("click", () => document.getElementById("loadFile").click());
+    document.getElementById("loadFile").addEventListener("change", event => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        await loadProject(JSON.parse(reader.result));
+        setStatus(`已读取 ${file.name}`);
+      };
+      reader.readAsText(file);
+      event.target.value = "";
+    });
+    document.getElementById("copyJsonBtn").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(jsonBox.value);
+        setStatus("JSON 已复制");
+      } catch {
+        jsonBox.focus();
+        jsonBox.select();
+        setStatus("已选中 JSON 文本");
+      }
+    });
+    document.getElementById("importJsonBtn").addEventListener("click", async () => {
+      await loadProject(JSON.parse(jsonBox.value));
+      setStatus("已从文本读取");
+    });
+
+    let painting = false;
+    canvas.addEventListener("pointerdown", event => {
+      painting = true;
+      canvas.setPointerCapture(event.pointerId);
+      paintFromEvent(event);
+    });
+    canvas.addEventListener("pointermove", event => { if (painting) paintFromEvent(event); });
+    canvas.addEventListener("pointerup", () => { painting = false; });
+    canvas.addEventListener("pointercancel", () => { painting = false; });
+
+    resetLayers();
+    syncInputs();
+    renderAll();
+  </script>
+</body>
+</html>

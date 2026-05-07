@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "../../backend/shared/ResourceHandle.h"
 #include "../../core/math/Rect.h"
@@ -52,35 +53,59 @@ struct Transform {
 };
 
 struct TileMap {
-    int           width    = 0;    // tile 列数
-    int           height   = 0;    // tile 行数
-    int           tileSize = 16;   // 每个 tile 的像素大小
-    int           tilesetCols = 1; // tileset 横向有多少列
-    uint32_t      collisionLayerMask = 0; // bit N=layers[N] 中非空 tile 参与静态碰撞
-    TextureHandle tileset;
+    struct Tileset {
+        TextureHandle texture;
+        int firstGid = 0;      // 全局 tile id 起点
+        int count    = 0;      // tile 数量
+        int columns  = 1;      // tileset 横向 tile 数
+        std::vector<uint8_t> collision; // 每格碰撞属性，0=空，非0=实心
+    };
 
-    // layers[0]=地面 [1]=物体 [2]=顶层遮挡，-1 表示空 tile
-    static constexpr int MAX_LAYERS = 3;
-    std::vector<int> layers[MAX_LAYERS];
+    struct Layer {
+        std::string name;
+        std::vector<int> tiles; // 全局 tile id，-1 表示空
+        bool visible = true;
+        int renderLayer = 0;
+    };
+
+    int width    = 0;  // tile 列数
+    int height   = 0;  // tile 行数
+    int tileSize = 16; // 每个 tile 的像素大小
+    std::vector<Tileset> tilesets;
+    std::vector<Layer>   layers;
 
     int tileAt(int layer, int x, int y) const {
-        if (layer < 0 || layer >= MAX_LAYERS) return -1;
+        if (layer < 0 || layer >= static_cast<int>(layers.size())) return -1;
         if (x < 0 || x >= width || y < 0 || y >= height) return -1;
         size_t idx = static_cast<size_t>(y) * width + x;
-        if (idx >= layers[layer].size()) return -1;
-        return layers[layer][idx];
+        if (idx >= layers[layer].tiles.size()) return -1;
+        return layers[layer].tiles[idx];
     }
 
-    bool collisionLayerEnabled(int layer) const {
-        if (layer < 0 || layer >= MAX_LAYERS) return false;
-        return (collisionLayerMask & (1u << static_cast<uint32_t>(layer))) != 0;
+    const Tileset* tilesetForGid(int gid) const {
+        for (const auto& ts : tilesets) {
+            if (gid >= ts.firstGid && gid < ts.firstGid + ts.count) return &ts;
+        }
+        return nullptr;
+    }
+
+    int localTileId(int gid) const {
+        const Tileset* ts = tilesetForGid(gid);
+        return ts ? gid - ts->firstGid : -1;
+    }
+
+    bool tileSolid(int gid) const {
+        const Tileset* ts = tilesetForGid(gid);
+        if (!ts) return false;
+        const int local = gid - ts->firstGid;
+        if (local < 0 || local >= static_cast<int>(ts->collision.size())) return false;
+        return ts->collision[static_cast<size_t>(local)] != 0;
     }
 
     bool solidTileAt(int x, int y) const {
-        for (int layer = 0; layer < MAX_LAYERS; ++layer) {
-            if (collisionLayerEnabled(layer) && tileAt(layer, x, y) >= 0) {
-                return true;
-            }
+        for (int layer = 0; layer < static_cast<int>(layers.size()); ++layer) {
+            if (!layers[layer].visible) continue;
+            if (tileSolid(tileAt(layer, x, y))) return true;
         }
         return false;
     }

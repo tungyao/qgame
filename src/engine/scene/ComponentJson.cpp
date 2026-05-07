@@ -93,34 +93,62 @@ static Json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
     j["w"]    = tm.width;
     j["h"]    = tm.height;
     j["ts"]   = tm.tileSize;
-    j["cols"] = tm.tilesetCols;
-    j["collisionLayerMask"] = tm.collisionLayerMask;
-    if (const std::string& id = mgr.textureAssetId(tm.tileset); !id.empty()) {
-        j["assetId"] = id;
+    j["tilesets"] = Json::array();
+    for (const auto& ts : tm.tilesets) {
+        Json tj;
+        tj["firstGid"] = ts.firstGid;
+        tj["count"]    = ts.count;
+        tj["cols"]     = ts.columns;
+        tj["collision"] = ts.collision;
+        if (const std::string& id = mgr.textureAssetId(ts.texture); !id.empty()) {
+            tj["assetId"] = id;
+        }
+        tj["tex"] = mgr.texturePath(ts.texture);
+        j["tilesets"].push_back(tj);
     }
-    j["tex"]  = mgr.texturePath(tm.tileset);
-    for (int l = 0; l < TileMap::MAX_LAYERS; ++l) {
-        j["layers"][l] = tm.layers[l];
+    j["layers"] = Json::array();
+    for (const auto& layer : tm.layers) {
+        Json lj;
+        lj["name"] = layer.name;
+        lj["visible"] = layer.visible;
+        lj["renderLayer"] = layer.renderLayer;
+        lj["tiles"] = layer.tiles;
+        j["layers"].push_back(lj);
     }
     return j;
 }
 
 static TileMap tilemapFromJson(const Json& j, AssetManager& mgr) {
     TileMap tm;
-    tm.width       = j.value("w",    0);
-    tm.height      = j.value("h",    0);
-    tm.tileSize    = j.value("ts",   16);
-    tm.tilesetCols = j.value("cols", 1);
-    tm.collisionLayerMask = j.value("collisionLayerMask", 0u);
-    const std::string texId = j.value("assetId", "");
-    const std::string texPath = j.value("tex", "");
-    if (!texId.empty()) tm.tileset = mgr.loadTextureById(texId);
-    if (!tm.tileset.valid() && !texPath.empty()) tm.tileset = mgr.loadTexture(texPath);
-    if (j.contains("layers")) {
-        for (int l = 0; l < TileMap::MAX_LAYERS; ++l) {
-            if (l < static_cast<int>(j["layers"].size())) {
-                tm.layers[l] = j["layers"][l].get<std::vector<int>>();
+    tm.width    = j.value("w",  0);
+    tm.height   = j.value("h",  0);
+    tm.tileSize = j.value("ts", 16);
+    if (j.contains("tilesets")) {
+        for (const auto& tj : j["tilesets"]) {
+            TileMap::Tileset ts;
+            ts.firstGid = tj.value("firstGid", 0);
+            ts.count    = tj.value("count", 0);
+            ts.columns  = tj.value("cols", 1);
+            if (tj.contains("collision")) {
+                ts.collision = tj["collision"].get<std::vector<uint8_t>>();
             }
+            const std::string texId = tj.value("assetId", "");
+            const std::string texPath = tj.value("tex", "");
+            if (!texId.empty()) ts.texture = mgr.loadTextureById(texId);
+            if (!ts.texture.valid() && !texPath.empty()) ts.texture = mgr.loadTexture(texPath);
+            tm.tilesets.push_back(std::move(ts));
+        }
+    }
+    if (j.contains("layers")) {
+        for (const auto& lj : j["layers"]) {
+            TileMap::Layer layer;
+            layer.name = lj.value("name", "");
+            layer.visible = lj.value("visible", true);
+            layer.renderLayer = lj.value("renderLayer", static_cast<int>(tm.layers.size()));
+            if (lj.contains("tiles")) {
+                layer.tiles = lj["tiles"].get<std::vector<int>>();
+            }
+            tm.layers.push_back(std::move(layer));
         }
     }
     return tm;

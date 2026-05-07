@@ -237,9 +237,9 @@ void PhysicsSystem::resolveCollisions() {
 /**
  * TileMap 静态碰撞 - 只检查动态刚体当前 AABB 覆盖到的 tile 范围。
  *
- * TileMap::collisionLayerMask 决定哪些渲染层参与碰撞；这些层里非空 tile
- * 会被视为 COLLISION_LAYER_STATIC 的实心 AABB。该路径适合星露谷式俯视地图：
- * 墙、树、建筑、栅栏等静态阻挡物直接由 tile 数据驱动。
+ * TileMap::Tileset::collision 决定每个 tile gid 是否参与碰撞。任意可见
+ * 图层在同一格放置了实心 tile，该格就会被视为 COLLISION_LAYER_STATIC
+ * 的实心 AABB。
  */
 void PhysicsSystem::resolveTileCollisions() {
     auto tilemaps = world_.view<Transform, TileMap>();
@@ -258,7 +258,7 @@ void PhysicsSystem::resolveTileCollisions() {
 
         for (auto [mapEntity, mapTf, tmap] : tilemaps.each()) {
             if (tmap.tileSize <= 0 || tmap.width <= 0 || tmap.height <= 0 ||
-                tmap.collisionLayerMask == 0) {
+                tmap.tilesets.empty() || tmap.layers.empty()) {
                 continue;
             }
 

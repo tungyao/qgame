@@ -917,12 +917,26 @@ int main(int argc, char* argv[]) {
 		api.addComponent(e, engine::Transform{ 0.f, 400.f });
 		engine::TileMap tmap{};
 		tmap.width = 20; tmap.height = 5; tmap.tileSize = 32;
-		tmap.tileset = tilesetTex;
+		engine::TileMap::Tileset ts{};
+		ts.texture = tilesetTex;
+		ts.firstGid = 0;
+		ts.count = 8;
+		ts.columns = 8;
+		ts.collision.resize(8, 0);
+		tmap.tilesets.push_back(ts);
+		engine::TileMap::Layer ground{};
+		ground.name = "ground";
+		ground.renderLayer = 0;
 		for (int y = 0; y < 5; ++y)
 			for (int x = 0; x < 20; ++x)
-				tmap.layers[0].push_back((x + y) % 8);
-		tmap.layers[1].resize(100, -1);
-		tmap.layers[1][2] = 4; tmap.layers[1][12] = 5;
+				ground.tiles.push_back((x + y) % 8);
+		engine::TileMap::Layer objects{};
+		objects.name = "objects";
+		objects.renderLayer = 1;
+		objects.tiles.resize(100, -1);
+		objects.tiles[2] = 4; objects.tiles[12] = 5;
+		tmap.layers.push_back(ground);
+		tmap.layers.push_back(objects);
 		api.addComponent(e, tmap);
 	}
 

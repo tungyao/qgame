@@ -491,25 +491,29 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
     auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
         if (tmap.tileSize <= 0) continue;
-        for (int layer = 0; layer < TileMap::MAX_LAYERS; ++layer) {
+        for (int layer = 0; layer < static_cast<int>(tmap.layers.size()); ++layer) {
+            const auto& tileLayer = tmap.layers[static_cast<size_t>(layer)];
+            if (!tileLayer.visible) continue;
             for (int y = 0; y < tmap.height; ++y) {
                 for (int x = 0; x < tmap.width; ++x) {
-                    int tileId = tmap.tileAt(layer, x, y);
-                    if (tileId < 0) continue;
+                    int gid = tmap.tileAt(layer, x, y);
+                    const TileMap::Tileset* tileset = tmap.tilesetForGid(gid);
+                    int tileId = tmap.localTileId(gid);
+                    if (!tileset || !tileset->texture.valid() || tileId < 0) continue;
                     Drawable d{};
                     d.pass    = RenderPass::World;
-                    d.layer   = layer;
+                    d.layer   = tileLayer.renderLayer;
                     d.ySort   = true;
                     d.y       = tf.y + static_cast<float>(y * tmap.tileSize);
                     d.sortKey = 0;
                     d.seq     = seq++;
                     d.kind    = DrawKind::Tile;
-                    d.tile.tileset  = tmap.tileset;
+                    d.tile.tileset  = tileset->texture;
                     d.tile.tileId   = tileId;
                     d.tile.gridX    = static_cast<int>(tf.x) + x;
                     d.tile.gridY    = static_cast<int>(tf.y) + y;
                     d.tile.tileSize = tmap.tileSize;
-                    d.tile.layer    = layer;
+                    d.tile.layer    = tileLayer.renderLayer;
                     d.tile.sortKey  = 0;
                     d.tile.ySort    = true;
                     d.tile.pass     = RenderPass::World;
@@ -793,25 +797,29 @@ void RenderSystem::buildCommandBufferGPUDriven() {
     auto tileView = ctx_.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
         if (tmap.tileSize <= 0) continue;
-        for (int layer = 0; layer < TileMap::MAX_LAYERS; ++layer) {
+        for (int layer = 0; layer < static_cast<int>(tmap.layers.size()); ++layer) {
+            const auto& tileLayer = tmap.layers[static_cast<size_t>(layer)];
+            if (!tileLayer.visible) continue;
             for (int y = 0; y < tmap.height; ++y) {
                 for (int x = 0; x < tmap.width; ++x) {
-                    int tileId = tmap.tileAt(layer, x, y);
-                    if (tileId < 0) continue;
+                    int gid = tmap.tileAt(layer, x, y);
+                    const TileMap::Tileset* tileset = tmap.tilesetForGid(gid);
+                    int tileId = tmap.localTileId(gid);
+                    if (!tileset || !tileset->texture.valid() || tileId < 0) continue;
                     Drawable d{};
                     d.pass    = RenderPass::World;
-                    d.layer   = layer;
+                    d.layer   = tileLayer.renderLayer;
                     d.ySort   = true;
                     d.y       = tf.y + static_cast<float>(y * tmap.tileSize);
                     d.sortKey = 0;
                     d.seq     = seq++;
                     d.kind    = DrawKind::Tile;
-                    d.tile.tileset  = tmap.tileset;
+                    d.tile.tileset  = tileset->texture;
                     d.tile.tileId   = tileId;
                     d.tile.gridX    = static_cast<int>(tf.x) + x;
                     d.tile.gridY    = static_cast<int>(tf.y) + y;
                     d.tile.tileSize = tmap.tileSize;
-                    d.tile.layer    = layer;
+                    d.tile.layer    = tileLayer.renderLayer;
                     d.tile.sortKey  = 0;
                     d.tile.ySort    = true;
                     d.tile.pass     = RenderPass::World;
