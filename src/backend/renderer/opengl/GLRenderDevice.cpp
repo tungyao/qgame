@@ -1519,11 +1519,17 @@ void GLRenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo& inf
     // shader; instead it preserves the existing correctness fallback while
     // reporting graph-shaped stats. This keeps RenderSystem able to call one
     // interface across backends and makes the SDL GPU graph migration isolated.
-    frameStats_.renderGraphPassCount += 3;
+    frameStats_.renderGraphPassCount += info.uiCommands.empty() ? 3u : 4u;
     submitPass(info.worldPass, info.worldCommands);
     frameStats_.worldColorPassCount++;
     submitLighting2DPass(info.worldPass, info.lighting);
     frameStats_.lightingCompositeCount++;
+    if (!info.uiCommands.empty()) {
+        PassSubmitInfo uiPass = info.worldPass;
+        uiPass.clearEnabled = false;
+        submitPass(uiPass, info.uiCommands);
+        frameStats_.uiPassCount++;
+    }
 }
 
 } // namespace backend

@@ -100,6 +100,8 @@ private:
     bool ensureLighting2DResources(uint32_t viewportW, uint32_t viewportH,
                                    uint32_t lightCount, uint32_t segmentCount,
                                    uint32_t reflectorCount);
+    bool runLighting2DComputePass(const CameraData& cam, const Lighting2DParams& params);
+    bool submitRadialLightingFallback(const CameraData& cam, const Lighting2DParams& params);
     TextureHandle createStorageTexture(int width, int height);
     SDL_GPUGraphicsPipeline* createPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);

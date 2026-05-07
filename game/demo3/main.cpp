@@ -454,7 +454,7 @@ int main(int argc, char** argv) {
         const backend::RenderFrameStats& stats = ctx.renderDevice().frameStats();
         char buf[512];
         std::snprintf(buf, sizeof(buf),
-                      "preset=%s | backend=%s | compute=%d storageBuffer=%d storageTexture=%d lighting2D=%d submit=%u graph=%u world=%u composite=%u dispatch=%u | lights=%u occluders=%u reflectors=%u env=%u",
+                      "preset=%s | backend=%s | compute=%d storageBuffer=%d storageTexture=%d lighting2D=%d submit=%u graph=%u world=%u composite=%u ui=%u dispatch=%u | lights=%u occluders=%u reflectors=%u env=%u",
                       presetName(preset),
                       caps.backendName,
                       caps.supportsCompute ? 1 : 0,
@@ -465,6 +465,7 @@ int main(int argc, char** argv) {
                       stats.renderGraphPassCount,
                       stats.worldColorPassCount,
                       stats.lightingCompositeCount,
+                      stats.uiPassCount,
                       stats.computeDispatchCount,
                       stats.light2DCount,
                       stats.occluder2DCount,

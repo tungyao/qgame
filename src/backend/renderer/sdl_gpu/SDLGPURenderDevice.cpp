@@ -2380,95 +2380,89 @@ void SDLGPURenderDevice::submitGPUDrivenPassToTarget(const PassSubmitInfo& info,
     SDL_EndGPURenderPass(pass);
 }
 
-void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
-                                              const Lighting2DParams& params) {
-    if (!gpuCmdBuf_ || !swapchainTex_) return;
-    if (!params.enabled || params.lights.empty()) return;
+bool SDLGPURenderDevice::submitRadialLightingFallback(const CameraData& cam,
+                                                      const Lighting2DParams& params) {
+    if (!gpuCmdBuf_ || !swapchainTex_) return false;
+    if (!textures_.valid(lighting2DRadialTexture_)) return false;
 
-    CameraData cam = params.camera;
-    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(params.viewportW ? params.viewportW : swapW_);
-    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(params.viewportH ? params.viewportH : swapH_);
-    if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
-    frameStats_.lighting2DSubmitCount++;
+    const TextureEntry& radial = textures_.get(lighting2DRadialTexture_);
+    static std::vector<RenderCmd> lightCmds;
+    static std::vector<const RenderCmd*> lightPtrs;
+    lightCmds.clear();
+    lightPtrs.clear();
+    lightCmds.reserve(params.lights.size() + 1u);
+    lightPtrs.reserve(params.lights.size() + 1u);
 
-    auto submitRadialLightComposite = [&]() {
-        if (!textures_.valid(lighting2DRadialTexture_)) return;
+    if (textures_.valid(lighting2DWhiteTexture_)) {
+        const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+        const float visibleWorldW = static_cast<float>(cam.viewportW) / zoom;
+        const float visibleWorldH = static_cast<float>(cam.viewportH) / zoom;
+        const float darkness = std::min(0.58f,
+                                        std::max(0.18f, 0.54f - params.ambientIntensity * 0.35f));
 
-        const TextureEntry& radial = textures_.get(lighting2DRadialTexture_);
-        static std::vector<RenderCmd> lightCmds;
-        static std::vector<const RenderCmd*> lightPtrs;
-        lightCmds.clear();
-        lightPtrs.clear();
-        lightCmds.reserve(params.lights.size() + 1u);
-        lightPtrs.reserve(params.lights.size() + 1u);
-
-        if (textures_.valid(lighting2DWhiteTexture_)) {
-            const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
-            const float visibleWorldW = static_cast<float>(cam.viewportW) / zoom;
-            const float visibleWorldH = static_cast<float>(cam.viewportH) / zoom;
-            const float darkness = std::min(0.58f,
-                                            std::max(0.18f, 0.54f - params.ambientIntensity * 0.35f));
-
-            DrawSpriteCmd ambient{};
-            ambient.texture = lighting2DWhiteTexture_;
-            ambient.x = cam.x;
-            ambient.y = cam.y;
-            ambient.scaleX = visibleWorldW;
-            ambient.scaleY = visibleWorldH;
-            ambient.pivotX = 0.5f;
-            ambient.pivotY = 0.5f;
-            ambient.srcRect = core::Rect{0.f, 0.f, 1.f, 1.f};
-            ambient.layer = 9998;
-            ambient.pass = engine::RenderPass::World;
-            ambient.tint = core::Color{0, 0, 0,
-                static_cast<uint8_t>(std::min(255.f, darkness * 255.f + 0.5f))};
-            lightCmds.push_back(ambient);
-        }
-
-        for (const Light2DPoint& light : params.lights) {
-            if (light.radius <= 0.f || light.intensity <= 0.f) continue;
-            if ((light.layerMask & engine::renderPassBit(engine::RenderPass::World)) == 0u) continue;
-
-            const float alpha01 = std::min(0.82f,
-                                           std::max(0.06f, 0.10f + light.intensity * 0.18f)) *
-                                  std::max(0.f, std::min(1.f, light.colorA));
-            if (alpha01 <= 0.001f) continue;
-
-            DrawSpriteCmd cmd{};
-            cmd.texture = lighting2DRadialTexture_;
-            cmd.x = light.x;
-            cmd.y = light.y;
-            cmd.scaleX = (light.radius * 2.f) / static_cast<float>(radial.width);
-            cmd.scaleY = (light.radius * 2.f) / static_cast<float>(radial.height);
-            cmd.pivotX = 0.5f;
-            cmd.pivotY = 0.5f;
-            cmd.srcRect = core::Rect{0.f, 0.f,
-                                     static_cast<float>(radial.width),
-                                     static_cast<float>(radial.height)};
-            cmd.layer = 9999;
-            cmd.pass = engine::RenderPass::World;
-            cmd.tint = core::Color{
-                static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorR * 255.f + 0.5f))),
-                static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorG * 255.f + 0.5f))),
-                static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorB * 255.f + 0.5f))),
-                static_cast<uint8_t>(std::min(255.f, std::max(0.f, alpha01 * 255.f + 0.5f)))
-            };
-
-            lightCmds.push_back(cmd);
-        }
-
-        if (lightCmds.empty()) return;
-        for (const RenderCmd& cmd : lightCmds) {
-            lightPtrs.push_back(&cmd);
-        }
-        renderCmdsToTarget(gpuCmdBuf_, pipeline_, lightPtrs, cam, false, core::Color::Black,
-                           swapchainTex_, swapW_, swapH_);
-    };
-
-    if (!capabilities_.supportsStorageTexture) {
-        submitRadialLightComposite();
-        return;
+        DrawSpriteCmd ambient{};
+        ambient.texture = lighting2DWhiteTexture_;
+        ambient.x = cam.x;
+        ambient.y = cam.y;
+        ambient.scaleX = visibleWorldW;
+        ambient.scaleY = visibleWorldH;
+        ambient.pivotX = 0.5f;
+        ambient.pivotY = 0.5f;
+        ambient.srcRect = core::Rect{0.f, 0.f, 1.f, 1.f};
+        ambient.layer = 9998;
+        ambient.pass = engine::RenderPass::World;
+        ambient.tint = core::Color{0, 0, 0,
+            static_cast<uint8_t>(std::min(255.f, darkness * 255.f + 0.5f))};
+        lightCmds.push_back(ambient);
     }
+
+    for (const Light2DPoint& light : params.lights) {
+        if (light.radius <= 0.f || light.intensity <= 0.f) continue;
+        if ((light.layerMask & engine::renderPassBit(engine::RenderPass::World)) == 0u) continue;
+
+        const float alpha01 = std::min(0.82f,
+                                       std::max(0.06f, 0.10f + light.intensity * 0.18f)) *
+                              std::max(0.f, std::min(1.f, light.colorA));
+        if (alpha01 <= 0.001f) continue;
+
+        DrawSpriteCmd cmd{};
+        cmd.texture = lighting2DRadialTexture_;
+        cmd.x = light.x;
+        cmd.y = light.y;
+        cmd.scaleX = (light.radius * 2.f) / static_cast<float>(radial.width);
+        cmd.scaleY = (light.radius * 2.f) / static_cast<float>(radial.height);
+        cmd.pivotX = 0.5f;
+        cmd.pivotY = 0.5f;
+        cmd.srcRect = core::Rect{0.f, 0.f,
+                                 static_cast<float>(radial.width),
+                                 static_cast<float>(radial.height)};
+        cmd.layer = 9999;
+        cmd.pass = engine::RenderPass::World;
+        cmd.tint = core::Color{
+            static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorR * 255.f + 0.5f))),
+            static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorG * 255.f + 0.5f))),
+            static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorB * 255.f + 0.5f))),
+            static_cast<uint8_t>(std::min(255.f, std::max(0.f, alpha01 * 255.f + 0.5f)))
+        };
+
+        lightCmds.push_back(cmd);
+    }
+
+    if (lightCmds.empty()) return false;
+    for (const RenderCmd& cmd : lightCmds) {
+        lightPtrs.push_back(&cmd);
+    }
+    renderCmdsToTarget(gpuCmdBuf_, pipeline_, lightPtrs, cam, false, core::Color::Black,
+                       swapchainTex_, swapW_, swapH_);
+    return true;
+}
+
+bool SDLGPURenderDevice::runLighting2DComputePass(const CameraData& cam,
+                                                  const Lighting2DParams& params) {
+    if (!gpuCmdBuf_) return false;
+    if (!params.enabled || params.lights.empty()) return false;
+    if (cam.viewportW <= 0 || cam.viewportH <= 0) return false;
+    if (!capabilities_.supportsStorageTexture) return false;
 
     // L3 uploads all lights and all expanded occluder segments. The expensive
     // per-pixel loop no longer scans every light: a short compute pass first
@@ -2481,7 +2475,7 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
                                    lightCount,
                                    std::max(1u, segmentCount),
                                    std::max(1u, reflectorCount))) {
-        return;
+        return false;
     }
 
     uploadToBuffer(lighting2DLightBuffer_, params.lights.data(),
@@ -2501,16 +2495,16 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         uploadToBuffer(lighting2DReflectorBuffer_, &dummy, sizeof(dummy), 0);
     }
 
-    if (!computePipelines_.valid(lighting2DComputePipeline_)) return;
-    if (!computePipelines_.valid(lighting2DCullPipeline_)) return;
-    if (!computePipelines_.valid(lighting2DBlurPipeline_)) return;
-    if (!textures_.valid(lighting2DTexture_)) return;
-    if (!textures_.valid(lighting2DBlurTexture_)) return;
-    if (!buffers_.valid(lighting2DLightBuffer_)) return;
-    if (!buffers_.valid(lighting2DSegmentBuffer_)) return;
-    if (!buffers_.valid(lighting2DReflectorBuffer_)) return;
-    if (!buffers_.valid(lighting2DTileRangeBuffer_)) return;
-    if (!buffers_.valid(lighting2DTileIndexBuffer_)) return;
+    if (!computePipelines_.valid(lighting2DComputePipeline_)) return false;
+    if (!computePipelines_.valid(lighting2DCullPipeline_)) return false;
+    if (!computePipelines_.valid(lighting2DBlurPipeline_)) return false;
+    if (!textures_.valid(lighting2DTexture_)) return false;
+    if (!textures_.valid(lighting2DBlurTexture_)) return false;
+    if (!buffers_.valid(lighting2DLightBuffer_)) return false;
+    if (!buffers_.valid(lighting2DSegmentBuffer_)) return false;
+    if (!buffers_.valid(lighting2DReflectorBuffer_)) return false;
+    if (!buffers_.valid(lighting2DTileRangeBuffer_)) return false;
+    if (!buffers_.valid(lighting2DTileIndexBuffer_)) return false;
 
     ComputePipelineEntry& compute = computePipelines_.get(lighting2DComputePipeline_);
     ComputePipelineEntry& cullCompute = computePipelines_.get(lighting2DCullPipeline_);
@@ -2606,8 +2600,8 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     SDL_GPUComputePass* cullPass = SDL_BeginGPUComputePass(gpuCmdBuf_, nullptr, 0,
                                                            cullRwBuffers, 2);
     if (!cullPass) {
-        core::logError("submitLighting2DPass: SDL_BeginGPUComputePass(cull) failed: %s", SDL_GetError());
-        return;
+        core::logError("runLighting2DComputePass: SDL_BeginGPUComputePass(cull) failed: %s", SDL_GetError());
+        return false;
     }
 
     // One shader invocation owns one tile, so the list for that tile is written
@@ -2629,8 +2623,8 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
 
     SDL_GPUComputePass* computePass = SDL_BeginGPUComputePass(gpuCmdBuf_, &rwTexture, 1, nullptr, 0);
     if (!computePass) {
-        core::logError("submitLighting2DPass: SDL_BeginGPUComputePass failed: %s", SDL_GetError());
-        return;
+        core::logError("runLighting2DComputePass: SDL_BeginGPUComputePass failed: %s", SDL_GetError());
+        return false;
     }
 
     SDL_BindGPUComputePipeline(computePass, compute.pipeline);
@@ -2680,7 +2674,7 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         SDL_GPUComputePass* blurPass =
             SDL_BeginGPUComputePass(gpuCmdBuf_, &blurWrite, 1, nullptr, 0);
         if (!blurPass) {
-            core::logError("submitLighting2DPass: SDL_BeginGPUComputePass(blur) failed: %s",
+            core::logError("runLighting2DComputePass: SDL_BeginGPUComputePass(blur) failed: %s",
                            SDL_GetError());
             return false;
         }
@@ -2699,9 +2693,29 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
         return true;
     };
 
-    if (!dispatchBlur(lightingTex.gpuTex, blurTex.gpuTex, 1, 0)) return;
-    if (!dispatchBlur(blurTex.gpuTex, lightingTex.gpuTex, 0, 1)) return;
+    if (!dispatchBlur(lightingTex.gpuTex, blurTex.gpuTex, 1, 0)) return false;
+    if (!dispatchBlur(blurTex.gpuTex, lightingTex.gpuTex, 0, 1)) return false;
     lighting2DFrameIndex_++;
+    return true;
+}
+
+void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
+                                              const Lighting2DParams& params) {
+    if (!gpuCmdBuf_ || !swapchainTex_) return;
+    if (!params.enabled || params.lights.empty()) return;
+
+    CameraData cam = params.camera;
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(params.viewportW ? params.viewportW : swapW_);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(params.viewportH ? params.viewportH : swapH_);
+    if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
+    frameStats_.lighting2DSubmitCount++;
+
+    const bool computed = runLighting2DComputePass(cam, params);
+    if (!computed) {
+        frameStats_.fallbackReason = "lighting compute unavailable";
+        submitRadialLightingFallback(cam, params);
+        return;
+    }
 
     // Composite: draw the compute-produced dynamic-light/shadow overlay over
     // the world. This is not the final lighting model, but it proves the chain:
@@ -2730,12 +2744,13 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     const RenderCmd* overlayPtr = &overlayCmd;
     std::vector<const RenderCmd*> cmds{ overlayPtr };
 
-    PassSubmitInfo overlayInfo = info;
-    overlayInfo.camera = cam;
-    overlayInfo.clearEnabled = false;
     renderCmdsToTarget(gpuCmdBuf_, pipeline_, cmds, cam, false, core::Color::Black,
                        swapchainTex_, swapW_, swapH_);
-    submitRadialLightComposite();
+    // Legacy compatibility: the old entry point still overlays the lighting
+    // texture on the swapchain, then adds the simple radial fallback. The graph
+    // path below deliberately does not call this function, so WorldColor
+    // composite is the only swapchain writer there.
+    submitRadialLightingFallback(cam, params);
 }
 
 void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo& info) {
@@ -2770,6 +2785,11 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
                    {{worldColor, RenderGraphAccess::ReadSampled},
                     {lighting, RenderGraphAccess::ReadSampled}},
                    {{swapchain, RenderGraphAccess::WriteColor}}});
+    if (!info.uiCommands.empty()) {
+        graph.addPass({"UIPass",
+                       {{swapchain, RenderGraphAccess::ReadSampled}},
+                       {{swapchain, RenderGraphAccess::WriteColor}}});
+    }
     frameStats_.renderGraphPassCount += static_cast<uint32_t>(graph.passes().size());
 
     // Pass 1: render the world into an offscreen color target. This is the key
@@ -2793,7 +2813,7 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
         // path instead of dropping the frame. The stats make this visible.
         frameStats_.fallbackReason = "world color target unavailable";
         submitPass(info.worldPass, info.worldCommands);
-        submitLighting2DPass(info.worldPass, info.lighting);
+        submitRadialLightingFallback(cam, info.lighting);
         return;
     }
 
@@ -2829,11 +2849,40 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
     }
     frameStats_.worldColorPassCount++;
 
-    // Pass 2: run the existing lighting compute path. It still contains the old
-    // swapchain overlay for compatibility; the composite pass below clears and
-    // overwrites the swapchain, so the graph output is determined by
-    // WorldColor+LightingTexture rather than overlay blending.
-    submitLighting2DPass(info.worldPass, info.lighting);
+    // Pass 2: produce LightingTexture only. This is the important split from
+    // the legacy submitLighting2DPass() path: graph execution must not touch the
+    // swapchain until LightingCompositePass, otherwise camera/frame graph work
+    // would inherit the old overlay side effect.
+    frameStats_.lighting2DSubmitCount++;
+    if (!runLighting2DComputePass(cam, info.lighting)) {
+        frameStats_.fallbackReason = "lighting compute unavailable";
+        if (info.hasGPUWorld) {
+            GPURenderParams gpuWorld = info.gpuWorld;
+            gpuWorld.camera = cam;
+            submitGPUDrivenPass(info.worldPass, gpuWorld);
+        } else {
+            submitPass(info.worldPass, info.worldCommands);
+        }
+        if (info.hasGPUWorld && !info.worldCommands.empty()) {
+            renderCmdsToTarget(gpuCmdBuf_, pipeline_, info.worldCommands, cam,
+                               false, core::Color::Black,
+                               swapchainTex_, swapW_, swapH_);
+        }
+        for (const GPUParticleParams& particleParams : info.particles) {
+            GPUParticleParams particle = particleParams;
+            particle.camera = cam;
+            particle.clearEnabled = false;
+            submitGPUParticlePass(info.worldPass, particle);
+        }
+        submitRadialLightingFallback(cam, info.lighting);
+        if (!info.uiCommands.empty()) {
+            renderCmdsToTarget(gpuCmdBuf_, pipeline_, info.uiCommands, cam,
+                               false, core::Color::Black,
+                               swapchainTex_, swapW_, swapH_);
+            frameStats_.uiPassCount++;
+        }
+        return;
+    }
     if (!lightingCompositePipeline_ ||
         !textures_.valid(lighting2DTexture_) ||
         !textures_.valid(worldColorTarget_)) {
@@ -2939,6 +2988,18 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
 
     frameStats_.drawCallCount++;
     frameStats_.lightingCompositeCount++;
+
+    // Pass 4: UI/Text/Screen commands are explicitly part of the graph now.
+    // They still reuse the normal CPU batch renderer because UI correctness is
+    // more important than throughput here, but their ordering is no longer an
+    // implicit RenderSystem side-effect: they are declared as UIPass and always
+    // run after world lighting composite.
+    if (!info.uiCommands.empty()) {
+        renderCmdsToTarget(gpuCmdBuf_, pipeline_, info.uiCommands, cam,
+                           false, core::Color::Black,
+                           swapchainTex_, swapW_, swapH_);
+        frameStats_.uiPassCount++;
+    }
 }
 
 void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,

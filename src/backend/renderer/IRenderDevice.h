@@ -81,6 +81,7 @@ struct RenderFrameStats {
     uint32_t renderGraphPassCount = 0;
     uint32_t worldColorPassCount = 0;
     uint32_t lightingCompositeCount = 0;
+    uint32_t uiPassCount = 0;
 
     // Phase L0/L1 lighting counters. These do not imply that lighting is
     // rendered yet; they prove the ECS data path is visible to RenderSystem and
@@ -216,6 +217,11 @@ public:
         uint32_t     spriteCount  = 0;
         uint32_t     visibleCount = 0;
         std::vector<GPUDrawBatch> batches;
+        // Optional per-camera visible index payload for frame graph execution.
+        // The legacy immediate path may upload the shared visibleIndexBuffer
+        // before submit, but a deferred frame graph needs the upload tied to
+        // the camera node so later cameras do not overwrite the same buffer.
+        std::vector<uint32_t> ownedVisibleIndices;
         CameraData camera;
         bool clearEnabled = true;
         core::Color clearColor = core::Color::Black;
@@ -303,10 +309,83 @@ public:
         GPURenderParams gpuWorld;
         std::vector<const RenderCmd*> worldCommands;
         std::vector<GPUParticleParams> particles;
+        std::vector<const RenderCmd*> uiCommands;
         Lighting2DParams lighting;
     };
 
     virtual void submitWorldLightingGraph(const WorldLightingSubmitInfo& info) = 0;
+
+    enum class FrameGraphPassKind : uint8_t {
+        Raster,
+        GPUDriven,
+        WorldLighting,
+    };
+
+    // Frame-level graph bridge: RenderSystem collects all active cameras for a
+    // frame, sorts them by Camera::depth, and submits this ordered list once.
+    // The backend still executes each node explicitly today, but the camera
+    // boundary is now represented as data instead of hidden in RenderSystem's
+    // loop. This is the stepping stone toward a real scheduler with resource
+    // lifetime/barrier ownership.
+    struct FrameGraphCameraPass {
+        FrameGraphPassKind kind = FrameGraphPassKind::Raster;
+        const char* debugName = "CameraPass";
+        PassSubmitInfo pass;
+        std::vector<const RenderCmd*> commands;
+        std::vector<GPUParticleParams> particles;
+        GPURenderParams gpu;
+        WorldLightingSubmitInfo worldLighting;
+
+        // Optional storage for commands generated while building this frame
+        // graph node. Pointer vectors above may reference these elements; the
+        // frame graph is submitted immediately, so this avoids leaking
+        // RenderSystem-local temporaries into backend lifetime.
+        std::vector<RenderCmd> ownedCommands;
+    };
+
+    struct FrameGraphSubmitInfo {
+        std::vector<FrameGraphCameraPass> cameraPasses;
+    };
+
+    virtual void submitFrameGraph(const FrameGraphSubmitInfo& info) {
+        auto uploadOwnedVisibleIndices = [this](const GPURenderParams& gpu) {
+            if (!gpu.visibleIndexBuffer.valid() || gpu.ownedVisibleIndices.empty()) return;
+            uploadToBuffer(gpu.visibleIndexBuffer,
+                           gpu.ownedVisibleIndices.data(),
+                           gpu.ownedVisibleIndices.size() * sizeof(uint32_t),
+                           0);
+        };
+
+        for (const FrameGraphCameraPass& pass : info.cameraPasses) {
+            switch (pass.kind) {
+                case FrameGraphPassKind::WorldLighting:
+                    if (pass.worldLighting.hasGPUWorld) {
+                        uploadOwnedVisibleIndices(pass.worldLighting.gpuWorld);
+                    }
+                    submitWorldLightingGraph(pass.worldLighting);
+                    break;
+                case FrameGraphPassKind::GPUDriven:
+                    uploadOwnedVisibleIndices(pass.gpu);
+                    submitGPUDrivenPass(pass.pass, pass.gpu);
+                    for (const GPUParticleParams& particle : pass.particles) {
+                        submitGPUParticlePass({ pass.pass.camera, false, pass.pass.clearColor }, particle);
+                    }
+                    if (!pass.commands.empty()) {
+                        PassSubmitInfo overlay = pass.pass;
+                        overlay.clearEnabled = false;
+                        submitPass(overlay, pass.commands);
+                    }
+                    break;
+                case FrameGraphPassKind::Raster:
+                default:
+                    submitPass(pass.pass, pass.commands);
+                    for (const GPUParticleParams& particle : pass.particles) {
+                        submitGPUParticlePass({ pass.pass.camera, false, pass.pass.clearColor }, particle);
+                    }
+                    break;
+            }
+        }
+    }
 
     bool debug_ = false;
 };

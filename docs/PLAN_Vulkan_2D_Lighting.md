@@ -816,7 +816,27 @@ assets/manifest.json
 
 ---
 
-## 13. 决策记录
+## 13. 当前实现进度
+
+- `IRenderDevice::submitFrameGraph()` 已作为 frame-level camera graph 入口落地。
+- `RenderSystem` 在 CPU batch 和 GPU-driven 两条路径中都先收集本帧 active camera，按 `Camera::depth` 构建 `FrameGraphCameraPass`，最后一次性提交 frame graph。
+- frame graph 节点类型覆盖：
+  - `Raster`：普通 CPU batch camera pass。
+  - `GPUDriven`：GPU sprite pass + particle pass + CPU overlay/text/UI pass。
+  - `WorldLighting`：WorldColor + LightingTexture + LightingComposite + 可选 UI pass。
+- GPU-driven 路径的 per-camera visible index list 已放入 `GPURenderParams::ownedVisibleIndices`，由 `submitFrameGraph()` 在每个 camera 节点执行前上传，避免多个 camera 共用 visible index buffer 时互相覆盖。
+- SDL GPU graph 路径已拆开 lighting compute 与旧 swapchain overlay：`submitWorldLightingGraph()` 正常路径只运行 `runLighting2DComputePass()` 生成 `LightingTexture`，swapchain 写入集中在 `LightingCompositePass`。
+- OpenGL 仍是兼容实现：通过同一 frame graph 接口执行，但 `submitWorldLightingGraph()` 仍走现有 fallback 顺序。
+
+尚未完成：
+
+- RenderGraph 仍是 pass/resource 声明和统计层，尚未负责 barrier、资源生命周期、pass 重排。
+- UI camera 现在由 frame-level camera graph 按 depth 表达，但单个 `WorldLighting` 节点内部的 `uiCommands` 仍只适合同一 camera 内的 UI/Screen 命令。
+- 粒子 update/render 还未拆成 “每帧一次 update + 每 camera render”，多 camera 场景仍需后续收敛。
+
+---
+
+## 14. 决策记录
 
 - **不做额外贴图**：QGame 的 2D 光照主线基于几何和参数，不要求资产作者维护 normal/roughness/emission map。
 - **Vulkan 优先**：SPIR-V shader 和 Vulkan compute 是第一验证对象；其他 SDL GPU 后端是兼容目标，不是设计约束源头。

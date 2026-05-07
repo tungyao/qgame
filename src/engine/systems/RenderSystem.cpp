@@ -651,6 +651,9 @@ void RenderSystem::buildCommandBuffer() {
         return;
     }
 
+    backend::IRenderDevice::FrameGraphSubmitInfo frameGraph;
+    frameGraph.cameraPasses.reserve(cameras.size());
+
     static std::vector<const backend::RenderCmd*> filtered;
     for (size_t i = 0; i < cameras.size(); ++i) {
         const Transform& tf = *cameras[i].tf;
@@ -682,32 +685,55 @@ void RenderSystem::buildCommandBuffer() {
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
         const auto particles = collectParticleParams(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
-        bool particlesSubmittedInGraph = false;
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
                                                   static_cast<uint32_t>(w),
                                                   static_cast<uint32_t>(h));
             if (ctx_.renderDevice().capabilities().supportsLighting2D &&
                 !lighting.lights.empty()) {
-                backend::IRenderDevice::WorldLightingSubmitInfo graphInfo{};
-                graphInfo.worldPass = info;
-                graphInfo.worldCommands = filtered;
-                graphInfo.particles = particles;
-                graphInfo.lighting = std::move(lighting);
-                dev.submitWorldLightingGraph(graphInfo);
-                particlesSubmittedInGraph = true;
+                std::vector<const backend::RenderCmd*> worldCmdPtrs;
+                std::vector<const backend::RenderCmd*> uiCmdPtrs;
+                worldCmdPtrs.clear();
+                uiCmdPtrs.clear();
+                worldCmdPtrs.reserve(filtered.size());
+                uiCmdPtrs.reserve(filtered.size());
+                for (const backend::RenderCmd* cmd : filtered) {
+                    if (cmdPass(*cmd) == RenderPass::World) {
+                        worldCmdPtrs.push_back(cmd);
+                    } else {
+                        uiCmdPtrs.push_back(cmd);
+                    }
+                }
+
+                backend::IRenderDevice::FrameGraphCameraPass node;
+                node.kind = backend::IRenderDevice::FrameGraphPassKind::WorldLighting;
+                node.debugName = "CameraWorldLighting";
+                node.worldLighting.worldPass = info;
+                node.worldLighting.worldCommands = std::move(worldCmdPtrs);
+                node.worldLighting.particles = particles;
+                node.worldLighting.uiCommands = std::move(uiCmdPtrs);
+                node.worldLighting.lighting = std::move(lighting);
+                frameGraph.cameraPasses.push_back(std::move(node));
             } else {
-                dev.submitPass(info, filtered);
+                backend::IRenderDevice::FrameGraphCameraPass node;
+                node.kind = backend::IRenderDevice::FrameGraphPassKind::Raster;
+                node.debugName = "CameraRaster";
+                node.pass = info;
+                node.commands = filtered;
+                node.particles = particles;
+                frameGraph.cameraPasses.push_back(std::move(node));
             }
         } else {
-            dev.submitPass(info, filtered);
-        }
-        if (!particlesSubmittedInGraph) {
-            for (const auto& params : particles) {
-                dev.submitGPUParticlePass({ info.camera, false, cam.clearColor }, params);
-            }
+            backend::IRenderDevice::FrameGraphCameraPass node;
+            node.kind = backend::IRenderDevice::FrameGraphPassKind::Raster;
+            node.debugName = "CameraRaster";
+            node.pass = info;
+            node.commands = filtered;
+            node.particles = particles;
+            frameGraph.cameraPasses.push_back(std::move(node));
         }
     }
+    dev.submitFrameGraph(frameGraph);
 }
 
 void RenderSystem::buildCommandBufferGPUDriven() {
@@ -740,6 +766,9 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         dev.submitPass(info, {});
         return;
     }
+
+    backend::IRenderDevice::FrameGraphSubmitInfo frameGraph;
+    frameGraph.cameraPasses.reserve(cameras.size());
 
     uint32_t spriteCount = spriteBuffer_.activeCount();
     auto spriteView = ctx_.world.view<Transform, Sprite>();
@@ -900,14 +929,6 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             }
         }
 
-        if (visibleCount > 0) {
-            BufferHandle visibleBuf = gpuRenderer_.getVisibleIndexBuffer();
-            if (visibleBuf.valid()) {
-                dev.uploadToBuffer(visibleBuf, visibleIndices.data(),
-                                   visibleCount * sizeof(uint32_t), 0);
-            }
-        }
-
         backend::IRenderDevice::PassSubmitInfo info;
         info.camera       = toBackendCamera(tf, cam, w, h);
         info.clearEnabled = cam.clear;
@@ -920,6 +941,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         params.spriteCount        = spriteCount;
         params.visibleCount       = visibleCount;
         params.batches            = std::move(batches);
+        params.ownedVisibleIndices = std::move(visibleIndices);
         params.camera             = info.camera;
         params.clearEnabled       = false;  // 只在第一次清除
         params.clearColor         = info.clearColor;
@@ -981,70 +1003,52 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             }
         }
 
-        bool submittedByGraph = false;
+        bool usesWorldLightingGraph = false;
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
                                                   static_cast<uint32_t>(w),
                                                   static_cast<uint32_t>(h));
             if (dev.capabilities().supportsLighting2D && !lighting.lights.empty()) {
-                static std::vector<const backend::RenderCmd*> worldCmdPtrs;
-                worldCmdPtrs.clear();
-                worldCmdPtrs.reserve(textCommands.size());
-                for (const auto& cmd : textCommands) {
-                    if ((renderPassBit(cmdPass(cmd)) & renderPassBit(RenderPass::World)) != 0) {
-                        worldCmdPtrs.push_back(&cmd);
+                backend::IRenderDevice::FrameGraphCameraPass node;
+                node.kind = backend::IRenderDevice::FrameGraphPassKind::WorldLighting;
+                node.debugName = "CameraGPUWorldLighting";
+                node.ownedCommands = std::move(textCommands);
+                node.worldLighting.worldPass = info;
+                node.worldLighting.hasGPUWorld = true;
+                node.worldLighting.gpuWorld = std::move(params);
+                node.worldLighting.particles = particles;
+                node.worldLighting.lighting = std::move(lighting);
+                node.worldLighting.worldCommands.reserve(node.ownedCommands.size());
+                node.worldLighting.uiCommands.reserve(node.ownedCommands.size());
+                for (const auto& cmd : node.ownedCommands) {
+                    if (cmdPass(cmd) == RenderPass::World) {
+                        node.worldLighting.worldCommands.push_back(&cmd);
+                    } else {
+                        node.worldLighting.uiCommands.push_back(&cmd);
                     }
                 }
 
-                backend::IRenderDevice::WorldLightingSubmitInfo graphInfo{};
-                graphInfo.worldPass = info;
-                graphInfo.hasGPUWorld = true;
-                graphInfo.gpuWorld = std::move(params);
-                graphInfo.worldCommands = worldCmdPtrs;
-                graphInfo.particles = particles;
-                graphInfo.lighting = std::move(lighting);
-                dev.submitWorldLightingGraph(graphInfo);
-                submittedByGraph = true;
+                frameGraph.cameraPasses.push_back(std::move(node));
+                usesWorldLightingGraph = true;
             }
         }
 
-        if (!submittedByGraph) {
-            dev.submitGPUDrivenPass(info, params);
-            for (const auto& particle : particles) {
-                dev.submitGPUParticlePass({ info.camera, false, cam.clearColor }, particle);
+        if (!usesWorldLightingGraph) {
+            backend::IRenderDevice::FrameGraphCameraPass node;
+            node.kind = backend::IRenderDevice::FrameGraphPassKind::GPUDriven;
+            node.debugName = "CameraGPUDriven";
+            node.pass = info;
+            node.gpu = std::move(params);
+            node.particles = particles;
+            node.ownedCommands = std::move(textCommands);
+            node.commands.reserve(node.ownedCommands.size());
+            for (const auto& cmd : node.ownedCommands) {
+                node.commands.push_back(&cmd);
             }
-        }
-
-        if (!textCommands.empty()) {
-            // 创建指针数组
-            static std::vector<const backend::RenderCmd*> cmdPtrs;
-            cmdPtrs.clear();
-            cmdPtrs.reserve(textCommands.size());
-            for (const auto& cmd : textCommands) {
-                cmdPtrs.push_back(&cmd);
-            }
-
-            // 不清除，直接叠加渲染
-            backend::IRenderDevice::PassSubmitInfo textInfo;
-            textInfo.camera       = info.camera;
-            textInfo.clearEnabled = false;
-            textInfo.clearColor   = core::Color::Black;
-            if (!submittedByGraph) {
-                dev.submitPass(textInfo, cmdPtrs);
-            } else {
-                static std::vector<const backend::RenderCmd*> postGraphPtrs;
-                postGraphPtrs.clear();
-                for (const backend::RenderCmd* cmd : cmdPtrs) {
-                    if ((renderPassBit(cmdPass(*cmd)) & renderPassBit(RenderPass::World)) == 0) {
-                        postGraphPtrs.push_back(cmd);
-                    }
-                }
-                if (!postGraphPtrs.empty()) {
-                    dev.submitPass(textInfo, postGraphPtrs);
-                }
-            }
+            frameGraph.cameraPasses.push_back(std::move(node));
         }
     }
+    dev.submitFrameGraph(frameGraph);
 }
 
 }
