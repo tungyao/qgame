@@ -79,6 +79,7 @@ struct RenderFrameStats {
     uint32_t textureBindCount = 0;
     uint32_t lighting2DSubmitCount = 0;
     uint32_t renderGraphPassCount = 0;
+    uint32_t renderGraphBarrierCount = 0;
     uint32_t worldColorPassCount = 0;
     uint32_t lightingCompositeCount = 0;
     uint32_t uiPassCount = 0;

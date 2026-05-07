@@ -2790,7 +2790,20 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
                        {{swapchain, RenderGraphAccess::ReadSampled}},
                        {{swapchain, RenderGraphAccess::WriteColor}}});
     }
-    frameStats_.renderGraphPassCount += static_cast<uint32_t>(graph.passes().size());
+    const CompiledRenderGraph compiledGraph = graph.compile();
+    if (!compiledGraph.valid) {
+        core::logError("submitWorldLightingGraph: %s", compiledGraph.error.c_str());
+        frameStats_.fallbackReason = "render graph compile failed";
+        submitPass(info.worldPass, info.worldCommands);
+        submitRadialLightingFallback(cam, info.lighting);
+        return;
+    }
+    uint32_t graphBarrierCount = 0;
+    for (const RenderGraphCompiledPass& pass : compiledGraph.passes) {
+        graphBarrierCount += static_cast<uint32_t>(pass.barriersBefore.size());
+    }
+    frameStats_.renderGraphPassCount += static_cast<uint32_t>(compiledGraph.passes.size());
+    frameStats_.renderGraphBarrierCount += graphBarrierCount;
 
     // Pass 1: render the world into an offscreen color target. This is the key
     // behavioral change from the old overlay path: World no longer writes the

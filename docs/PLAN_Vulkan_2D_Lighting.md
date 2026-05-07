@@ -826,11 +826,14 @@ assets/manifest.json
   - `WorldLighting`：WorldColor + LightingTexture + LightingComposite + 可选 UI pass。
 - GPU-driven 路径的 per-camera visible index list 已放入 `GPURenderParams::ownedVisibleIndices`，由 `submitFrameGraph()` 在每个 camera 节点执行前上传，避免多个 camera 共用 visible index buffer 时互相覆盖。
 - SDL GPU graph 路径已拆开 lighting compute 与旧 swapchain overlay：`submitWorldLightingGraph()` 正常路径只运行 `runLighting2DComputePass()` 生成 `LightingTexture`，swapchain 写入集中在 `LightingCompositePass`。
+- `RenderGraph::compile()` 已实现顺序 scheduler：校验资源索引、拒绝未初始化资源读取、为每个 pass 生成资源访问转换 barrier list，并输出资源 first/last pass 与最终访问状态。
+- SDL GPU `submitWorldLightingGraph()` 已消费 compiled graph，用 compiled pass 数和 barrier 数更新 frame stats；当前 SDL GPU 后端仍依赖 render/compute/copy pass 边界承载实际同步。
 - OpenGL 仍是兼容实现：通过同一 frame graph 接口执行，但 `submitWorldLightingGraph()` 仍走现有 fallback 顺序。
 
 尚未完成：
 
-- RenderGraph 仍是 pass/resource 声明和统计层，尚未负责 barrier、资源生命周期、pass 重排。
+- RenderGraph 尚未做资源别名、transient texture 自动分配、pass 重排。
+- SDL GPU 尚未把 compiled barrier 映射到显式 GPU barrier API；当前使用 SDL GPU pass 边界/驱动同步。
 - UI camera 现在由 frame-level camera graph 按 depth 表达，但单个 `WorldLighting` 节点内部的 `uiCommands` 仍只适合同一 camera 内的 UI/Screen 命令。
 - 粒子 update/render 还未拆成 “每帧一次 update + 每 camera render”，多 camera 场景仍需后续收敛。
 

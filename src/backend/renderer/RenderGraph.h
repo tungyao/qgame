@@ -7,14 +7,16 @@
 namespace backend {
 
 // RenderGraph in this engine is intentionally small for the first lighting
-// migration. It is not a full frame scheduler yet: it records the pass/resource
-// contract in one place so the backend executes a stable, inspectable order.
+// migration. It now compiles the declared pass/resource contract into a stable
+// execution schedule with per-resource access transitions. Backends can consume
+// those transitions as real API barriers where supported, or as validation and
+// pass-boundary documentation on APIs such as SDL GPU.
 //
 // The first consumer is SDL GPU 2D lighting:
 //   WorldColorPass -> LightingCompute -> LightingCompositePass -> UIPass
 //
-// Later we can add resource aliasing, pass reordering, and automatic barriers
-// without changing RenderSystem's high-level submission shape again.
+// Later we can add resource aliasing and pass reordering without changing
+// RenderSystem's high-level submission shape again.
 enum class RenderGraphResourceType : uint8_t {
     Texture,
     Buffer,
@@ -47,6 +49,33 @@ struct RenderGraphPass {
     std::vector<RenderGraphResourceUse> writes;
 };
 
+struct RenderGraphBarrier {
+    uint32_t resource = 0;
+    RenderGraphAccess before = RenderGraphAccess::ReadSampled;
+    RenderGraphAccess after = RenderGraphAccess::ReadSampled;
+    uint32_t beforePass = UINT32_MAX;
+    uint32_t afterPass = UINT32_MAX;
+};
+
+struct RenderGraphCompiledPass {
+    uint32_t passIndex = 0;
+    std::vector<RenderGraphBarrier> barriersBefore;
+};
+
+struct RenderGraphResourceState {
+    bool initialized = false;
+    RenderGraphAccess lastAccess = RenderGraphAccess::ReadSampled;
+    uint32_t firstPass = UINT32_MAX;
+    uint32_t lastPass = UINT32_MAX;
+};
+
+struct CompiledRenderGraph {
+    bool valid = true;
+    std::string error;
+    std::vector<RenderGraphCompiledPass> passes;
+    std::vector<RenderGraphResourceState> finalStates;
+};
+
 class RenderGraph {
 public:
     // Add a resource declaration and return its stable index. The index is only
@@ -54,10 +83,12 @@ public:
     // backend. This separation keeps the first graph backend-agnostic.
     uint32_t addResource(RenderGraphResource desc);
 
-    // Add a pass declaration. Execution is still hard-coded by the backend for
-    // now; the graph records the intended order and dependencies for stats and
-    // debugging, which is the immediate need for the lighting migration.
+    // Add a pass declaration. Execution order is the declaration order for now;
+    // compile() validates resource indices and builds the access-transition list
+    // that a backend can map to barriers before each pass.
     uint32_t addPass(RenderGraphPass pass);
+
+    CompiledRenderGraph compile() const;
 
     void clear();
 
@@ -70,5 +101,7 @@ private:
 };
 
 const char* renderGraphAccessName(RenderGraphAccess access);
+const char* renderGraphResourceTypeName(RenderGraphResourceType type);
+bool renderGraphAccessIsWrite(RenderGraphAccess access);
 
 } // namespace backend
