@@ -5,6 +5,7 @@
 #include "../resources/SpriteBuffer.h"
 #include "../resources/GPUDrivenRenderer.h"
 #include "../resources/GPUParticleRenderer.h"
+#include "../../backend/renderer/IRenderDevice.h"
 #include <entt/entt.hpp>
 
 namespace backend { class CommandBuffer; }
@@ -39,6 +40,9 @@ private:
     void updateGPUSlot(const Transform& tf, const Sprite& spr, const AnimatorOutput* aout = nullptr);
     void onTransformUpdate(entt::registry& reg, entt::entity e);
     void syncParticleEmitters(float dt);
+    std::vector<backend::IRenderDevice::GPUParticleParams>
+    collectParticleParams(const Transform& tf, const Camera& cam,
+                          int viewportW, int viewportH, float dt);
     void submitParticlePass(const Transform& tf, const Camera& cam,
                             int viewportW, int viewportH, float dt);
 

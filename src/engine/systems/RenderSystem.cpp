@@ -269,12 +269,10 @@ void RenderSystem::update(float dt) {
     // correctness fallback; all performance work should make this branch less
     // frequent rather than faster.
     const backend::RendererCapabilities& caps = dev.capabilities();
-    const bool hasLightingWork = stats.light2DCount > 0 && caps.supportsLighting2D;
     const bool canUseGPUDriven =
         caps.supportsGPUDrivenSprite &&
         gpuRenderer_.isInitialized() &&
-        gpuRenderer_.hasCullingPipeline() &&
-        !hasLightingWork;
+        gpuRenderer_.hasCullingPipeline();
 
     if (canUseGPUDriven) {
         stats.path = backend::RenderPath::SDLGPU_GPUDriven;
@@ -288,8 +286,6 @@ void RenderSystem::update(float dt) {
             : backend::RenderPath::OpenGL_CPUBatch;
         if (!caps.supportsGPUDrivenSprite) {
             stats.fallbackReason = "gpu-driven sprite pipeline unavailable";
-        } else if (hasLightingWork) {
-            stats.fallbackReason = "lighting graph uses CPU world path";
         } else if (!gpuRenderer_.isInitialized()) {
             stats.fallbackReason = "gpu-driven renderer not initialized";
         } else if (!gpuRenderer_.hasCullingPipeline()) {
@@ -320,14 +316,15 @@ void RenderSystem::syncParticleEmitters(float dt) {
     }
 }
 
-void RenderSystem::submitParticlePass(const Transform& tf, const Camera& cam,
-                                      int viewportW, int viewportH, float dt) {
+std::vector<backend::IRenderDevice::GPUParticleParams>
+RenderSystem::collectParticleParams(const Transform& tf, const Camera& cam,
+                                    int viewportW, int viewportH, float dt) {
+    std::vector<backend::IRenderDevice::GPUParticleParams> out;
     if (!particleRenderer_.isInitialized() ||
         !particleRenderer_.hasUpdatePipeline() ||
-        !particleRenderer_.hasSortPipeline()) return;
-    if (!ctx_.renderDevice().capabilities().supportsCompute) return;
+        !particleRenderer_.hasSortPipeline()) return out;
+    if (!ctx_.renderDevice().capabilities().supportsCompute) return out;
 
-    backend::IRenderDevice& dev = ctx_.renderDevice();
     backend::CameraData camera = toBackendCamera(tf, cam, viewportW, viewportH);
 
     auto view = ctx_.world.view<ParticleComponent>();
@@ -350,6 +347,17 @@ void RenderSystem::submitParticlePass(const Transform& tf, const Camera& cam,
         params.camera = camera;
         params.clearEnabled = false;
         params.clearColor = cam.clearColor;
+        out.push_back(params);
+    }
+    return out;
+}
+
+void RenderSystem::submitParticlePass(const Transform& tf, const Camera& cam,
+                                      int viewportW, int viewportH, float dt) {
+    backend::IRenderDevice& dev = ctx_.renderDevice();
+    backend::CameraData camera = toBackendCamera(tf, cam, viewportW, viewportH);
+    auto particles = collectParticleParams(tf, cam, viewportW, viewportH, dt);
+    for (const auto& params : particles) {
         dev.submitGPUParticlePass({ camera, false, cam.clearColor }, params);
     }
 }
@@ -673,6 +681,8 @@ void RenderSystem::buildCommandBuffer() {
         info.camera       = toBackendCamera(tf, cam, w, h);
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
+        const auto particles = collectParticleParams(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
+        bool particlesSubmittedInGraph = false;
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
                                                   static_cast<uint32_t>(w),
@@ -682,15 +692,21 @@ void RenderSystem::buildCommandBuffer() {
                 backend::IRenderDevice::WorldLightingSubmitInfo graphInfo{};
                 graphInfo.worldPass = info;
                 graphInfo.worldCommands = filtered;
+                graphInfo.particles = particles;
                 graphInfo.lighting = std::move(lighting);
                 dev.submitWorldLightingGraph(graphInfo);
+                particlesSubmittedInGraph = true;
             } else {
                 dev.submitPass(info, filtered);
             }
         } else {
             dev.submitPass(info, filtered);
         }
-        submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
+        if (!particlesSubmittedInGraph) {
+            for (const auto& params : particles) {
+                dev.submitGPUParticlePass({ info.camera, false, cam.clearColor }, params);
+            }
+        }
     }
 }
 
@@ -913,8 +929,11 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             params.clearEnabled = info.clearEnabled;
         }
         
-        dev.submitGPUDrivenPass(info, params);
-        submitParticlePass(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
+        // Submission is intentionally delayed until CPU world drawables below
+        // are collected. The graph path needs GPU sprites, tile/text commands,
+        // and particles as inputs to one WorldColor pass before lighting
+        // composite. Non-lighting scenes still use the old direct submission.
+        const auto particles = collectParticleParams(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
 
         // ========== Step 2: CPU 渲染 Text / Tile / UI (叠加在 Sprite 之上) ==========
         static std::vector<backend::RenderCmd> textCommands;
@@ -962,6 +981,40 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             }
         }
 
+        bool submittedByGraph = false;
+        if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
+            auto lighting = buildLighting2DParams(ctx_, info.camera,
+                                                  static_cast<uint32_t>(w),
+                                                  static_cast<uint32_t>(h));
+            if (dev.capabilities().supportsLighting2D && !lighting.lights.empty()) {
+                static std::vector<const backend::RenderCmd*> worldCmdPtrs;
+                worldCmdPtrs.clear();
+                worldCmdPtrs.reserve(textCommands.size());
+                for (const auto& cmd : textCommands) {
+                    if ((renderPassBit(cmdPass(cmd)) & renderPassBit(RenderPass::World)) != 0) {
+                        worldCmdPtrs.push_back(&cmd);
+                    }
+                }
+
+                backend::IRenderDevice::WorldLightingSubmitInfo graphInfo{};
+                graphInfo.worldPass = info;
+                graphInfo.hasGPUWorld = true;
+                graphInfo.gpuWorld = std::move(params);
+                graphInfo.worldCommands = worldCmdPtrs;
+                graphInfo.particles = particles;
+                graphInfo.lighting = std::move(lighting);
+                dev.submitWorldLightingGraph(graphInfo);
+                submittedByGraph = true;
+            }
+        }
+
+        if (!submittedByGraph) {
+            dev.submitGPUDrivenPass(info, params);
+            for (const auto& particle : particles) {
+                dev.submitGPUParticlePass({ info.camera, false, cam.clearColor }, particle);
+            }
+        }
+
         if (!textCommands.empty()) {
             // 创建指针数组
             static std::vector<const backend::RenderCmd*> cmdPtrs;
@@ -976,14 +1029,20 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             textInfo.camera       = info.camera;
             textInfo.clearEnabled = false;
             textInfo.clearColor   = core::Color::Black;
-            dev.submitPass(textInfo, cmdPtrs);
-        }
-
-        if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
-            auto lighting = buildLighting2DParams(ctx_, info.camera,
-                                                  static_cast<uint32_t>(w),
-                                                  static_cast<uint32_t>(h));
-            dev.submitLighting2DPass(info, lighting);
+            if (!submittedByGraph) {
+                dev.submitPass(textInfo, cmdPtrs);
+            } else {
+                static std::vector<const backend::RenderCmd*> postGraphPtrs;
+                postGraphPtrs.clear();
+                for (const backend::RenderCmd* cmd : cmdPtrs) {
+                    if ((renderPassBit(cmdPass(*cmd)) & renderPassBit(RenderPass::World)) == 0) {
+                        postGraphPtrs.push_back(cmd);
+                    }
+                }
+                if (!postGraphPtrs.empty()) {
+                    dev.submitPass(textInfo, postGraphPtrs);
+                }
+            }
         }
     }
 }

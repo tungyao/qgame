@@ -299,7 +299,10 @@ public:
     // copies keeps this bridge small while the graph abstraction is still young.
     struct WorldLightingSubmitInfo {
         PassSubmitInfo worldPass;
+        bool hasGPUWorld = false;
+        GPURenderParams gpuWorld;
         std::vector<const RenderCmd*> worldCommands;
+        std::vector<GPUParticleParams> particles;
         Lighting2DParams lighting;
     };
 

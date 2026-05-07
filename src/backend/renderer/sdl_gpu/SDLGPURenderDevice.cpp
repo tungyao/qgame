@@ -332,7 +332,9 @@ void SDLGPURenderDevice::shutdown() {
     if (msdfPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfPipeline_); msdfPipeline_ = nullptr; }
     if (msdfOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, msdfOffscreenPipeline_); msdfOffscreenPipeline_ = nullptr; }
     if (gpuDrivenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenPipeline_); gpuDrivenPipeline_ = nullptr; }
+    if (gpuDrivenOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenOffscreenPipeline_); gpuDrivenOffscreenPipeline_ = nullptr; }
     if (particlePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particlePipeline_); particlePipeline_ = nullptr; }
+    if (particleOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particleOffscreenPipeline_); particleOffscreenPipeline_ = nullptr; }
     if (lightingCompositePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, lightingCompositePipeline_); lightingCompositePipeline_ = nullptr; }
     if (gpuDrivenQuadIndexBuf_) { SDL_ReleaseGPUBuffer(device_, gpuDrivenQuadIndexBuf_); gpuDrivenQuadIndexBuf_ = nullptr; }
 
@@ -1590,6 +1592,7 @@ void SDLGPURenderDevice::createPipeline() {
     // GPU-driven 通路目前只在 SPIRV 后端有预编译 shader（DXIL 暂未提供）
     if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
         gpuDrivenPipeline_ = createGPUDrivenPipelineForFormat(swapchainFormat);
+        gpuDrivenOffscreenPipeline_ = createGPUDrivenPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
         if (!gpuDrivenPipeline_) {
             core::logError("createPipeline: failed to create GPU-driven pipeline");
         } else {
@@ -1600,6 +1603,7 @@ void SDLGPURenderDevice::createPipeline() {
     // 粒子渲染同样使用 HLSL 自动生成的 SPIRV/DXIL 产物。compute shader
     // 由 engine 层 GPUParticleRenderer 创建；这里仅创建 instanced quad pipeline。
     particlePipeline_ = createParticlePipelineForFormat(swapchainFormat);
+    particleOffscreenPipeline_ = createParticlePipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
     if (!particlePipeline_) {
         core::logError("createPipeline: failed to create particle pipeline");
     } else if (!gpuDrivenQuadIndexBuf_) {
@@ -2271,16 +2275,25 @@ void SDLGPURenderDevice::createGPUDrivenIndexBuffer() {
 // 按 params.batches 分组，每组绑定不同的纹理并 instanced draw。
 void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
                                              const GPURenderParams& params) {
-    if (!gpuCmdBuf_ || !swapchainTex_) return;
+    submitGPUDrivenPassToTarget(info, params, swapchainTex_, swapW_, swapH_, gpuDrivenPipeline_);
+}
+
+void SDLGPURenderDevice::submitGPUDrivenPassToTarget(const PassSubmitInfo& info,
+                                                     const GPURenderParams& params,
+                                                     SDL_GPUTexture* target,
+                                                     uint32_t targetWidth,
+                                                     uint32_t targetHeight,
+                                                     SDL_GPUGraphicsPipeline* pipeline) {
+    if (!gpuCmdBuf_ || !target) return;
 
     CameraData cam = info.camera;
-    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(swapW_);
-    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(swapH_);
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(targetWidth);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(targetHeight);
 
     auto beginAndEndEmpty = [&]() {
         if (!info.clearEnabled) return;
         SDL_GPUColorTargetInfo colorTarget{};
-        colorTarget.texture     = swapchainTex_;
+        colorTarget.texture     = target;
         colorTarget.load_op     = SDL_GPU_LOADOP_CLEAR;
         colorTarget.store_op    = SDL_GPU_STOREOP_STORE;
         colorTarget.clear_color = SDL_FColor{
@@ -2294,7 +2307,7 @@ void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
     // 没有可见 sprite 时只处理清屏，其他 pass 会接力补画。
     if (params.visibleCount == 0) { beginAndEndEmpty(); return; }
 
-    if (!gpuDrivenPipeline_ || !gpuDrivenQuadIndexBuf_) {
+    if (!pipeline || !gpuDrivenQuadIndexBuf_) {
         core::logError("submitGPUDrivenPass: GPU-driven pipeline not ready");
         beginAndEndEmpty();
         return;
@@ -2323,7 +2336,7 @@ void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
         }
 
     SDL_GPUColorTargetInfo colorTarget{};
-    colorTarget.texture     = swapchainTex_;
+    colorTarget.texture     = target;
     colorTarget.load_op     = info.clearEnabled ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     colorTarget.store_op    = SDL_GPU_STOREOP_STORE;
     colorTarget.clear_color = SDL_FColor{
@@ -2336,7 +2349,7 @@ void SDLGPURenderDevice::submitGPUDrivenPass(const PassSubmitInfo& info,
         core::logError("submitGPUDrivenPass: SDL_BeginGPURenderPass failed: %s", SDL_GetError());
         return;
     }
-    SDL_BindGPUGraphicsPipeline(pass, gpuDrivenPipeline_);
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
 
     SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, viewProj, sizeof(viewProj));
 
@@ -2761,7 +2774,9 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
 
     // Pass 1: render the world into an offscreen color target. This is the key
     // behavioral change from the old overlay path: World no longer writes the
-    // swapchain before lighting has had a chance to composite.
+    // swapchain before lighting has had a chance to composite. The pass accepts
+    // both CPU-batch commands and GPU-driven sprite batches so RenderSystem does
+    // not need to abandon the GPU sprite path just because lighting is enabled.
     if (!textures_.valid(worldColorTarget_) ||
         worldColorTargetWidth_ != cam.viewportW ||
         worldColorTargetHeight_ != cam.viewportH) {
@@ -2782,11 +2797,36 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
         return;
     }
 
+    bool worldWasCleared = false;
+    if (info.hasGPUWorld) {
+        GPURenderParams gpuWorld = info.gpuWorld;
+        gpuWorld.camera = cam;
+        gpuWorld.clearEnabled = info.worldPass.clearEnabled;
+        gpuWorld.clearColor = info.worldPass.clearColor;
+        submitGPUDrivenPassToTarget(info.worldPass, gpuWorld,
+                                    worldEntry->gpuTex,
+                                    static_cast<uint32_t>(cam.viewportW),
+                                    static_cast<uint32_t>(cam.viewportH),
+                                    gpuDrivenOffscreenPipeline_);
+        worldWasCleared = true;
+    }
+
     renderCmdsToTarget(gpuCmdBuf_, offscreenPipeline_, info.worldCommands, cam,
-                       info.worldPass.clearEnabled, info.worldPass.clearColor,
+                       !worldWasCleared && info.worldPass.clearEnabled,
+                       info.worldPass.clearColor,
                        worldEntry->gpuTex,
                        static_cast<uint32_t>(cam.viewportW),
                        static_cast<uint32_t>(cam.viewportH));
+
+    for (GPUParticleParams particle : info.particles) {
+        particle.camera = cam;
+        particle.clearEnabled = false;
+        submitGPUParticlePassToTarget(info.worldPass, particle,
+                                      worldEntry->gpuTex,
+                                      static_cast<uint32_t>(cam.viewportW),
+                                      static_cast<uint32_t>(cam.viewportH),
+                                      particleOffscreenPipeline_);
+    }
     frameStats_.worldColorPassCount++;
 
     // Pass 2: run the existing lighting compute path. It still contains the old
@@ -2903,9 +2943,18 @@ void SDLGPURenderDevice::submitWorldLightingGraph(const WorldLightingSubmitInfo&
 
 void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,
                                                const GPUParticleParams& params) {
-    if (!gpuCmdBuf_ || !swapchainTex_) return;
+    submitGPUParticlePassToTarget(info, params, swapchainTex_, swapW_, swapH_, particlePipeline_);
+}
+
+void SDLGPURenderDevice::submitGPUParticlePassToTarget(const PassSubmitInfo& info,
+                                                       const GPUParticleParams& params,
+                                                       SDL_GPUTexture* target,
+                                                       uint32_t targetWidth,
+                                                       uint32_t targetHeight,
+                                                       SDL_GPUGraphicsPipeline* pipeline) {
+    if (!gpuCmdBuf_ || !target) return;
     if (params.particleCount == 0) return;
-    if (!particlePipeline_ || !gpuDrivenQuadIndexBuf_) return;
+    if (!pipeline || !gpuDrivenQuadIndexBuf_) return;
     if (!buffers_.valid(params.particleBuffer)) return;
     if (!buffers_.valid(params.aliveIndexBuffer)) return;
     if (!buffers_.valid(params.indirectArgsBuffer)) return;
@@ -2985,8 +3034,8 @@ void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,
 
     CameraData cam = params.camera;
     if (cam.viewportW == 0) cam = info.camera;
-    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(swapW_);
-    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(swapH_);
+    if (cam.viewportW == 0) cam.viewportW = static_cast<int>(targetWidth);
+    if (cam.viewportH == 0) cam.viewportH = static_cast<int>(targetHeight);
 
     float proj[16], view[16], viewProj[16];
     const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
@@ -3003,7 +3052,7 @@ void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,
     // Phase 2: indirect draw. The vertex shader indexes through AliveIndices,
     // and the indirect command's instance count is produced by compute.
     SDL_GPUColorTargetInfo colorTarget{};
-    colorTarget.texture     = swapchainTex_;
+    colorTarget.texture     = target;
     colorTarget.load_op     = params.clearEnabled ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     colorTarget.store_op    = SDL_GPU_STOREOP_STORE;
     colorTarget.clear_color = SDL_FColor{
@@ -3017,7 +3066,7 @@ void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,
         return;
     }
 
-    SDL_BindGPUGraphicsPipeline(pass, particlePipeline_);
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
     SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, viewProj, sizeof(viewProj));
 
     SDL_GPUBuffer* vsStorage[2] = { particleBuf.gpuBuffer, aliveBuf.gpuBuffer };

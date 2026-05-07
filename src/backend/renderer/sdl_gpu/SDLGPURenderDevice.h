@@ -143,7 +143,9 @@ private:
     SDL_GPUGraphicsPipeline* msdfPipeline_       = nullptr;
     SDL_GPUGraphicsPipeline* msdfOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* gpuDrivenPipeline_  = nullptr;
+    SDL_GPUGraphicsPipeline* gpuDrivenOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* particlePipeline_   = nullptr;
+    SDL_GPUGraphicsPipeline* particleOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* lightingCompositePipeline_ = nullptr;
     ComputePipelineHandle    lighting2DComputePipeline_{};
     ComputePipelineHandle    lighting2DCullPipeline_{};
@@ -225,6 +227,18 @@ private:
                             core::Color clearColor,
                             SDL_GPUTexture* target,
                             uint32_t width, uint32_t height);
+    void submitGPUDrivenPassToTarget(const PassSubmitInfo& info,
+                                     const GPURenderParams& params,
+                                     SDL_GPUTexture* target,
+                                     uint32_t targetWidth,
+                                     uint32_t targetHeight,
+                                     SDL_GPUGraphicsPipeline* pipeline);
+    void submitGPUParticlePassToTarget(const PassSubmitInfo& info,
+                                       const GPUParticleParams& params,
+                                       SDL_GPUTexture* target,
+                                       uint32_t targetWidth,
+                                       uint32_t targetHeight,
+                                       SDL_GPUGraphicsPipeline* pipeline);
     TextureHandle createRenderTargetTexture(int width, int height);
 };
 
