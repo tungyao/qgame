@@ -11,6 +11,7 @@
 #include "../../core/Logger.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace engine {
@@ -227,6 +228,7 @@ RenderSystem::~RenderSystem() = default;
 void RenderSystem::init() {
     spriteBuffer_.init(&ctx_.renderDevice(), SpriteBuffer::INITIAL_CAPACITY);
     gpuRenderer_.init(&ctx_.renderDevice());
+    ensureMixedGPUCapacity(SpriteBuffer::INITIAL_CAPACITY);
     particleRenderer_.init(&ctx_.renderDevice());
 
     destroyConnection_ = ctx_.world.on_destroy<Sprite>().connect<&RenderSystem::freeGPUSlot>(this);
@@ -302,6 +304,11 @@ void RenderSystem::shutdown() {
     transformUpdateConnection_.release();
     particleRenderer_.shutdown();
     gpuRenderer_.shutdown();
+    if (mixedGpuSpriteBuffer_.valid()) {
+        ctx_.renderDevice().destroyBuffer(mixedGpuSpriteBuffer_);
+        mixedGpuSpriteBuffer_ = {};
+        mixedGpuSpriteCapacity_ = 0;
+    }
     spriteBuffer_.shutdown();
 }
 
@@ -445,6 +452,197 @@ void RenderSystem::updateGPUSlot(const Transform& tf, const Sprite& spr, const A
     slot->flags        = (spr.ySort ? 1u : 0u) | (static_cast<uint32_t>(spr.pass) << 1);
 
     spriteBuffer_.markDirty(spr.gpuHandle);
+}
+
+void RenderSystem::ensureMixedGPUCapacity(uint32_t required) {
+    if (required <= mixedGpuSpriteCapacity_ && mixedGpuSpriteBuffer_.valid()) return;
+
+    uint32_t newCapacity = mixedGpuSpriteCapacity_ > 0
+        ? mixedGpuSpriteCapacity_
+        : SpriteBuffer::INITIAL_CAPACITY;
+    while (newCapacity < required) {
+        newCapacity *= 2;
+    }
+
+    if (mixedGpuSpriteBuffer_.valid()) {
+        ctx_.renderDevice().destroyBuffer(mixedGpuSpriteBuffer_);
+    }
+
+    backend::BufferDesc desc{};
+    desc.size = newCapacity * sizeof(GPUSprite);
+    desc.usage = backend::BufferUsage::Storage | backend::BufferUsage::Vertex;
+    mixedGpuSpriteBuffer_ = ctx_.renderDevice().createBuffer(desc);
+    mixedGpuSpriteCapacity_ = mixedGpuSpriteBuffer_.valid() ? newCapacity : 0;
+
+    // Recreating the mixed buffer invalidates the static tile data that lived
+    // in it. The CPU-side cache remains valid, but its GPU copy must be
+    // uploaded again before the next frame graph submission.
+    tileGpuCacheSignature_ = 0;
+}
+
+void RenderSystem::syncSpritesToMixedGPUBuffer() {
+    if (!mixedGpuSpriteBuffer_.valid()) return;
+
+    // The mixed GPU buffer is the single storage buffer consumed by the
+    // GPU-driven shader. SpriteBuffer still owns sprite lifetime and dirty
+    // bookkeeping for the legacy path, so this bridge mirrors active sprite
+    // slots into the same indices in the mixed buffer before sorting references
+    // those indices.
+    auto view = ctx_.world.view<Sprite>();
+    for (auto [ent, spr] : view.each()) {
+        (void)ent;
+        if (!spr.gpuHandle.valid()) continue;
+
+        const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
+        if (!slot) continue;
+
+        ctx_.renderDevice().uploadToBuffer(mixedGpuSpriteBuffer_,
+                                           slot,
+                                           sizeof(GPUSprite),
+                                           spr.gpuHandle.index * sizeof(GPUSprite));
+    }
+}
+
+uint64_t RenderSystem::computeTileGPUCacheSignature() const {
+    // FNV-1a over every field that changes tile geometry, sorting, collision
+    // independence, or texture selection. This keeps the cache deterministic:
+    // a tilemap edit or transform move rebuilds the GPU tile instances, while
+    // unrelated per-frame work leaves the static upload alone.
+    uint64_t h = 1469598103934665603ull;
+    auto mixU64 = [&](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    auto mixI32 = [&](int v) { mixU64(static_cast<uint32_t>(v)); };
+    auto mixF32 = [&](float v) {
+        uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(v), "float hash assumes 32-bit float");
+        std::memcpy(&bits, &v, sizeof(bits));
+        mixU64(bits);
+    };
+
+    auto tileView = ctx_.world.view<Transform, TileMap>();
+    for (auto [ent, tf, tmap] : tileView.each()) {
+        mixU64(static_cast<uint64_t>(entt::to_integral(ent)));
+        mixF32(tf.x);
+        mixF32(tf.y);
+        mixF32(tf.rotation);
+        mixF32(tf.scaleX);
+        mixF32(tf.scaleY);
+        mixI32(tmap.width);
+        mixI32(tmap.height);
+        mixI32(tmap.tileSize);
+        mixU64(tmap.tilesets.size());
+        for (const auto& ts : tmap.tilesets) {
+            mixU64(ts.texture.index);
+            mixU64(ts.texture.version);
+            mixI32(ts.firstGid);
+            mixI32(ts.count);
+            mixI32(ts.columns);
+        }
+        mixU64(tmap.layers.size());
+        for (const auto& layer : tmap.layers) {
+            mixU64(layer.visible ? 1u : 0u);
+            mixU64(layer.collidable ? 1u : 0u);
+            mixI32(layer.renderLayer);
+            mixU64(layer.tiles.size());
+            for (int gid : layer.tiles) {
+                mixI32(gid);
+            }
+        }
+    }
+    return h;
+}
+
+void RenderSystem::rebuildTileGPUCacheIfNeeded() {
+    const uint32_t spriteCapacity = spriteBuffer_.capacity();
+    const uint64_t signature = computeTileGPUCacheSignature();
+    const uint32_t desiredBase = spriteCapacity;
+    if (signature == tileGpuCacheSignature_ && desiredBase == tileGpuBaseIndex_) {
+        return;
+    }
+
+    tileGpuBaseIndex_ = desiredBase;
+    tileGpuInstances_.clear();
+    tileGpuItems_.clear();
+
+    int seq = 0;
+    auto tileView = ctx_.world.view<Transform, TileMap>();
+    for (auto [ent, tf, tmap] : tileView.each()) {
+        (void)ent;
+        if (tmap.tileSize <= 0) continue;
+
+        for (int layerIndex = 0; layerIndex < static_cast<int>(tmap.layers.size()); ++layerIndex) {
+            const auto& tileLayer = tmap.layers[static_cast<size_t>(layerIndex)];
+            if (!tileLayer.visible) continue;
+
+            for (int y = 0; y < tmap.height; ++y) {
+                for (int x = 0; x < tmap.width; ++x) {
+                    const int gid = tmap.tileAt(layerIndex, x, y);
+                    const TileMap::Tileset* tileset = tmap.tilesetForGid(gid);
+                    const int tileId = tmap.localTileId(gid);
+                    if (!tileset || !tileset->texture.valid() || tileId < 0) continue;
+
+                    int texW = 1, texH = 1;
+                    ctx_.renderDevice().getTextureDimensions(tileset->texture, texW, texH);
+                    const int columns = std::max(1, tileset->columns);
+                    const int sx = (tileId % columns) * tmap.tileSize;
+                    const int sy = (tileId / columns) * tmap.tileSize;
+                    const float worldX = tf.x + static_cast<float>(x * tmap.tileSize);
+                    const float worldY = tf.y + static_cast<float>(y * tmap.tileSize);
+                    const float centerX = worldX + tmap.tileSize * 0.5f;
+                    const float centerY = worldY + tmap.tileSize * 0.5f;
+
+                    GPUSprite gpu{};
+                    buildTransform2D(gpu.transform,
+                                     centerX,
+                                     centerY,
+                                     0.f,
+                                     1.f,
+                                     1.f,
+                                     0.5f,
+                                     0.5f,
+                                     static_cast<float>(tmap.tileSize),
+                                     static_cast<float>(tmap.tileSize));
+                    packColor(gpu.color, 255, 255, 255, 255);
+                    packUV(gpu.uv,
+                           sx / static_cast<float>(texW),
+                           sy / static_cast<float>(texH),
+                           (sx + tmap.tileSize) / static_cast<float>(texW),
+                           (sy + tmap.tileSize) / static_cast<float>(texH));
+                    gpu.textureIndex = tileset->texture.index;
+                    gpu.layer = static_cast<uint32_t>(tileLayer.renderLayer);
+                    gpu.sortKey = 0;
+                    gpu.flags = 1u | (static_cast<uint32_t>(RenderPass::World) << 1);
+
+                    CachedGPUTile item{};
+                    item.texture = tileset->texture;
+                    item.gpuIndex = tileGpuBaseIndex_ + static_cast<uint32_t>(tileGpuInstances_.size());
+                    item.layer = tileLayer.renderLayer;
+                    item.ySort = true;
+                    item.y = worldY;
+                    item.sortKey = 0;
+                    item.seq = seq++;
+                    item.centerX = centerX;
+                    item.centerY = centerY;
+                    item.halfW = tmap.tileSize * 0.5f;
+                    item.halfH = tmap.tileSize * 0.5f;
+
+                    tileGpuInstances_.push_back(gpu);
+                    tileGpuItems_.push_back(item);
+                }
+            }
+        }
+    }
+
+    ensureMixedGPUCapacity(tileGpuBaseIndex_ + static_cast<uint32_t>(tileGpuInstances_.size()));
+    if (mixedGpuSpriteBuffer_.valid() && !tileGpuInstances_.empty()) {
+        ctx_.renderDevice().uploadToBuffer(mixedGpuSpriteBuffer_,
+                                           tileGpuInstances_.data(),
+                                           tileGpuInstances_.size() * sizeof(GPUSprite),
+                                           tileGpuBaseIndex_ * sizeof(GPUSprite));
+    }
+    tileGpuCacheSignature_ = signature;
 }
 
 namespace {
@@ -774,60 +972,15 @@ void RenderSystem::buildCommandBufferGPUDriven() {
     backend::IRenderDevice::FrameGraphSubmitInfo frameGraph;
     frameGraph.cameraPasses.reserve(cameras.size());
 
+    rebuildTileGPUCacheIfNeeded();
+    syncSpritesToMixedGPUBuffer();
+
     uint32_t spriteCount = spriteBuffer_.activeCount();
     auto spriteView = ctx_.world.view<Transform, Sprite>();
 
-    struct Visible {
-        uint32_t      gpuIndex;
-        TextureHandle texture;
-        int           layer;
-        bool          ySort;
-        float         y;
-        int           sortKey;
-        int           seq;
-    };
-
-    // ========== 预先收集文字和瓦片命令 (CPU 路径) ==========
-    // GPU-driven 模式下，精灵用 GPU 路径，文字/瓦片用传统 CPU 路径
-    static std::vector<Drawable> nonSpriteDrawables;
-    nonSpriteDrawables.clear();
+    static std::vector<Drawable> cpuDrawables;
+    cpuDrawables.clear();
     int seq = 0;
-
-    // 收集 TileMap
-    auto tileView = ctx_.world.view<Transform, TileMap>();
-    for (auto [ent, tf, tmap] : tileView.each()) {
-        if (tmap.tileSize <= 0) continue;
-        for (int layer = 0; layer < static_cast<int>(tmap.layers.size()); ++layer) {
-            const auto& tileLayer = tmap.layers[static_cast<size_t>(layer)];
-            if (!tileLayer.visible) continue;
-            for (int y = 0; y < tmap.height; ++y) {
-                for (int x = 0; x < tmap.width; ++x) {
-                    int gid = tmap.tileAt(layer, x, y);
-                    const TileMap::Tileset* tileset = tmap.tilesetForGid(gid);
-                    int tileId = tmap.localTileId(gid);
-                    if (!tileset || !tileset->texture.valid() || tileId < 0) continue;
-                    Drawable d{};
-                    d.pass    = RenderPass::World;
-                    d.layer   = tileLayer.renderLayer;
-                    d.ySort   = true;
-                    d.y       = tf.y + static_cast<float>(y * tmap.tileSize);
-                    d.sortKey = 0;
-                    d.seq     = seq++;
-                    d.kind    = DrawKind::Tile;
-                    d.tile.tileset  = tileset->texture;
-                    d.tile.tileId   = tileId;
-                    d.tile.gridX    = static_cast<int>(tf.x) + x;
-                    d.tile.gridY    = static_cast<int>(tf.y) + y;
-                    d.tile.tileSize = tmap.tileSize;
-                    d.tile.layer    = tileLayer.renderLayer;
-                    d.tile.sortKey  = 0;
-                    d.tile.ySort    = true;
-                    d.tile.pass     = RenderPass::World;
-                    nonSpriteDrawables.push_back(d);
-                }
-            }
-        }
-    }
 
     // 收集 Text
     auto textView = ctx_.world.view<Transform, TextComponent>();
@@ -852,7 +1005,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         t.ySort    = text.ySort;
         t.color    = text.color;
         t.pass     = text.pass;
-        nonSpriteDrawables.push_back(d);
+        cpuDrawables.push_back(d);
     }
 
     for (size_t i = 0; i < cameras.size(); ++i) {
@@ -874,11 +1027,43 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         const float viewMaxX = tf.x + rx;
         const float viewMaxY = tf.y + ry;
 
-        std::vector<Visible> visibles;
-        visibles.reserve(spriteCount);
-        int spriteSeq = 0;
+        struct GPUVisible {
+            TextureHandle texture;
+            uint32_t gpuIndex = 0;
+            RenderPass pass = RenderPass::World;
+            int layer = 0;
+            bool ySort = false;
+            float y = 0.f;
+            int sortKey = 0;
+            int seq = 0;
+        };
 
-        // ========== 收集 Sprite (GPU 路径) ==========
+        std::vector<GPUVisible> gpuDrawables;
+        gpuDrawables.reserve(spriteCount + tileGpuItems_.size());
+
+        for (const CachedGPUTile& tile : tileGpuItems_) {
+            if ((cam.layerMask & renderPassBit(RenderPass::World)) == 0) continue;
+            if (cam.cullEnabled) {
+                if (tile.centerX + tile.halfW < viewMinX || tile.centerX - tile.halfW > viewMaxX ||
+                    tile.centerY + tile.halfH < viewMinY || tile.centerY - tile.halfH > viewMaxY) {
+                    continue;
+                }
+            }
+            gpuDrawables.push_back(GPUVisible{
+                tile.texture,
+                tile.gpuIndex,
+                RenderPass::World,
+                tile.layer,
+                tile.ySort,
+                tile.y,
+                tile.sortKey,
+                tile.seq
+            });
+        }
+
+        // Sprite and TileMap entries share one mixed GPU buffer. Sprite entries
+        // keep their SpriteBuffer slot index; TileMap entries use the cached
+        // range starting at tileGpuBaseIndex_.
         for (auto [ent, eTf, spr] : spriteView.each()) {
             if (!spr.visible) continue;
             if (!spr.gpuHandle.valid()) continue;
@@ -899,15 +1084,21 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 }
             }
 
-            visibles.push_back(Visible{
-                spr.gpuHandle.index, spr.texture,
-                spr.layer, spr.ySort, eTf.y, spr.sortOrder, spriteSeq++
+            gpuDrawables.push_back(GPUVisible{
+                spr.texture,
+                spr.gpuHandle.index,
+                spr.pass,
+                spr.layer,
+                spr.ySort,
+                eTf.y,
+                spr.sortOrder,
+                seq++
             });
         }
 
-        // 排序 Sprite
-        std::sort(visibles.begin(), visibles.end(),
-                  [](const Visible& A, const Visible& B) {
+        std::sort(gpuDrawables.begin(), gpuDrawables.end(),
+                  [](const GPUVisible& A, const GPUVisible& B) {
+                      if (A.pass  != B.pass)  return static_cast<int>(A.pass) < static_cast<int>(B.pass);
                       if (A.layer != B.layer) return A.layer < B.layer;
                       if (A.ySort != B.ySort) return !A.ySort;
                       if (A.ySort) {
@@ -916,20 +1107,25 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                           if (ay != by) return ay < by;
                       }
                       if (A.sortKey != B.sortKey) return A.sortKey < B.sortKey;
-                      if (A.texture.index != B.texture.index)
-                          return A.texture.index < B.texture.index;
                       return A.seq < B.seq;
                   });
+        if (gpuDrawables.size() > GPUDrivenRenderer::MAX_VISIBLE_SPRITES) {
+            gpuDrawables.resize(GPUDrivenRenderer::MAX_VISIBLE_SPRITES);
+        }
 
-        const uint32_t visibleCount = static_cast<uint32_t>(visibles.size());
+        const uint32_t visibleCount = static_cast<uint32_t>(gpuDrawables.size());
         dev.mutableFrameStats().visibleSpriteCount += visibleCount;
+        ensureMixedGPUCapacity(std::max<uint32_t>(
+            tileGpuBaseIndex_ + static_cast<uint32_t>(tileGpuInstances_.size()),
+            spriteBuffer_.capacity()));
+
         std::vector<uint32_t> visibleIndices(visibleCount);
         std::vector<backend::IRenderDevice::GPUDrawBatch> batches;
         batches.reserve(8);
 
         for (uint32_t k = 0; k < visibleCount; ++k) {
-            visibleIndices[k] = visibles[k].gpuIndex;
-            const TextureHandle tex = visibles[k].texture;
+            visibleIndices[k] = gpuDrawables[k].gpuIndex;
+            const TextureHandle tex = gpuDrawables[k].texture;
             if (batches.empty() || !(batches.back().texture == tex)) {
                 batches.push_back({ tex, k, 1 });
             } else {
@@ -944,9 +1140,9 @@ void RenderSystem::buildCommandBufferGPUDriven() {
 
         // ========== Step 1: GPU 渲染 Sprite ==========
         backend::IRenderDevice::GPURenderParams params;
-        params.spriteBuffer       = spriteBuffer_.currentBuffer();
+        params.spriteBuffer       = mixedGpuSpriteBuffer_;
         params.visibleIndexBuffer = gpuRenderer_.getVisibleIndexBuffer();
-        params.spriteCount        = spriteCount;
+        params.spriteCount        = visibleCount;
         params.visibleCount       = visibleCount;
         params.batches            = std::move(batches);
         params.ownedVisibleIndices = std::move(visibleIndices);
@@ -966,11 +1162,11 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         const auto particles = collectParticleParams(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
 
         // ========== Step 2: CPU 渲染 Text / Tile / UI (叠加在 Sprite 之上) ==========
-        static std::vector<backend::RenderCmd> textCommands;
-        textCommands.clear();
+        static std::vector<backend::RenderCmd> overlayCommands;
+        overlayCommands.clear();
 
-        if (!nonSpriteDrawables.empty()) {
-            for (const Drawable& d : nonSpriteDrawables) {
+        if (!cpuDrawables.empty()) {
+            for (const Drawable& d : cpuDrawables) {
                 // 检查 Pass 是否匹配
                 if ((cam.layerMask & renderPassBit(d.pass)) == 0) continue;
                 
@@ -991,23 +1187,23 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 // 转换为 RenderCmd 并存储
                 if (d.kind == DrawKind::Tile) {
                     backend::RenderCmd cmd = d.tile;  // 复制到 vector
-                    textCommands.push_back(cmd);
+                    overlayCommands.push_back(cmd);
                 } else if (d.kind == DrawKind::Text) {
                     backend::RenderCmd cmd = d.text;  // 复制到 vector
-                    textCommands.push_back(cmd);
+                    overlayCommands.push_back(cmd);
                 }
             }
         }
 
         // 注入 UI 命令（pass=Screen，按本相机 layerMask 过滤）。纯 UI 场景没有
-        // nonSpriteDrawables，也必须提交这一批命令。
+        // cpuDrawables，也必须提交这一批命令。
         if (ctx_.systems.has<UISystem>()) {
             std::vector<const backend::RenderCmd*> uiPtrs;
             ctx_.systems.get<UISystem>().appendDrawCommandPtrs(uiPtrs);
             for (const backend::RenderCmd* p : uiPtrs) {
                 const RenderPass pp = cmdPass(*p);
                 if ((cam.layerMask & renderPassBit(pp)) == 0) continue;
-                textCommands.push_back(*p);
+                overlayCommands.push_back(*p);
             }
         }
 
@@ -1020,7 +1216,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 backend::IRenderDevice::FrameGraphCameraPass node;
                 node.kind = backend::IRenderDevice::FrameGraphPassKind::WorldLighting;
                 node.debugName = "CameraGPUWorldLighting";
-                node.ownedCommands = std::move(textCommands);
+                node.ownedCommands = std::move(overlayCommands);
                 node.worldLighting.worldPass = info;
                 node.worldLighting.hasGPUWorld = true;
                 node.worldLighting.gpuWorld = std::move(params);
@@ -1048,7 +1244,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             node.pass = info;
             node.gpu = std::move(params);
             node.particles = particles;
-            node.ownedCommands = std::move(textCommands);
+            node.ownedCommands = std::move(overlayCommands);
             node.commands.reserve(node.ownedCommands.size());
             for (const auto& cmd : node.ownedCommands) {
                 node.commands.push_back(&cmd);

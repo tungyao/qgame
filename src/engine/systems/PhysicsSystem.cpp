@@ -56,6 +56,9 @@ void PhysicsSystem::integrateVelocities(float dt) {
         // 位置更新：x += v * dt
         tf.x += rb.velocityX * dt;
         tf.y += rb.velocityY * dt;
+        if (rb.velocityX != 0.f || rb.velocityY != 0.f) {
+            world_.patch<Transform>(e);
+        }
     }
 }
 
@@ -77,6 +80,32 @@ AABB makeAABB(const Transform& tf, const Collider& col) {
     float x = tf.x + col.offsetX;
     float y = tf.y + col.offsetY;
     return {x, y, x + col.width, y + col.height};
+}
+
+/**
+ * 从 ECS 实体计算碰撞 AABB。
+ *
+ * 设计约定：
+ * - 没有 Sprite 的纯物理实体沿用旧语义：Transform 是碰撞盒左上角。
+ * - 有 Sprite 的可见实体使用渲染语义：Transform 是 Sprite pivot 所在点。
+ *   Collider::offsetX/Y 从渲染后的 Sprite 左上角开始偏移。这样默认
+ *   pivot=(0.5,0.5)、Collider=Sprite 大小时，碰撞盒会和显示图像重合。
+ */
+AABB makeEntityAABB(entt::registry& world, entt::entity e) {
+    const Transform& tf = world.get<Transform>(e);
+    const Collider& col = world.get<Collider>(e);
+
+    if (const Sprite* sprite = world.try_get<Sprite>(e)) {
+        const float spriteW = sprite->srcRect.w * std::abs(tf.scaleX);
+        const float spriteH = sprite->srcRect.h * std::abs(tf.scaleY);
+        const float left = tf.x - sprite->pivotX * spriteW;
+        const float top = tf.y - sprite->pivotY * spriteH;
+        const float x = left + col.offsetX;
+        const float y = top + col.offsetY;
+        return {x, y, x + col.width, y + col.height};
+    }
+
+    return makeAABB(tf, col);
 }
 
 /**
@@ -175,7 +204,9 @@ void PhysicsSystem::resolveCollisions() {
 
     auto view = world_.view<Transform, Collider>();
     for (auto [e, tf, col] : view.each()) {
-        entries.push_back({e, makeAABB(tf, col)});
+        (void)tf;
+        (void)col;
+        entries.push_back({e, makeEntityAABB(world_, e)});
     }
 
     // O(n²) 碰撞检测
@@ -216,18 +247,22 @@ void PhysicsSystem::resolveCollisions() {
                 // 双方都是动态物体：各承担一半位移
                 tfi.x += sepX * 0.5f; tfi.y += sepY * 0.5f;
                 tfj.x -= sepX * 0.5f; tfj.y -= sepY * 0.5f;
+                world_.patch<Transform>(ei.e);
+                world_.patch<Transform>(ej.e);
             } else if (iHasRb && !iKin) {
                 // 只有 i 是动态物体：i 完全承担位移
                 tfi.x += sepX; tfi.y += sepY;
+                world_.patch<Transform>(ei.e);
             } else if (jHasRb && !jKin) {
                 // 只有 j 是动态物体：j 完全承担位移
                 tfj.x -= sepX; tfj.y -= sepY;
+                world_.patch<Transform>(ej.e);
             }
             // 如果都是静态物体或 kinematic，不做分离
 
             // 更新 AABB，避免同帧后续碰撞检测使用旧位置
-            ei.aabb = makeAABB(world_.get<Transform>(ei.e), ci);
-            ej.aabb = makeAABB(world_.get<Transform>(ej.e), cj);
+            ei.aabb = makeEntityAABB(world_, ei.e);
+            ej.aabb = makeEntityAABB(world_, ej.e);
         }
     }
 
@@ -237,9 +272,9 @@ void PhysicsSystem::resolveCollisions() {
 /**
  * TileMap 静态碰撞 - 只检查动态刚体当前 AABB 覆盖到的 tile 范围。
  *
- * TileMap::Tileset::collision 决定每个 tile gid 是否参与碰撞。任意可见
- * 图层在同一格放置了实心 tile，该格就会被视为 COLLISION_LAYER_STATIC
- * 的实心 AABB。
+ * TileMap::Tileset::collision 决定每个 tile gid 是否参与碰撞。任意
+ * collidable 图层在同一格放置了实心 tile，该格就会被视为
+ * COLLISION_LAYER_STATIC 的实心 AABB。
  */
 void PhysicsSystem::resolveTileCollisions() {
     auto tilemaps = world_.view<Transform, TileMap>();
@@ -254,7 +289,7 @@ void PhysicsSystem::resolveTileCollisions() {
         if (col.isTrigger || rb.isKinematic) continue;
         if (!canCollide(col, tileCollider)) continue;
 
-        AABB actorBox = makeAABB(tf, col);
+        AABB actorBox = makeEntityAABB(world_, actor);
 
         for (auto [mapEntity, mapTf, tmap] : tilemaps.each()) {
             if (tmap.tileSize <= 0 || tmap.width <= 0 || tmap.height <= 0 ||
@@ -294,11 +329,12 @@ void PhysicsSystem::resolveTileCollisions() {
 
                     tf.x += sepX;
                     tf.y += sepY;
+                    world_.patch<Transform>(actor);
 
                     if (sepX != 0.f && rb.velocityX * sepX < 0.f) rb.velocityX = 0.f;
                     if (sepY != 0.f && rb.velocityY * sepY < 0.f) rb.velocityY = 0.f;
 
-                    actorBox = makeAABB(tf, col);
+                    actorBox = makeEntityAABB(world_, actor);
                 }
             }
         }
@@ -345,7 +381,9 @@ RaycastHit PhysicsSystem::raycast(float startX, float startY, float dirX, float 
         // 层过滤
         if ((col.layer & layerMask) == 0) continue;
 
-        AABB box = makeAABB(tf, col);
+        (void)tf;
+        (void)col;
+        AABB box = makeEntityAABB(world_, e);
         
         // Slab 算法：计算射线与 AABB 的交点
         // tMin: 射线进入 AABB 的时间
@@ -387,7 +425,9 @@ RaycastHit PhysicsSystem::raycast(float startX, float startY, float dirX, float 
             result.hitY = startY + dirY * tMin;
             
             // 计算法线（简化：指向碰撞体中心）
-            AABB box = makeAABB(tf, col);
+            (void)tf;
+            (void)col;
+            AABB box = makeEntityAABB(world_, e);
             float cx = (box.minX + box.maxX) * 0.5f;
             float cy = (box.minY + box.maxY) * 0.5f;
             result.normalX = cx - result.hitX;
@@ -432,7 +472,9 @@ std::vector<OverlapResult> PhysicsSystem::overlapBox(float centerX, float center
         // 层过滤
         if ((col.layer & layerMask) == 0) continue;
 
-        AABB box = makeAABB(tf, col);
+        (void)tf;
+        (void)col;
+        AABB box = makeEntityAABB(world_, e);
         if (overlaps(query, box)) {
             OverlapResult r;
             r.entity = e;
@@ -474,7 +516,9 @@ std::vector<entt::entity> PhysicsSystem::overlapCircle(float centerX, float cent
         // 层过滤
         if ((col.layer & layerMask) == 0) continue;
 
-        AABB box = makeAABB(tf, col);
+        (void)tf;
+        (void)col;
+        AABB box = makeEntityAABB(world_, e);
         
         // 找到 AABB 上离圆心最近的点
         // 将圆心 clamp 到 AABB 内部

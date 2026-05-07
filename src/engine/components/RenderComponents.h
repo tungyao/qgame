@@ -65,6 +65,7 @@ struct TileMap {
         std::string name;
         std::vector<int> tiles; // 全局 tile id，-1 表示空
         bool visible = true;
+        bool collidable = true; // 是否参与 TileMap 静态碰撞；独立于 visible，允许隐藏碰撞层
         int renderLayer = 0;
     };
 
@@ -104,7 +105,7 @@ struct TileMap {
 
     bool solidTileAt(int x, int y) const {
         for (int layer = 0; layer < static_cast<int>(layers.size()); ++layer) {
-            if (!layers[layer].visible) continue;
+            if (!layers[layer].collidable) continue;
             if (tileSolid(tileAt(layer, x, y))) return true;
         }
         return false;

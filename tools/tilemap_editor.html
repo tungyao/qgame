@@ -287,11 +287,15 @@
     }
     function index(x, y) { return y * state.width + x; }
     function blankTiles() { return Array(state.width * state.height).fill(-1); }
-    function makeLayer(name, collision = false) {
-      return { name, collision, tiles: blankTiles() };
+    function makeLayer(name, collidable = true) {
+      // collidable 是导出给引擎的物理开关。tileCollision 只描述“哪种 tile
+      // 是实心”，collidable 决定当前图层是否把这些实心 tile 交给 PhysicsSystem。
+      return { name, collidable, tiles: blankTiles() };
     }
     function resetLayers() {
-      state.layers = [makeLayer("地面"), makeLayer("物体"), makeLayer("顶层")];
+      // 顶层通常是树冠、屋顶、装饰等前景遮挡物；默认不参与碰撞，避免视觉
+      // 装饰和地形碰撞混在一起。
+      state.layers = [makeLayer("地面", true), makeLayer("物体", true), makeLayer("顶层", false)];
       state.activeLayer = 0;
     }
     function activeLayer() { return state.layers[state.activeLayer]; }
@@ -364,6 +368,7 @@
 
     function drawCollisionOverlay(cell) {
       state.layers.forEach(layer => {
+        if (!layer.collidable) return;
         for (let y = 0; y < state.height; y++) {
           for (let x = 0; x < state.width; x++) {
             if (!state.tileCollision.has(layer.tiles[index(x, y)])) continue;
@@ -468,6 +473,15 @@
           renderLayers();
           renderMap();
         });
+        const collidable = document.createElement("button");
+        collidable.className = `mini${layer.collidable ? " active" : ""}`;
+        collidable.textContent = layer.collidable ? "碰撞" : "无碰撞";
+        collidable.title = "切换当前图层是否参与 TileMap 静态碰撞";
+        collidable.addEventListener("click", () => {
+          layer.collidable = !layer.collidable;
+          renderLayers();
+          renderMap();
+        });
         const del = document.createElement("button");
         del.className = "mini danger";
         del.textContent = "删除";
@@ -478,7 +492,7 @@
           renderLayers();
           renderMap();
         });
-        row.append(name, select, document.createElement("span"), del);
+        row.append(name, select, collidable, del);
         layersEl.appendChild(row);
       });
     }
@@ -540,6 +554,7 @@
         layers: state.layers.map((layer, i) => ({
           name: layer.name,
           visible: true,
+          collidable: !!layer.collidable,
           renderLayer: i,
           tiles: layer.tiles.slice()
         }))
@@ -592,6 +607,7 @@
         })),
         layers: state.layers.map(layer => ({
           name: layer.name,
+          collidable: !!layer.collidable,
           tiles: layer.tiles.slice()
         })),
         engineTileMap: engineJson()
@@ -627,7 +643,7 @@
       renderMap();
     }
 
-    function loadEngineTileMap(tileMap) {
+    async function loadEngineTileMap(tileMap) {
       state.width = clampInt(tileMap.w ?? tileMap.width, 1, 512);
       state.height = clampInt(tileMap.h ?? tileMap.height, 1, 512);
       state.tileSize = clampInt(tileMap.ts ?? tileMap.tileSize, 4, 256);
@@ -639,6 +655,10 @@
         const firstGid = Number(spec.firstGid ?? 0);
         const count = Number(spec.count ?? 0);
         const cols = Number(spec.cols ?? 1);
+        const sourceKind = spec.sourceKind || (spec.builtin ? "builtin" : "image");
+        const isBuiltin = sourceKind === "builtin" || spec.id === "builtin";
+        const dataUrl = spec.sourceDataUrl || spec.dataUrl || "";
+        const image = (!isBuiltin && dataUrl) ? await loadImage(dataUrl) : null;
         state.tilesets.push({
           id: spec.id || `${firstGid}`,
           name: spec.tex || spec.name || `tileset-${firstGid}`,
@@ -646,7 +666,9 @@
           count,
           cols,
           tileSize: state.tileSize,
-          builtin: false
+          builtin: isBuiltin,
+          dataUrl,
+          image
         });
         const collision = Array.isArray(spec.collision) ? spec.collision : [];
         collision.forEach((solid, local) => {
@@ -659,7 +681,10 @@
       for (let i = 0; i < Math.max(1, srcLayers.length); i++) {
         const spec = srcLayers[i] || {};
         const src = Array.isArray(spec) ? spec : (Array.isArray(spec.tiles) ? spec.tiles : []);
-        const layer = makeLayer(spec.name || ["地面", "物体", "顶层"][i] || `图层 ${i + 1}`);
+        const layer = makeLayer(
+          spec.name || ["地面", "物体", "顶层"][i] || `图层 ${i + 1}`,
+          spec.collidable ?? true
+        );
         for (let n = 0; n < Math.min(src.length, layer.tiles.length); n++) {
           const gid = Number(src[n]);
           layer.tiles[n] = Number.isFinite(gid) ? gid : -1;
@@ -674,7 +699,7 @@
 
     async function loadProject(data) {
       if (!data || data.type !== "qgame.tilemap.editor") {
-        loadEngineTileMap(data.tileMap ?? data.engineTileMap ?? data);
+        await loadEngineTileMap(data.tileMap ?? data.engineTileMap ?? data);
         return;
       }
       if (!Array.isArray(data.layers) && data.tileMap) {
@@ -695,7 +720,7 @@
           }];
           state.nextGid = cols * rows;
         }
-        loadEngineTileMap(data.tileMap);
+        await loadEngineTileMap(data.tileMap);
         return;
       }
       state.width = clampInt(data.width, 1, 512);
@@ -737,7 +762,7 @@
         state.tilesets.unshift({ id: "builtin", name: "内置色块", firstGid: 0, count: builtinColors.length, cols: 4, tileSize: 32, builtin: true });
       }
       state.layers = (Array.isArray(data.layers) ? data.layers : []).map((layer, i) => {
-        const out = makeLayer(layer.name || `图层 ${i + 1}`);
+        const out = makeLayer(layer.name || `图层 ${i + 1}`, layer.collidable ?? true);
         const src = Array.isArray(layer.tiles) ? layer.tiles : [];
         for (let n = 0; n < Math.min(src.length, out.tiles.length); n++) {
           const gid = Number(src[n]);

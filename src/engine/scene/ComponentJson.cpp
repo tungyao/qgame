@@ -111,6 +111,7 @@ static Json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
         Json lj;
         lj["name"] = layer.name;
         lj["visible"] = layer.visible;
+        lj["collidable"] = layer.collidable;
         lj["renderLayer"] = layer.renderLayer;
         lj["tiles"] = layer.tiles;
         j["layers"].push_back(lj);
@@ -144,6 +145,7 @@ static TileMap tilemapFromJson(const Json& j, AssetManager& mgr) {
             TileMap::Layer layer;
             layer.name = lj.value("name", "");
             layer.visible = lj.value("visible", true);
+            layer.collidable = lj.value("collidable", true);
             layer.renderLayer = lj.value("renderLayer", static_cast<int>(tm.layers.size()));
             if (lj.contains("tiles")) {
                 layer.tiles = lj["tiles"].get<std::vector<int>>();
