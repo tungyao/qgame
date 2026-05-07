@@ -151,6 +151,7 @@ private:
     // path writes a compute overlay texture; old OpenGL machines do not have
     // that path, so reflector highlights are drawn as ordinary tinted quads.
     TextureHandle lightingFallbackWhiteTex_{};
+    TextureHandle lightingFallbackRadialTex_{};
     
     // MSDF font shader
     unsigned int msdfShaderProgram_ = 0;

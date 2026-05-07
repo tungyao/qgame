@@ -147,6 +147,8 @@ private:
     ComputePipelineHandle    lighting2DBlurPipeline_{};
     TextureHandle            lighting2DTexture_{};
     TextureHandle            lighting2DBlurTexture_{};
+    TextureHandle            lighting2DWhiteTexture_{};
+    TextureHandle            lighting2DRadialTexture_{};
     BufferHandle             lighting2DLightBuffer_{};
     BufferHandle             lighting2DSegmentBuffer_{};
     BufferHandle             lighting2DReflectorBuffer_{};

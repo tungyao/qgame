@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <cstring>
 #include <variant>
+#include <vector>
 
 #include <SDL3/SDL.h>
 
@@ -214,6 +215,48 @@ void SDLGPURenderDevice::init() {
         dd.filter = TextureFilter::Nearest;
         dummyRegionTex_ = createTexture(dd);
     }
+    {
+        TextureDesc dd{};
+        const uint8_t white[4] = {255, 255, 255, 255};
+        dd.data = white;
+        dd.width = 1;
+        dd.height = 1;
+        dd.channels = 4;
+        dd.format = TextureFormat::RGBA8;
+        dd.filter = TextureFilter::Linear;
+        lighting2DWhiteTexture_ = createTexture(dd);
+    }
+
+    // Graphics-side Light2D composite helper. The compute lighting texture is
+    // still generated below, but this radial sprite path makes Light2D visibly
+    // affect the scene while the final render-graph multiply/composite path is
+    // being hardened.
+    {
+        constexpr int kSize = 128;
+        std::vector<uint8_t> pixels(static_cast<size_t>(kSize * kSize * 4), 0);
+        for (int y = 0; y < kSize; ++y) {
+            for (int x = 0; x < kSize; ++x) {
+                const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(kSize) * 2.f - 1.f;
+                const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(kSize) * 2.f - 1.f;
+                const float d = std::sqrt(nx * nx + ny * ny);
+                const float falloff = std::max(0.f, 1.f - d);
+                const float alpha = falloff * falloff;
+                const size_t idx = static_cast<size_t>((y * kSize + x) * 4);
+                pixels[idx + 0] = 255;
+                pixels[idx + 1] = 255;
+                pixels[idx + 2] = 255;
+                pixels[idx + 3] = static_cast<uint8_t>(std::min(255.f, alpha * 255.f + 0.5f));
+            }
+        }
+
+        TextureDesc lightDesc{};
+        lightDesc.width = kSize;
+        lightDesc.height = kSize;
+        lightDesc.channels = 4;
+        lightDesc.data = pixels.data();
+        lightDesc.filter = TextureFilter::Linear;
+        lighting2DRadialTexture_ = createTexture(lightDesc);
+    }
 
     core::logInfo("SDLGPURenderDevice initialized");
 }
@@ -304,6 +347,14 @@ void SDLGPURenderDevice::shutdown() {
     if (textures_.valid(lighting2DBlurTexture_)) {
         destroyTexture(lighting2DBlurTexture_);
         lighting2DBlurTexture_ = {};
+    }
+    if (textures_.valid(lighting2DWhiteTexture_)) {
+        destroyTexture(lighting2DWhiteTexture_);
+        lighting2DWhiteTexture_ = {};
+    }
+    if (textures_.valid(lighting2DRadialTexture_)) {
+        destroyTexture(lighting2DRadialTexture_);
+        lighting2DRadialTexture_ = {};
     }
     if (buffers_.valid(lighting2DLightBuffer_)) {
         destroyBuffer(lighting2DLightBuffer_);
@@ -2246,12 +2297,91 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
                                               const Lighting2DParams& params) {
     if (!gpuCmdBuf_ || !swapchainTex_) return;
     if (!params.enabled || params.lights.empty()) return;
-    if (!capabilities_.supportsStorageTexture) return;
 
     CameraData cam = params.camera;
     if (cam.viewportW == 0) cam.viewportW = static_cast<int>(params.viewportW ? params.viewportW : swapW_);
     if (cam.viewportH == 0) cam.viewportH = static_cast<int>(params.viewportH ? params.viewportH : swapH_);
     if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
+    frameStats_.lighting2DSubmitCount++;
+
+    auto submitRadialLightComposite = [&]() {
+        if (!textures_.valid(lighting2DRadialTexture_)) return;
+
+        const TextureEntry& radial = textures_.get(lighting2DRadialTexture_);
+        static std::vector<RenderCmd> lightCmds;
+        static std::vector<const RenderCmd*> lightPtrs;
+        lightCmds.clear();
+        lightPtrs.clear();
+        lightCmds.reserve(params.lights.size() + 1u);
+        lightPtrs.reserve(params.lights.size() + 1u);
+
+        if (textures_.valid(lighting2DWhiteTexture_)) {
+            const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+            const float visibleWorldW = static_cast<float>(cam.viewportW) / zoom;
+            const float visibleWorldH = static_cast<float>(cam.viewportH) / zoom;
+            const float darkness = std::min(0.58f,
+                                            std::max(0.18f, 0.54f - params.ambientIntensity * 0.35f));
+
+            DrawSpriteCmd ambient{};
+            ambient.texture = lighting2DWhiteTexture_;
+            ambient.x = cam.x;
+            ambient.y = cam.y;
+            ambient.scaleX = visibleWorldW;
+            ambient.scaleY = visibleWorldH;
+            ambient.pivotX = 0.5f;
+            ambient.pivotY = 0.5f;
+            ambient.srcRect = core::Rect{0.f, 0.f, 1.f, 1.f};
+            ambient.layer = 9998;
+            ambient.pass = engine::RenderPass::World;
+            ambient.tint = core::Color{0, 0, 0,
+                static_cast<uint8_t>(std::min(255.f, darkness * 255.f + 0.5f))};
+            lightCmds.push_back(ambient);
+        }
+
+        for (const Light2DPoint& light : params.lights) {
+            if (light.radius <= 0.f || light.intensity <= 0.f) continue;
+            if ((light.layerMask & engine::renderPassBit(engine::RenderPass::World)) == 0u) continue;
+
+            const float alpha01 = std::min(0.82f,
+                                           std::max(0.06f, 0.10f + light.intensity * 0.18f)) *
+                                  std::max(0.f, std::min(1.f, light.colorA));
+            if (alpha01 <= 0.001f) continue;
+
+            DrawSpriteCmd cmd{};
+            cmd.texture = lighting2DRadialTexture_;
+            cmd.x = light.x;
+            cmd.y = light.y;
+            cmd.scaleX = (light.radius * 2.f) / static_cast<float>(radial.width);
+            cmd.scaleY = (light.radius * 2.f) / static_cast<float>(radial.height);
+            cmd.pivotX = 0.5f;
+            cmd.pivotY = 0.5f;
+            cmd.srcRect = core::Rect{0.f, 0.f,
+                                     static_cast<float>(radial.width),
+                                     static_cast<float>(radial.height)};
+            cmd.layer = 9999;
+            cmd.pass = engine::RenderPass::World;
+            cmd.tint = core::Color{
+                static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorR * 255.f + 0.5f))),
+                static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorG * 255.f + 0.5f))),
+                static_cast<uint8_t>(std::min(255.f, std::max(0.f, light.colorB * 255.f + 0.5f))),
+                static_cast<uint8_t>(std::min(255.f, std::max(0.f, alpha01 * 255.f + 0.5f)))
+            };
+
+            lightCmds.push_back(cmd);
+        }
+
+        if (lightCmds.empty()) return;
+        for (const RenderCmd& cmd : lightCmds) {
+            lightPtrs.push_back(&cmd);
+        }
+        renderCmdsToTarget(gpuCmdBuf_, pipeline_, lightPtrs, cam, false, core::Color::Black,
+                           swapchainTex_, swapW_, swapH_);
+    };
+
+    if (!capabilities_.supportsStorageTexture) {
+        submitRadialLightComposite();
+        return;
+    }
 
     // L3 uploads all lights and all expanded occluder segments. The expensive
     // per-pixel loop no longer scans every light: a short compute pass first
@@ -2493,8 +2623,11 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     overlay.texture = lighting2DTexture_;
     overlay.x = cam.x;
     overlay.y = cam.y;
-    overlay.scaleX = static_cast<float>(cam.viewportW);
-    overlay.scaleY = static_cast<float>(cam.viewportH);
+    const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+    const float visibleWorldW = static_cast<float>(cam.viewportW) / zoom;
+    const float visibleWorldH = static_cast<float>(cam.viewportH) / zoom;
+    overlay.scaleX = visibleWorldW / static_cast<float>(lighting2DTextureWidth_);
+    overlay.scaleY = visibleWorldH / static_cast<float>(lighting2DTextureHeight_);
     overlay.pivotX = 0.5f;
     overlay.pivotY = 0.5f;
     overlay.srcRect = core::Rect{
@@ -2515,6 +2648,7 @@ void SDLGPURenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     overlayInfo.clearEnabled = false;
     renderCmdsToTarget(gpuCmdBuf_, pipeline_, cmds, cam, false, core::Color::Black,
                        swapchainTex_, swapW_, swapH_);
+    submitRadialLightComposite();
 }
 
 void SDLGPURenderDevice::submitGPUParticlePass(const PassSubmitInfo& info,

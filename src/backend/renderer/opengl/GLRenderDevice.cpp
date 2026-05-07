@@ -295,6 +295,33 @@ void GLRenderDevice::init() {
         dd.filter = TextureFilter::Linear;
         lightingFallbackWhiteTex_ = createTexture(dd);
     }
+    {
+        constexpr int kSize = 128;
+        std::vector<uint8_t> pixels(static_cast<size_t>(kSize * kSize * 4), 0);
+        for (int y = 0; y < kSize; ++y) {
+            for (int x = 0; x < kSize; ++x) {
+                const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(kSize) * 2.f - 1.f;
+                const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(kSize) * 2.f - 1.f;
+                const float d = std::sqrt(nx * nx + ny * ny);
+                const float falloff = std::max(0.f, 1.f - d);
+                const float alpha = falloff * falloff;
+                const size_t idx = static_cast<size_t>((y * kSize + x) * 4);
+                pixels[idx + 0] = 255;
+                pixels[idx + 1] = 255;
+                pixels[idx + 2] = 255;
+                pixels[idx + 3] = static_cast<uint8_t>(std::min(255.f, alpha * 255.f + 0.5f));
+            }
+        }
+
+        TextureDesc dd{};
+        dd.data = pixels.data();
+        dd.width = kSize;
+        dd.height = kSize;
+        dd.channels = 4;
+        dd.format = TextureFormat::RGBA8;
+        dd.filter = TextureFilter::Linear;
+        lightingFallbackRadialTex_ = createTexture(dd);
+    }
 
     core::logInfo("GLRenderDevice initialized");
 }
@@ -319,6 +346,10 @@ void GLRenderDevice::shutdown() {
     if (lightingFallbackWhiteTex_.valid()) {
         destroyTexture(lightingFallbackWhiteTex_);
         lightingFallbackWhiteTex_ = {};
+    }
+    if (lightingFallbackRadialTex_.valid()) {
+        destroyTexture(lightingFallbackRadialTex_);
+        lightingFallbackRadialTex_ = {};
     }
 
     if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
@@ -1084,7 +1115,7 @@ void GLRenderDevice::submitGPUParticlePass(const PassSubmitInfo&,
 
 void GLRenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
                                           const Lighting2DParams& params) {
-    if (!lightingFallbackWhiteTex_.valid()) return;
+    if (!lightingFallbackWhiteTex_.valid() && !lightingFallbackRadialTex_.valid()) return;
     if (!params.enabled || params.lights.empty()) return;
 
     // OpenGL fallback for L5 reflections.
@@ -1111,6 +1142,7 @@ void GLRenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     if (cam.viewportW == 0) cam.viewportW = info.camera.viewportW;
     if (cam.viewportH == 0) cam.viewportH = info.camera.viewportH;
     if (cam.viewportW <= 0 || cam.viewportH <= 0) return;
+    frameStats_.lighting2DSubmitCount++;
 
     auto clamp01 = [](float v) {
         return std::max(0.f, std::min(1.f, v));
@@ -1126,6 +1158,62 @@ void GLRenderDevice::submitLighting2DPass(const PassSubmitInfo& info,
     static std::vector<const RenderCmd*> overlayPtrs;
     overlayCmds.clear();
     overlayPtrs.clear();
+
+    if (lightingFallbackWhiteTex_.valid()) {
+        const float zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+        const float visibleWorldW = static_cast<float>(cam.viewportW) / zoom;
+        const float visibleWorldH = static_cast<float>(cam.viewportH) / zoom;
+        const float darkness = std::min(0.58f,
+                                        std::max(0.18f, 0.54f - params.ambientIntensity * 0.35f));
+
+        DrawSpriteCmd ambient{};
+        ambient.texture = lightingFallbackWhiteTex_;
+        ambient.x = cam.x;
+        ambient.y = cam.y;
+        ambient.scaleX = visibleWorldW;
+        ambient.scaleY = visibleWorldH;
+        ambient.pivotX = 0.5f;
+        ambient.pivotY = 0.5f;
+        ambient.srcRect = core::Rect{0.f, 0.f, 1.f, 1.f};
+        ambient.layer = 9998;
+        ambient.pass = engine::RenderPass::World;
+        ambient.tint = core::Color{0, 0, 0, toByte(darkness)};
+        overlayCmds.push_back(ambient);
+    }
+
+    if (lightingFallbackRadialTex_.valid()) {
+        const TextureEntry& radial = textures_.get(lightingFallbackRadialTex_);
+        for (const Light2DPoint& light : params.lights) {
+            if (light.radius <= 0.f || light.intensity <= 0.f) continue;
+            if ((light.layerMask & engine::renderPassBit(engine::RenderPass::World)) == 0u) continue;
+
+            const float alpha01 = std::min(0.82f,
+                                           std::max(0.06f, 0.10f + light.intensity * 0.18f)) *
+                                  clamp01(light.colorA);
+            if (alpha01 <= 0.001f) continue;
+
+            DrawSpriteCmd cmd{};
+            cmd.texture = lightingFallbackRadialTex_;
+            cmd.x = light.x;
+            cmd.y = light.y;
+            cmd.scaleX = (light.radius * 2.f) / static_cast<float>(radial.width);
+            cmd.scaleY = (light.radius * 2.f) / static_cast<float>(radial.height);
+            cmd.pivotX = 0.5f;
+            cmd.pivotY = 0.5f;
+            cmd.srcRect = core::Rect{0.f, 0.f,
+                                     static_cast<float>(radial.width),
+                                     static_cast<float>(radial.height)};
+            cmd.layer = 9999;
+            cmd.pass = engine::RenderPass::World;
+            cmd.tint = core::Color{
+                toByte(light.colorR),
+                toByte(light.colorG),
+                toByte(light.colorB),
+                toByte(alpha01)
+            };
+            overlayCmds.push_back(cmd);
+        }
+    }
 
     batchVerts_.clear();
     batchIdx_.clear();

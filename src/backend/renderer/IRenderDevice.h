@@ -77,6 +77,7 @@ struct RenderFrameStats {
     uint32_t drawCallCount = 0;
     uint32_t computeDispatchCount = 0;
     uint32_t textureBindCount = 0;
+    uint32_t lighting2DSubmitCount = 0;
 
     // Phase L0/L1 lighting counters. These do not imply that lighting is
     // rendered yet; they prove the ECS data path is visible to RenderSystem and
