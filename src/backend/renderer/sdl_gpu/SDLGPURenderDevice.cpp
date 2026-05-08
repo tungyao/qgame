@@ -1206,8 +1206,8 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             const float v0 = (row * ts) / th;
             const float u1 = u0 + ts / tw;
             const float v1 = v0 + ts / th;
-            const float px  = static_cast<float>(t->gridX * ts);
-            const float py  = static_cast<float>(t->gridY * ts);
+            const float px  = t->x;
+            const float py  = t->y;
             const float px1 = px + ts;
             const float py1 = py + ts;
             pushQuad(px,py, px1,py, px1,py1, px,py1, u0,v0, u1,v1,

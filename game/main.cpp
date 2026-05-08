@@ -922,7 +922,9 @@ int main(int argc, char* argv[]) {
 		ts.firstGid = 0;
 		ts.count = 8;
 		ts.columns = 8;
-		ts.collision.resize(8, 0);
+		// Demo map keeps every tile non-blocking; the v2 runtime stores explicit
+		// collision profiles, while legacyCollision remains available for old data.
+		ts.legacyCollision.resize(8, 0);
 		tmap.tilesets.push_back(ts);
 		engine::TileMap::Layer ground{};
 		ground.name = "ground";

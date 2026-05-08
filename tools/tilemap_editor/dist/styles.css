@@ -1,0 +1,375 @@
+/* src/styles.css */
+:root {
+  --bg: #101318;
+  --panel: #181d24;
+  --panel2: #202631;
+  --line: #343c49;
+  --text: #eef3f8;
+  --muted: #9ba8b7;
+  --accent: #25b7a4;
+  --warn: #f0b429;
+  --danger: #e45d5d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  margin: 0;
+  font: 14px / 1.4 system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Noto Sans, Ubuntu, Cantarell, Helvetica Neue, sans-serif;
+}
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  cursor: pointer;
+  border-radius: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 28%, var(--panel2));
+}
+
+button.danger:hover {
+  border-color: var(--danger);
+}
+
+button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+input, select, textarea {
+  border: 1px solid var(--line);
+  background: #0d1117;
+  border-radius: 6px;
+  min-height: 32px;
+  padding: 6px 8px;
+}
+
+input[type="number"] {
+  width: 86px;
+}
+
+input[type="range"] {
+  width: 100%;
+  padding: 0;
+}
+
+input[type="checkbox"] {
+  min-height: 0;
+}
+
+textarea {
+  resize: vertical;
+  width: 100%;
+  min-height: 130px;
+  font: 12px / 1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: 48px 1fr;
+  height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  background: #141922;
+  align-items:  center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+
+.brand {
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status {
+  color: var(--muted);
+  white-space: nowrap;
+  margin-left: auto;
+  font-size: 13px;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) 340px 380px;
+  min-height: 0;
+}
+
+.viewport {
+  overflow: auto;
+  background-color: #0b0f14;
+  background-image: linear-gradient(45deg, #0e141b 25%, #0000 25%), linear-gradient(-45deg, #0e141b 25%, #0000 25%), linear-gradient(45deg, #0000 75%, #0e141b 75%), linear-gradient(-45deg, #0000 75%, #0e141b 75%);
+  background-position: 0 0, 0 16px, 16px -16px, -16px 0;
+  background-size: 32px 32px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.stage-wrap {
+  width: max-content;
+  min-width: 100%;
+  height: max-content;
+  min-height: 100%;
+  padding: 32px;
+}
+
+#mapCanvas {
+  display: block;
+  image-rendering: pixelated;
+  box-shadow: 0 0 0 1px var(--line);
+  cursor: crosshair;
+  background: #151a20;
+}
+
+.side {
+  overflow: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  min-height: 0;
+  padding: 12px;
+}
+
+.section {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+}
+
+.section:last-child {
+  border-bottom: 0;
+  margin-bottom: 0;
+}
+
+.section h2 {
+  color: var(--muted);
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+.row {
+  display: flex;
+  align-items:  center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.row label {
+  color: var(--muted);
+  min-width: 68px;
+}
+
+.checkbox {
+  display: inline-flex;
+  color: var(--muted);
+  align-items:  center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.block-label {
+  display: block;
+  color: var(--muted);
+  margin: 8px 0 6px;
+}
+
+.hint, .summary {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.summary {
+  margin-bottom: 8px;
+}
+
+.tilesets, .layers, .frames {
+  display: grid;
+  gap: 6px;
+}
+
+.tileset-row, .layer-row, .frame-row {
+  display: grid;
+  border: 1px solid var(--line);
+  background: #121720;
+  border-radius: 6px;
+  align-items:  center;
+  gap: 8px;
+  padding: 7px;
+}
+
+.tileset-row {
+  grid-template-columns: 1fr auto;
+}
+
+.layer-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.frame-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
+.layer-row.active {
+  border-color: var(--accent);
+}
+
+.name-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-name-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.layer-name-label {
+  display: flex;
+  border: 1px solid var(--line);
+  background: #0d1117;
+  border-radius: 6px;
+  align-items:  center;
+  min-height: 32px;
+  padding: 6px 8px;
+}
+
+.layer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mini {
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.inline-number {
+  width: 72px;
+}
+
+.palette {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 8px;
+}
+
+.tile-card {
+  position: relative;
+}
+
+.tile-swatch {
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 2px solid var(--line);
+  background: #0d1117;
+  border-radius: 4px;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+}
+
+.tile-swatch.selected {
+  border-color: var(--warn);
+}
+
+.tile-swatch canvas {
+  display: block;
+  image-rendering: pixelated;
+  width: 100%;
+  height: 100%;
+}
+
+.tile-action {
+  position: absolute;
+  border-radius: 4px;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 18px;
+  top: 4px;
+}
+
+.tile-action-left {
+  left: 4px;
+}
+
+.tile-action.active {
+  border-color: var(--danger);
+  background: #33171a;
+}
+
+.tile-badges {
+  position: absolute;
+  display: flex;
+  pointer-events: none;
+  justify-content: flex-end;
+  gap: 4px;
+  bottom: 4px;
+  left: 4px;
+  right: 4px;
+}
+
+.badge {
+  display: inline-flex;
+  color: #fff;
+  background: #000000b8;
+  border-radius: 4px;
+  justify-content: center;
+  align-items:  center;
+  min-width: 16px;
+  height: 16px;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.badge.visual {
+  color: #7be0d6;
+}
+
+.badge.anim {
+  color: #f0d27a;
+}
+
+.badge.collision {
+  color: #ff8e8e;
+}
+
+code {
+  background: #ffffff0f;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font: 12px / 1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

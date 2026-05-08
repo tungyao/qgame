@@ -76,7 +76,8 @@ struct DrawSpriteCmd {
 struct DrawTileCmd {
     TextureHandle        tileset;
     int                  tileId;
-    int                  gridX, gridY;
+    float                x = 0.f;
+    float                y = 0.f;
     int                  tileSize = 16;
     int                  layer    = 0;
     int                  sortKey  = 0;

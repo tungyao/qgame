@@ -24,7 +24,8 @@ public:
     void shutdown()       override;
 
     static void buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb,
-                                   int viewportW, int viewportH);
+                                   int viewportW, int viewportH,
+                                   float tileAnimationTimeSeconds = 0.0f);
 
     SpriteBuffer& spriteBuffer() { return spriteBuffer_; }
     GPUDrivenRenderer& gpuRenderer() { return gpuRenderer_; }
@@ -59,6 +60,11 @@ private:
     struct CachedGPUTile {
         TextureHandle texture; // 当前 tile 所属 tileset 纹理，用于提交时按纹理切批
         uint32_t gpuIndex = 0; // mixedGpuSpriteBuffer_ 中的实例索引
+        entt::entity mapEntity = entt::null; // 反查 TileMap 组件，用于按帧解析动画 frame
+        int baseGid = TileMap::EMPTY_GID; // layer.tiles 中存储的稳定 gid，不随动画跳帧改变
+        int cellX = 0;          // 地图格坐标 X；randomStart 和 per-frame frame 解析都需要
+        int cellY = 0;          // 地图格坐标 Y
+        int layerIndex = 0;     // 图层索引；用于 randomStart hash 与 collision/visual 对齐
         int layer = 0;         // 渲染层，和 Sprite::layer 使用同一排序维度
         bool ySort = true;     // TileMap 默认按行参与 ySort，使角色可插入地形层
         float y = 0.f;         // ySort 使用的世界 Y 坐标
@@ -78,6 +84,7 @@ private:
     std::vector<CachedGPUTile> tileGpuItems_; // CPU 侧排序/裁剪元数据，指向 tileGpuInstances_ 的 GPU 索引
     bool gpuDrivenEnabled_ = false;
     float lastDt_ = 0.f;
+    float tileAnimationTimeSeconds_ = 0.f; // TileMap v2 视觉动画时间轴；只影响渲染，不影响碰撞
     entt::connection destroyConnection_;
     entt::connection transformUpdateConnection_;
 };

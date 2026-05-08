@@ -50,6 +50,20 @@ core::Color parseHexColor(const char* hex) {
     return core::Color::White;
 }
 
+/**
+ * demo6 直接从 engine package JSON 构造 TileMap，因此这里需要和运行时
+ * ComponentJson 的 v2 约定保持一致，显式解析字符串 shape。
+ */
+engine::TileMap::TileCollisionShape parseTileCollisionShape(const nlohmann::json& j, const char* key) {
+    const std::string value = j.value(key, "none");
+    if (value == "full") return engine::TileMap::TileCollisionShape::Full;
+    if (value == "rect") return engine::TileMap::TileCollisionShape::Rect;
+    if (value == "polygon") return engine::TileMap::TileCollisionShape::Polygon;
+    if (value == "oneWay") return engine::TileMap::TileCollisionShape::OneWay;
+    if (value == "trigger") return engine::TileMap::TileCollisionShape::Trigger;
+    return engine::TileMap::TileCollisionShape::None;
+}
+
 std::string readFile(const std::string& path) {
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs.is_open()) return {};
@@ -232,8 +246,31 @@ int main(int argc, char** argv) {
             ts.count    = tj.value("count", 0);
             ts.columns  = tj.value("cols", 1);
 
+            // v2 collision profiles are the canonical runtime data. Keep reading
+            // legacy collision[] as a fallback so old sample packages still run.
+            if (tj.contains("collisions") && tj["collisions"].is_array()) {
+                for (const auto& cj : tj["collisions"]) {
+                    engine::TileMap::TileCollision collision;
+                    collision.gid = cj.value("gid", engine::TileMap::EMPTY_GID);
+                    collision.shape = parseTileCollisionShape(cj, "shape");
+                    if (cj.contains("points") && cj["points"].is_array()) {
+                        collision.points = cj["points"].get<std::vector<float>>();
+                    }
+                    ts.collisions.push_back(std::move(collision));
+                }
+            }
+
             if (tj.contains("collision") && tj["collision"].is_array()) {
-                ts.collision = tj["collision"].get<std::vector<uint8_t>>();
+                ts.legacyCollision = tj["collision"].get<std::vector<uint8_t>>();
+                if (ts.collisions.empty()) {
+                    for (int local = 0; local < static_cast<int>(ts.legacyCollision.size()); ++local) {
+                        if (ts.legacyCollision[local] == 0) continue;
+                        engine::TileMap::TileCollision collision;
+                        collision.gid = ts.firstGid + local;
+                        collision.shape = engine::TileMap::TileCollisionShape::Full;
+                        ts.collisions.push_back(std::move(collision));
+                    }
+                }
             }
 
             std::string kind    = tj.value("sourceKind", "");
@@ -286,12 +323,11 @@ int main(int argc, char** argv) {
     std::fprintf(stdout, "Collision tiles: ");
     bool first = true;
     for (const auto& ts : tmap.tilesets) {
-        for (int i = 0; i < static_cast<int>(ts.collision.size()); ++i) {
-            if (ts.collision[i]) {
-                if (!first) std::fprintf(stdout, ", ");
-                std::fprintf(stdout, "gid=%d", ts.firstGid + i);
-                first = false;
-            }
+        for (const auto& collision : ts.collisions) {
+            if (collision.shape == engine::TileMap::TileCollisionShape::None) continue;
+            if (!first) std::fprintf(stdout, ", ");
+            std::fprintf(stdout, "gid=%d", collision.gid);
+            first = false;
         }
     }
     std::fprintf(stdout, "%s\n", first ? "(none)" : "");

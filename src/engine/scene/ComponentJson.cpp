@@ -88,6 +88,52 @@ static Sprite spriteFromJson(const Json& j, AssetManager& mgr) {
     return s;
 }
 
+static const char* tileVisualKindToString(TileMap::TileVisualKind kind) {
+    switch (kind) {
+        case TileMap::TileVisualKind::Static: return "static";
+        case TileMap::TileVisualKind::Flipbook: return "flipbook";
+        case TileMap::TileVisualKind::Wind: return "wind";
+        case TileMap::TileVisualKind::Water: return "water";
+        case TileMap::TileVisualKind::WaterFlipbook: return "waterFlipbook";
+        case TileMap::TileVisualKind::Emissive: return "emissive";
+        case TileMap::TileVisualKind::Autotile: return "autotile";
+    }
+    return "static";
+}
+
+static TileMap::TileVisualKind tileVisualKindFromString(const Json& j, const char* key) {
+    const std::string value = j.value(key, "static");
+    if (value == "flipbook") return TileMap::TileVisualKind::Flipbook;
+    if (value == "wind") return TileMap::TileVisualKind::Wind;
+    if (value == "water") return TileMap::TileVisualKind::Water;
+    if (value == "waterFlipbook") return TileMap::TileVisualKind::WaterFlipbook;
+    if (value == "emissive") return TileMap::TileVisualKind::Emissive;
+    if (value == "autotile") return TileMap::TileVisualKind::Autotile;
+    return TileMap::TileVisualKind::Static;
+}
+
+static const char* tileCollisionShapeToString(TileMap::TileCollisionShape shape) {
+    switch (shape) {
+        case TileMap::TileCollisionShape::None: return "none";
+        case TileMap::TileCollisionShape::Full: return "full";
+        case TileMap::TileCollisionShape::Rect: return "rect";
+        case TileMap::TileCollisionShape::Polygon: return "polygon";
+        case TileMap::TileCollisionShape::OneWay: return "oneWay";
+        case TileMap::TileCollisionShape::Trigger: return "trigger";
+    }
+    return "none";
+}
+
+static TileMap::TileCollisionShape tileCollisionShapeFromString(const Json& j, const char* key) {
+    const std::string value = j.value(key, "none");
+    if (value == "full") return TileMap::TileCollisionShape::Full;
+    if (value == "rect") return TileMap::TileCollisionShape::Rect;
+    if (value == "polygon") return TileMap::TileCollisionShape::Polygon;
+    if (value == "oneWay") return TileMap::TileCollisionShape::OneWay;
+    if (value == "trigger") return TileMap::TileCollisionShape::Trigger;
+    return TileMap::TileCollisionShape::None;
+}
+
 static Json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
     Json j;
     j["type"] = TileMap::FORMAT_TYPE;
@@ -98,14 +144,55 @@ static Json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
     j["tilesets"] = Json::array();
     for (const auto& ts : tm.tilesets) {
         Json tj;
+        if (!ts.id.empty()) tj["id"] = ts.id;
+        if (!ts.name.empty()) tj["name"] = ts.name;
         tj["firstGid"] = ts.firstGid;
         tj["count"]    = ts.count;
         tj["cols"]     = ts.columns;
-        tj["collision"] = ts.collision;
-        if (const std::string& id = mgr.textureAssetId(ts.texture); !id.empty()) {
-            tj["assetId"] = id;
+        const std::string assetId = !ts.assetId.empty() ? ts.assetId : mgr.textureAssetId(ts.texture);
+        const std::string texturePath = !ts.texturePath.empty() ? ts.texturePath : mgr.texturePath(ts.texture);
+        if (!assetId.empty()) tj["assetId"] = assetId;
+        if (!texturePath.empty()) tj["tex"] = texturePath;
+        if (!ts.sourceKind.empty()) tj["sourceKind"] = ts.sourceKind;
+        if (!ts.sourceDataUrl.empty()) tj["sourceDataUrl"] = ts.sourceDataUrl;
+
+        tj["animations"] = Json::array();
+        for (const auto& animation : ts.animations) {
+            Json aj;
+            aj["baseGid"] = animation.baseGid;
+            aj["randomStart"] = animation.randomStart;
+            aj["speed"] = animation.speed;
+            aj["frames"] = Json::array();
+            for (const auto& frame : animation.frames) {
+                aj["frames"].push_back({
+                    {"gid", frame.gid},
+                    {"duration", frame.duration}
+                });
+            }
+            tj["animations"].push_back(std::move(aj));
         }
-        tj["tex"] = mgr.texturePath(ts.texture);
+
+        tj["visuals"] = Json::array();
+        for (const auto& visual : ts.visuals) {
+            tj["visuals"].push_back({
+                {"gid", visual.gid},
+                {"kind", tileVisualKindToString(visual.kind)},
+                {"animation", visual.animation},
+                {"speed", visual.speed},
+                {"strength", visual.strength},
+                {"phase", visual.phase},
+                {"flags", visual.flags}
+            });
+        }
+
+        tj["collisions"] = Json::array();
+        for (const auto& collision : ts.collisions) {
+            Json cj;
+            cj["gid"] = collision.gid;
+            cj["shape"] = tileCollisionShapeToString(collision.shape);
+            if (!collision.points.empty()) cj["points"] = collision.points;
+            tj["collisions"].push_back(std::move(cj));
+        }
         j["tilesets"].push_back(tj);
     }
     j["layers"] = Json::array();
@@ -126,19 +213,84 @@ static TileMap tilemapFromJson(const Json& j, AssetManager& mgr) {
     tm.width    = j.value("w",  0);
     tm.height   = j.value("h",  0);
     tm.tileSize = j.value("ts", 16);
+    const int version = j.value("version", 1);
+    const std::string type = j.value("type", version >= TileMap::FORMAT_VERSION
+                                               ? TileMap::FORMAT_TYPE
+                                               : TileMap::LEGACY_FORMAT_TYPE);
+    const bool isLegacyV1 = (type == TileMap::LEGACY_FORMAT_TYPE) || version <= 1;
+
     if (j.contains("tilesets")) {
         for (const auto& tj : j["tilesets"]) {
             TileMap::Tileset ts;
+            ts.id = tj.value("id", "");
+            ts.name = tj.value("name", "");
             ts.firstGid = tj.value("firstGid", 0);
             ts.count    = tj.value("count", 0);
             ts.columns  = tj.value("cols", 1);
-            if (tj.contains("collision")) {
-                ts.collision = tj["collision"].get<std::vector<uint8_t>>();
+            ts.assetId = tj.value("assetId", "");
+            ts.texturePath = tj.value("tex", "");
+            ts.sourceKind = tj.value("sourceKind", "");
+            ts.sourceDataUrl = tj.value("sourceDataUrl", "");
+
+            if (tj.contains("animations")) {
+                for (const auto& aj : tj["animations"]) {
+                    TileMap::TileAnimation animation;
+                    animation.baseGid = aj.value("baseGid", TileMap::EMPTY_GID);
+                    animation.randomStart = aj.value("randomStart", false);
+                    animation.speed = aj.value("speed", 1.0f);
+                    if (aj.contains("frames")) {
+                        for (const auto& fj : aj["frames"]) {
+                            TileMap::TileAnimationFrame frame;
+                            frame.gid = fj.value("gid", TileMap::EMPTY_GID);
+                            frame.duration = fj.value("duration", 0.1f);
+                            animation.frames.push_back(std::move(frame));
+                        }
+                    }
+                    ts.animations.push_back(std::move(animation));
+                }
             }
-            const std::string texId = tj.value("assetId", "");
-            const std::string texPath = tj.value("tex", "");
-            if (!texId.empty()) ts.texture = mgr.loadTextureById(texId);
-            if (!ts.texture.valid() && !texPath.empty()) ts.texture = mgr.loadTexture(texPath);
+
+            if (tj.contains("visuals")) {
+                for (const auto& vj : tj["visuals"]) {
+                    TileMap::TileVisual visual;
+                    visual.gid = vj.value("gid", TileMap::EMPTY_GID);
+                    visual.kind = tileVisualKindFromString(vj, "kind");
+                    visual.animation = vj.value("animation", -1);
+                    visual.speed = vj.value("speed", 1.0f);
+                    visual.strength = vj.value("strength", 0.0f);
+                    visual.phase = vj.value("phase", 0.0f);
+                    visual.flags = vj.value("flags", 0u);
+                    ts.visuals.push_back(std::move(visual));
+                }
+            }
+
+            if (tj.contains("collisions")) {
+                for (const auto& cj : tj["collisions"]) {
+                    TileMap::TileCollision collision;
+                    collision.gid = cj.value("gid", TileMap::EMPTY_GID);
+                    collision.shape = tileCollisionShapeFromString(cj, "shape");
+                    if (cj.contains("points")) {
+                        collision.points = cj["points"].get<std::vector<float>>();
+                    }
+                    ts.collisions.push_back(std::move(collision));
+                }
+            }
+
+            if (tj.contains("collision")) {
+                ts.legacyCollision = tj["collision"].get<std::vector<uint8_t>>();
+                if (isLegacyV1 && ts.collisions.empty()) {
+                    for (size_t local = 0; local < ts.legacyCollision.size(); ++local) {
+                        if (ts.legacyCollision[local] == 0) continue;
+                        TileMap::TileCollision collision;
+                        collision.gid = ts.firstGid + static_cast<int>(local);
+                        collision.shape = TileMap::TileCollisionShape::Full;
+                        ts.collisions.push_back(std::move(collision));
+                    }
+                }
+            }
+
+            if (!ts.assetId.empty()) ts.texture = mgr.loadTextureById(ts.assetId);
+            if (!ts.texture.valid() && !ts.texturePath.empty()) ts.texture = mgr.loadTexture(ts.texturePath);
             tm.tilesets.push_back(std::move(ts));
         }
     }

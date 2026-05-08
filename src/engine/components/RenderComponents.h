@@ -1,5 +1,7 @@
 #pragma once
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -70,18 +72,93 @@ struct Transform {
  * - localTileId = gid - firstGid，用于查找 tileset atlas 中的 tile 和 collision。
  *
  * 编辑器/导入导出 JSON 约定：
- * - TileMap 组件本体使用 qgame.tilemap.v1 结构；完整资源包使用
- *   qgame.tilemap.engine-package。
+ * - TileMap 组件本体当前导出 qgame.tilemap.v2 结构；完整资源包仍使用
+ *   qgame.tilemap.engine-package 作为外层包装类型。
+ * - 运行时保留 qgame.tilemap.v1 导入兼容：旧版 tileset collision[] 会在
+ *   读取时映射为 v2 TileCollision::Full。
  * - 字段名保持短名以减少地图文件体积：
  *   w=width, h=height, ts=tileSize, cols=tileset columns。
- * - tools/tilemap_editor.html 应按这些常量和字段语义导出，避免编辑器和运行时
+ * - tools/tilemap_editor/ 应按这些常量和字段语义导出，避免编辑器和运行时
  *   对 visible/collidable/renderLayer 的含义产生分歧。
  */
 struct TileMap {
     static constexpr int EMPTY_GID = -1;
-    static constexpr int FORMAT_VERSION = 1;
-    static constexpr const char* FORMAT_TYPE = "qgame.tilemap.v1";
+    static constexpr int FORMAT_VERSION = 2;
+    static constexpr const char* FORMAT_TYPE = "qgame.tilemap.v2";
+    static constexpr const char* LEGACY_FORMAT_TYPE = "qgame.tilemap.v1";
     static constexpr const char* ENGINE_PACKAGE_TYPE = "qgame.tilemap.engine-package";
+    static constexpr int ENGINE_PACKAGE_VERSION = 2;
+
+    /**
+     * TileAnimationFrame 定义 flipbook 动画中的单帧显示 gid。
+     *
+     * gid 仍然使用全局 gid，这样编辑器不需要猜测 frame 属于哪个 tileset，
+     * 运行时也可以统一复用 tilesetForGid/localTileId 逻辑。
+     */
+    struct TileAnimationFrame {
+        int gid = EMPTY_GID;
+        float duration = 0.1f;
+    };
+
+    /**
+     * TileAnimation 描述“某个放置在 layer.tiles 中的 baseGid”如何随时间切换到
+     * 若干显示帧。baseGid 是地图里真正存储的稳定值；frames 决定画面上显示什么。
+     */
+    struct TileAnimation {
+        int baseGid = EMPTY_GID;
+        std::vector<TileAnimationFrame> frames;
+        bool randomStart = false;
+        float speed = 1.0f;
+    };
+
+    enum class TileVisualKind : uint8_t {
+        Static = 0,
+        Flipbook,
+        Wind,
+        Water,
+        WaterFlipbook,
+        Emissive,
+        Autotile
+    };
+
+    /**
+     * TileVisual 只描述“如何渲染 gid”，不描述碰撞。
+     *
+     * animation 是 Tileset::animations 的下标。对于 Flipbook/WaterFlipbook，
+     * 渲染器会先用该动画表解析当前显示帧；其他 visual kind 则保留 gid 本身。
+     */
+    struct TileVisual {
+        int gid = EMPTY_GID;
+        TileVisualKind kind = TileVisualKind::Static;
+        int animation = -1;
+        float speed = 1.0f;
+        float strength = 0.0f;
+        float phase = 0.0f;
+        uint32_t flags = 0;
+    };
+
+    enum class TileCollisionShape : uint8_t {
+        None = 0,
+        Full,
+        Rect,
+        Polygon,
+        OneWay,
+        Trigger
+    };
+
+    /**
+     * TileCollision 描述 gid 的物理形状。
+     *
+     * points 约定：
+     * - Rect: [x, y, w, h]
+     * - Polygon: [x0, y0, x1, y1, ...]
+     * - Full/None/Trigger 可留空
+     */
+    struct TileCollision {
+        int gid = EMPTY_GID;
+        TileCollisionShape shape = TileCollisionShape::None;
+        std::vector<float> points;
+    };
 
     /**
      * Tileset 描述一张 tile atlas 在全局 gid 空间中的范围。
@@ -97,15 +174,27 @@ struct TileMap {
      *   "assetId": "optional AssetManager id",
      *   "sourceKind": "builtin|image",
      *   "sourceDataUrl": "optional editor package image data",
-     *   "collision": [0, 1, ...]
+     *   "animations": [...],
+     *   "visuals": [...],
+     *   "collisions": [...]
      * }
      */
     struct Tileset {
+        std::string id;
+        std::string name;
+        std::string texturePath;
+        std::string assetId;
+        std::string sourceKind;
+        std::string sourceDataUrl;
+
         TextureHandle texture;              // 渲染用 atlas 纹理；加载器负责把 JSON tex/assetId 转成句柄
         int firstGid = 0;                   // 全局 tile id 起点，包含该值
         int count    = 0;                   // tile 数量；有效 gid 范围是 [firstGid, firstGid + count)
         int columns  = 1;                   // atlas 横向 tile 数；localId % columns 得到 atlas x
-        std::vector<uint8_t> collision;     // 每个 local tile 的碰撞标记；0=非实心，非0=实心
+        std::vector<TileAnimation> animations;
+        std::vector<TileVisual> visuals;
+        std::vector<TileCollision> collisions;
+        std::vector<uint8_t> legacyCollision; // 仅用于 v1 导入兼容；导出 v2 时不再写回
     };
 
     /**
@@ -167,6 +256,7 @@ struct TileMap {
      * 根据全局 gid 查找负责该 gid 的 Tileset。EMPTY_GID 或未声明 gid 返回 nullptr。
      */
     const Tileset* tilesetForGid(int gid) const {
+        if (gid == EMPTY_GID) return nullptr;
         for (const auto& ts : tilesets) {
             if (gid >= ts.firstGid && gid < ts.firstGid + ts.count) return &ts;
         }
@@ -182,14 +272,196 @@ struct TileMap {
     }
 
     /**
-     * 判断某个 gid 在 Tileset collision 表中是否为实心 tile。
+     * 查找 gid 的显式 visual 定义。未声明时返回 nullptr，调用者应按 Static 处理。
+     */
+    const TileVisual* visualForGid(int gid) const {
+        const Tileset* ts = tilesetForGid(gid);
+        if (!ts) return nullptr;
+        for (const TileVisual& visual : ts->visuals) {
+            if (visual.gid == gid) return &visual;
+        }
+        return nullptr;
+    }
+
+    /**
+     * 查找 gid 对应的动画定义。
+     *
+     * 优先级：
+     * 1. 若 TileVisual.animation 指向有效索引，则直接使用该动画。
+     * 2. 否则按 baseGid 线性匹配，方便没有显式 visual 的导入数据也能工作。
+     */
+    const TileAnimation* animationForGid(int gid) const {
+        const Tileset* ts = tilesetForGid(gid);
+        if (!ts) return nullptr;
+
+        if (const TileVisual* visual = visualForGid(gid)) {
+            if (visual->animation >= 0 &&
+                visual->animation < static_cast<int>(ts->animations.size())) {
+                return &ts->animations[static_cast<size_t>(visual->animation)];
+            }
+        }
+
+        for (const TileAnimation& animation : ts->animations) {
+            if (animation.baseGid == gid) return &animation;
+        }
+        return nullptr;
+    }
+
+    /**
+     * 查找 gid 的显式碰撞定义。未声明时返回 nullptr；调用者可继续检查
+     * legacyCollision 兼容数据并按默认 None 处理。
+     */
+    const TileCollision* collisionForGid(int gid) const {
+        const Tileset* ts = tilesetForGid(gid);
+        if (!ts) return nullptr;
+        for (const TileCollision& collision : ts->collisions) {
+            if (collision.gid == gid) return &collision;
+        }
+        return nullptr;
+    }
+
+    /**
+     * 解析当前时间下该 gid 实际应显示的 frame gid。
+     *
+     * 只有 Flipbook/WaterFlipbook 会切换显示帧；其他 visual kind 目前保持原 gid。
+     * randomStart 使用 cell 坐标和 layer 生成稳定伪随机起点，保证地图里重复水面
+     * tile 不会完全同步闪烁，同时不会因为帧率变化而跳变。
+     */
+    int resolveVisualGid(int gid, float timeSeconds, int x = 0, int y = 0, int layer = 0) const {
+        const TileVisual* visual = visualForGid(gid);
+        if (!visual) return gid;
+
+        switch (visual->kind) {
+            case TileVisualKind::Flipbook:
+            case TileVisualKind::WaterFlipbook:
+                break;
+            case TileVisualKind::Static:
+            case TileVisualKind::Wind:
+            case TileVisualKind::Water:
+            case TileVisualKind::Emissive:
+            case TileVisualKind::Autotile:
+            default:
+                return gid;
+        }
+
+        const TileAnimation* animation = animationForGid(gid);
+        if (!animation || animation->frames.empty()) return gid;
+
+        float totalDuration = 0.0f;
+        for (const TileAnimationFrame& frame : animation->frames) {
+            totalDuration += std::max(frame.duration, 0.0001f);
+        }
+        if (totalDuration <= 0.0f) return gid;
+
+        const float visualSpeed = (visual->speed > 0.0f) ? visual->speed : 1.0f;
+        const float animSpeed = (animation->speed > 0.0f) ? animation->speed : 1.0f;
+        float phaseSeconds = visual->phase;
+        if (animation->randomStart) {
+            auto mix = [](uint32_t h, uint32_t v) {
+                h ^= v + 0x9e3779b9u + (h << 6u) + (h >> 2u);
+                return h;
+            };
+            uint32_t h = 2166136261u;
+            h = mix(h, static_cast<uint32_t>(gid));
+            h = mix(h, static_cast<uint32_t>(x));
+            h = mix(h, static_cast<uint32_t>(y));
+            h = mix(h, static_cast<uint32_t>(layer));
+            const float normalized = static_cast<float>(h & 0x00FFFFFFu) /
+                                     static_cast<float>(0x01000000u);
+            phaseSeconds += normalized * totalDuration;
+        }
+
+        float localTime = std::fmod(timeSeconds * visualSpeed * animSpeed + phaseSeconds,
+                                    totalDuration);
+        if (localTime < 0.0f) localTime += totalDuration;
+
+        float cursor = 0.0f;
+        for (const TileAnimationFrame& frame : animation->frames) {
+            const float duration = std::max(frame.duration, 0.0001f);
+            if (localTime < cursor + duration) {
+                return frame.gid != EMPTY_GID ? frame.gid : gid;
+            }
+            cursor += duration;
+        }
+
+        const TileAnimationFrame& lastFrame = animation->frames.back();
+        return lastFrame.gid != EMPTY_GID ? lastFrame.gid : gid;
+    }
+
+    /**
+     * 返回 gid 的完整碰撞 profile；显式 v2 碰撞优先，其次兼容旧版 collision[]。
+     */
+    TileCollision collisionProfileForGid(int gid) const {
+        TileCollision out;
+        out.gid = gid;
+        out.shape = TileCollisionShape::None;
+
+        if (gid == EMPTY_GID) return out;
+        if (const TileCollision* explicitCollision = collisionForGid(gid)) {
+            return *explicitCollision;
+        }
+
+        const Tileset* ts = tilesetForGid(gid);
+        if (!ts) return out;
+        const int local = gid - ts->firstGid;
+        if (local < 0 || local >= static_cast<int>(ts->legacyCollision.size())) return out;
+        if (ts->legacyCollision[static_cast<size_t>(local)] != 0) {
+            out.shape = TileCollisionShape::Full;
+        }
+        return out;
+    }
+
+    /**
+     * 判断某个 gid 是否产生阻挡碰撞。
+     *
+     * Trigger 只汇报事件，不阻挡；其余有体积的 shape 都视为阻挡。
+     */
+    bool tileBlocks(int gid) const {
+        const TileCollision collision = collisionProfileForGid(gid);
+        switch (collision.shape) {
+            case TileCollisionShape::None:
+            case TileCollisionShape::Trigger:
+                return false;
+            case TileCollisionShape::Full:
+            case TileCollisionShape::Rect:
+            case TileCollisionShape::Polygon:
+            case TileCollisionShape::OneWay:
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * 判断某个 gid 是否为 trigger tile。
+     */
+    bool tileTriggers(int gid) const {
+        return collisionProfileForGid(gid).shape == TileCollisionShape::Trigger;
+    }
+
+    /**
+     * 兼容旧调用点：tileSolid 现在等价于“是否阻挡”。
      */
     bool tileSolid(int gid) const {
-        const Tileset* ts = tilesetForGid(gid);
-        if (!ts) return false;
-        const int local = gid - ts->firstGid;
-        if (local < 0 || local >= static_cast<int>(ts->collision.size())) return false;
-        return ts->collision[static_cast<size_t>(local)] != 0;
+        return tileBlocks(gid);
+    }
+
+    /**
+     * 返回某个图层/格子的碰撞定义。
+     *
+     * layer 非法、坐标越界、图层不参与碰撞或 cell 为空时，都返回 shape=None。
+     */
+    TileCollision collisionAt(int layer, int x, int y) const {
+        TileCollision out;
+        out.shape = TileCollisionShape::None;
+        out.gid = EMPTY_GID;
+
+        if (layer < 0 || layer >= static_cast<int>(layers.size())) return out;
+        if (!inBounds(x, y)) return out;
+        if (!layers[static_cast<size_t>(layer)].collidable) return out;
+
+        const int gid = tileAt(layer, x, y);
+        out = collisionProfileForGid(gid);
+        return out;
     }
 
     /**
@@ -198,7 +470,7 @@ struct TileMap {
     bool solidTileAt(int x, int y) const {
         for (int layer = 0; layer < static_cast<int>(layers.size()); ++layer) {
             if (!layers[layer].collidable) continue;
-            if (tileSolid(tileAt(layer, x, y))) return true;
+            if (tileBlocks(tileAt(layer, x, y))) return true;
         }
         return false;
     }

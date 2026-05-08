@@ -91,12 +91,45 @@ bool cmdAABB(const backend::RenderCmd& cmd,
     }
     if (auto* t = std::get_if<backend::DrawTileCmd>(&cmd)) {
         const float ts = static_cast<float>(t->tileSize);
-        cx = t->gridX * ts + ts * 0.5f;
-        cy = t->gridY * ts + ts * 0.5f;
+        cx = t->x + ts * 0.5f;
+        cy = t->y + ts * 0.5f;
         halfW = halfH = ts * 0.5f;
         return true;
     }
     return false;
+}
+
+struct ResolvedTileFrame {
+    const TileMap::Tileset* tileset = nullptr;
+    int gid = TileMap::EMPTY_GID;
+    int localTileId = -1;
+};
+
+/**
+ * 统一解析“某个地图格此刻该显示哪个 tile frame”。
+ *
+ * TileMap v2 把 layer cell 中存储的 stable gid 和真正显示的 frame gid 拆开了。
+ * RenderSystem、GPU cache 和任何调试视图都应该走同一套解析逻辑，避免出现
+ * CPU 路径和 GPU 路径对动画帧理解不一致的问题。
+ */
+ResolvedTileFrame resolveTileFrame(const TileMap& tmap,
+                                   int baseGid,
+                                   float timeSeconds,
+                                   int cellX,
+                                   int cellY,
+                                   int layerIndex) {
+    ResolvedTileFrame out{};
+    if (baseGid == TileMap::EMPTY_GID) return out;
+
+    out.gid = tmap.resolveVisualGid(baseGid, timeSeconds, cellX, cellY, layerIndex);
+    out.tileset = tmap.tilesetForGid(out.gid);
+    out.localTileId = tmap.localTileId(out.gid);
+    if (!out.tileset || out.localTileId < 0) {
+        out.gid = baseGid;
+        out.tileset = tmap.tilesetForGid(baseGid);
+        out.localTileId = tmap.localTileId(baseGid);
+    }
+    return out;
 }
 
 backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ctx,
@@ -250,6 +283,7 @@ void RenderSystem::update(float dt) {
         return;
     }
     lastDt_ = dt;
+    tileAnimationTimeSeconds_ += dt;
     syncParticleEmitters(dt);
     syncEntitiesToGPU();
     spriteBuffer_.advanceFrame();
@@ -539,6 +573,40 @@ uint64_t RenderSystem::computeTileGPUCacheSignature() const {
             mixI32(ts.firstGid);
             mixI32(ts.count);
             mixI32(ts.columns);
+            mixU64(ts.animations.size());
+            for (const auto& animation : ts.animations) {
+                mixI32(animation.baseGid);
+                mixU64(animation.randomStart ? 1u : 0u);
+                mixF32(animation.speed);
+                mixU64(animation.frames.size());
+                for (const auto& frame : animation.frames) {
+                    mixI32(frame.gid);
+                    mixF32(frame.duration);
+                }
+            }
+            mixU64(ts.visuals.size());
+            for (const auto& visual : ts.visuals) {
+                mixI32(visual.gid);
+                mixU64(static_cast<uint64_t>(visual.kind));
+                mixI32(visual.animation);
+                mixF32(visual.speed);
+                mixF32(visual.strength);
+                mixF32(visual.phase);
+                mixU64(visual.flags);
+            }
+            mixU64(ts.collisions.size());
+            for (const auto& collision : ts.collisions) {
+                mixI32(collision.gid);
+                mixU64(static_cast<uint64_t>(collision.shape));
+                mixU64(collision.points.size());
+                for (float point : collision.points) {
+                    mixF32(point);
+                }
+            }
+            mixU64(ts.legacyCollision.size());
+            for (uint8_t value : ts.legacyCollision) {
+                mixU64(value);
+            }
         }
         mixU64(tmap.layers.size());
         for (const auto& layer : tmap.layers) {
@@ -569,7 +637,6 @@ void RenderSystem::rebuildTileGPUCacheIfNeeded() {
     int seq = 0;
     auto tileView = ctx_.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
-        (void)ent;
         if (tmap.tileSize <= 0) continue;
 
         for (int layerIndex = 0; layerIndex < static_cast<int>(tmap.layers.size()); ++layerIndex) {
@@ -578,16 +645,16 @@ void RenderSystem::rebuildTileGPUCacheIfNeeded() {
 
             for (int y = 0; y < tmap.height; ++y) {
                 for (int x = 0; x < tmap.width; ++x) {
-                    const int gid = tmap.tileAt(layerIndex, x, y);
-                    const TileMap::Tileset* tileset = tmap.tilesetForGid(gid);
-                    const int tileId = tmap.localTileId(gid);
-                    if (!tileset || !tileset->texture.valid() || tileId < 0) continue;
+                    const int baseGid = tmap.tileAt(layerIndex, x, y);
+                    const ResolvedTileFrame frame =
+                        resolveTileFrame(tmap, baseGid, tileAnimationTimeSeconds_, x, y, layerIndex);
+                    if (!frame.tileset || !frame.tileset->texture.valid() || frame.localTileId < 0) continue;
 
                     int texW = 1, texH = 1;
-                    ctx_.renderDevice().getTextureDimensions(tileset->texture, texW, texH);
-                    const int columns = std::max(1, tileset->columns);
-                    const int sx = (tileId % columns) * tmap.tileSize;
-                    const int sy = (tileId / columns) * tmap.tileSize;
+                    ctx_.renderDevice().getTextureDimensions(frame.tileset->texture, texW, texH);
+                    const int columns = std::max(1, frame.tileset->columns);
+                    const int sx = (frame.localTileId % columns) * tmap.tileSize;
+                    const int sy = (frame.localTileId / columns) * tmap.tileSize;
                     const float worldX = tf.x + static_cast<float>(x * tmap.tileSize);
                     const float worldY = tf.y + static_cast<float>(y * tmap.tileSize);
                     const float centerX = worldX + tmap.tileSize * 0.5f;
@@ -610,14 +677,19 @@ void RenderSystem::rebuildTileGPUCacheIfNeeded() {
                            sy / static_cast<float>(texH),
                            (sx + tmap.tileSize) / static_cast<float>(texW),
                            (sy + tmap.tileSize) / static_cast<float>(texH));
-                    gpu.textureIndex = tileset->texture.index;
+                    gpu.textureIndex = frame.tileset->texture.index;
                     gpu.layer = static_cast<uint32_t>(tileLayer.renderLayer);
                     gpu.sortKey = 0;
                     gpu.flags = 1u | (static_cast<uint32_t>(RenderPass::World) << 1);
 
                     CachedGPUTile item{};
-                    item.texture = tileset->texture;
+                    item.texture = frame.tileset->texture;
                     item.gpuIndex = tileGpuBaseIndex_ + static_cast<uint32_t>(tileGpuInstances_.size());
+                    item.mapEntity = ent;
+                    item.baseGid = baseGid;
+                    item.cellX = x;
+                    item.cellY = y;
+                    item.layerIndex = layerIndex;
                     item.layer = tileLayer.renderLayer;
                     item.ySort = true;
                     item.y = worldY;
@@ -679,7 +751,8 @@ bool drawableLess(const Drawable& A, const Drawable& B) {
 }
 
 void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb,
-                                      int /*viewportW*/, int /*viewportH*/) {
+                                      int /*viewportW*/, int /*viewportH*/,
+                                      float tileAnimationTimeSeconds) {
     cb.begin();
 
     static std::vector<Drawable> drawables;
@@ -694,10 +767,10 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
             if (!tileLayer.visible) continue;
             for (int y = 0; y < tmap.height; ++y) {
                 for (int x = 0; x < tmap.width; ++x) {
-                    int gid = tmap.tileAt(layer, x, y);
-                    const TileMap::Tileset* tileset = tmap.tilesetForGid(gid);
-                    int tileId = tmap.localTileId(gid);
-                    if (!tileset || !tileset->texture.valid() || tileId < 0) continue;
+                    const int baseGid = tmap.tileAt(layer, x, y);
+                    const ResolvedTileFrame frame =
+                        resolveTileFrame(tmap, baseGid, tileAnimationTimeSeconds, x, y, layer);
+                    if (!frame.tileset || !frame.tileset->texture.valid() || frame.localTileId < 0) continue;
                     Drawable d{};
                     d.pass    = RenderPass::World;
                     d.layer   = tileLayer.renderLayer;
@@ -706,10 +779,10 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
                     d.sortKey = 0;
                     d.seq     = seq++;
                     d.kind    = DrawKind::Tile;
-                    d.tile.tileset  = tileset->texture;
-                    d.tile.tileId   = tileId;
-                    d.tile.gridX    = static_cast<int>(tf.x) + x;
-                    d.tile.gridY    = static_cast<int>(tf.y) + y;
+                    d.tile.tileset  = frame.tileset->texture;
+                    d.tile.tileId   = frame.localTileId;
+                    d.tile.x        = tf.x + static_cast<float>(x * tmap.tileSize);
+                    d.tile.y        = tf.y + static_cast<float>(y * tmap.tileSize);
                     d.tile.tileSize = tmap.tileSize;
                     d.tile.layer    = tileLayer.renderLayer;
                     d.tile.sortKey  = 0;
@@ -824,7 +897,7 @@ void RenderSystem::buildCommandBuffer() {
     const int h = ctx_.window->height();
 
     backend::CommandBuffer& cb = ctx_.renderCommandBuffer();
-    buildSceneCommands(ctx_, cb, w, h);
+    buildSceneCommands(ctx_, cb, w, h, tileAnimationTimeSeconds_);
 
     struct CamEntry {
         const Transform* tf;
@@ -973,6 +1046,52 @@ void RenderSystem::buildCommandBufferGPUDriven() {
     frameGraph.cameraPasses.reserve(cameras.size());
 
     rebuildTileGPUCacheIfNeeded();
+    bool hasAnimatedTileFrames = false;
+    for (CachedGPUTile& item : tileGpuItems_) {
+        if (item.mapEntity == entt::null || !ctx_.world.valid(item.mapEntity) ||
+            !ctx_.world.all_of<TileMap>(item.mapEntity)) {
+            continue;
+        }
+
+        const TileMap& tmap = ctx_.world.get<TileMap>(item.mapEntity);
+        const TileMap::TileVisual* visual = tmap.visualForGid(item.baseGid);
+        if (!visual) continue;
+        if (visual->kind != TileMap::TileVisualKind::Flipbook &&
+            visual->kind != TileMap::TileVisualKind::WaterFlipbook) {
+            continue;
+        }
+
+        const ResolvedTileFrame frame =
+            resolveTileFrame(tmap, item.baseGid, tileAnimationTimeSeconds_,
+                             item.cellX, item.cellY, item.layerIndex);
+        if (!frame.tileset || !frame.tileset->texture.valid() || frame.localTileId < 0) continue;
+
+        const size_t localIndex = static_cast<size_t>(item.gpuIndex - tileGpuBaseIndex_);
+        if (localIndex >= tileGpuInstances_.size()) continue;
+
+        int texW = 1;
+        int texH = 1;
+        ctx_.renderDevice().getTextureDimensions(frame.tileset->texture, texW, texH);
+        const int columns = std::max(1, frame.tileset->columns);
+        const int sx = (frame.localTileId % columns) * tmap.tileSize;
+        const int sy = (frame.localTileId / columns) * tmap.tileSize;
+
+        GPUSprite& gpu = tileGpuInstances_[localIndex];
+        packUV(gpu.uv,
+               sx / static_cast<float>(texW),
+               sy / static_cast<float>(texH),
+               (sx + tmap.tileSize) / static_cast<float>(texW),
+               (sy + tmap.tileSize) / static_cast<float>(texH));
+        gpu.textureIndex = frame.tileset->texture.index;
+        item.texture = frame.tileset->texture;
+        hasAnimatedTileFrames = true;
+    }
+    if (hasAnimatedTileFrames && mixedGpuSpriteBuffer_.valid() && !tileGpuInstances_.empty()) {
+        ctx_.renderDevice().uploadToBuffer(mixedGpuSpriteBuffer_,
+                                           tileGpuInstances_.data(),
+                                           tileGpuInstances_.size() * sizeof(GPUSprite),
+                                           tileGpuBaseIndex_ * sizeof(GPUSprite));
+    }
     syncSpritesToMixedGPUBuffer();
 
     uint32_t spriteCount = spriteBuffer_.activeCount();
@@ -1174,8 +1293,8 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 if (cam.cullEnabled && d.pass == RenderPass::World) {
                     if (d.kind == DrawKind::Tile) {
                         float ts = static_cast<float>(d.tile.tileSize);
-                        float cx = d.tile.gridX * ts + ts * 0.5f;
-                        float cy = d.tile.gridY * ts + ts * 0.5f;
+                        float cx = d.tile.x + ts * 0.5f;
+                        float cy = d.tile.y + ts * 0.5f;
                         if (cx + ts < viewMinX || cx - ts > viewMaxX ||
                             cy + ts < viewMinY || cy - ts > viewMaxY) {
                             continue;

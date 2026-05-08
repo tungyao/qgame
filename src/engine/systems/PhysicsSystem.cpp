@@ -155,6 +155,61 @@ void minSeparation(const AABB& a, const AABB& b, float& outX, float& outY) {
     }
 }
 
+/**
+ * 把 TileCollision 转成世界空间 AABB。
+ *
+ * 当前阶段的实现目标是先把 v2 collision profile 接到 PhysicsSystem：
+ * - Full: 整格 AABB
+ * - Rect: 使用局部 [x, y, w, h]
+ * - Polygon/OneWay: 暂时退化成点集包围盒，至少保证 authoring 数据不会失效
+ * - Trigger: 仍然给出体积，但后续逻辑只派发事件、不做分离
+ *
+ * 这里故意不读取 visual/animation，因为碰撞必须和显示帧解耦。
+ */
+AABB makeTileCollisionAABB(const Transform& mapTf,
+                           const TileMap& tmap,
+                           int tileX,
+                           int tileY,
+                           const TileMap::TileCollision& collision) {
+    const float tileSize = static_cast<float>(tmap.tileSize);
+    const float tileWorldX = mapTf.x + static_cast<float>(tileX) * tileSize;
+    const float tileWorldY = mapTf.y + static_cast<float>(tileY) * tileSize;
+
+    if (collision.shape == TileMap::TileCollisionShape::Rect &&
+        collision.points.size() >= 4) {
+        const float x = collision.points[0];
+        const float y = collision.points[1];
+        const float w = collision.points[2];
+        const float h = collision.points[3];
+        return {tileWorldX + x, tileWorldY + y,
+                tileWorldX + x + w, tileWorldY + y + h};
+    }
+
+    if ((collision.shape == TileMap::TileCollisionShape::Polygon ||
+         collision.shape == TileMap::TileCollisionShape::OneWay) &&
+        collision.points.size() >= 4) {
+        float minX = collision.points[0];
+        float maxX = collision.points[0];
+        float minY = collision.points[1];
+        float maxY = collision.points[1];
+        for (size_t i = 2; i + 1 < collision.points.size(); i += 2) {
+            minX = std::min(minX, collision.points[i]);
+            maxX = std::max(maxX, collision.points[i]);
+            minY = std::min(minY, collision.points[i + 1]);
+            maxY = std::max(maxY, collision.points[i + 1]);
+        }
+        return {tileWorldX + minX, tileWorldY + minY,
+                tileWorldX + maxX, tileWorldY + maxY};
+    }
+
+    return {
+        tileWorldX,
+        tileWorldY,
+        tileWorldX + tileSize,
+        tileWorldY + tileSize
+    };
+}
+
 } // anonymous namespace
 
 /**
@@ -272,9 +327,13 @@ void PhysicsSystem::resolveCollisions() {
 /**
  * TileMap 静态碰撞 - 只检查动态刚体当前 AABB 覆盖到的 tile 范围。
  *
- * TileMap::Tileset::collision 决定每个 tile gid 是否参与碰撞。任意
- * collidable 图层在同一格放置了实心 tile，该格就会被视为
- * COLLISION_LAYER_STATIC 的实心 AABB。
+ * TileMap v2 改为读取 TileCollision profile：
+ * - Layer::collidable=false 整层不参与
+ * - Trigger 只派发事件，不阻挡
+ * - Full/Rect/Polygon/OneWay 当前都会生成体积；其中 Polygon/OneWay
+ *   先退化成包围盒，便于后续继续细化形状求交
+ *
+ * 这样 visual/animation 的变化不会再隐式改变 physics 结果。
  */
 void PhysicsSystem::resolveTileCollisions() {
     auto tilemaps = world_.view<Transform, TileMap>();
@@ -311,30 +370,33 @@ void PhysicsSystem::resolveTileCollisions() {
 
             for (int ty = minTileY; ty <= maxTileY; ++ty) {
                 for (int tx = minTileX; tx <= maxTileX; ++tx) {
-                    if (!tmap.solidTileAt(tx, ty)) continue;
+                    for (int layer = 0; layer < static_cast<int>(tmap.layers.size()); ++layer) {
+                        const TileMap::TileCollision collision = tmap.collisionAt(layer, tx, ty);
+                        if (collision.shape == TileMap::TileCollisionShape::None) continue;
 
-                    AABB tileBox{
-                        mapTf.x + static_cast<float>(tx * tmap.tileSize),
-                        mapTf.y + static_cast<float>(ty * tmap.tileSize),
-                        mapTf.x + static_cast<float>((tx + 1) * tmap.tileSize),
-                        mapTf.y + static_cast<float>((ty + 1) * tmap.tileSize)
-                    };
-                    if (!overlaps(actorBox, tileBox)) continue;
+                        const AABB tileBox = makeTileCollisionAABB(mapTf, tmap, tx, ty, collision);
+                        if (!overlaps(actorBox, tileBox)) continue;
 
-                    float sepX = 0.f, sepY = 0.f;
-                    minSeparation(actorBox, tileBox, sepX, sepY);
+                        float sepX = 0.f;
+                        float sepY = 0.f;
+                        minSeparation(actorBox, tileBox, sepX, sepY);
 
-                    dispatcher_.trigger(CollisionInfo{actor, mapEntity, sepX, sepY});
-                    dispatcher_.trigger(CollisionInfo{mapEntity, actor, -sepX, -sepY});
+                        dispatcher_.trigger(CollisionInfo{actor, mapEntity, sepX, sepY});
+                        dispatcher_.trigger(CollisionInfo{mapEntity, actor, -sepX, -sepY});
 
-                    tf.x += sepX;
-                    tf.y += sepY;
-                    world_.patch<Transform>(actor);
+                        if (collision.shape == TileMap::TileCollisionShape::Trigger) {
+                            continue;
+                        }
 
-                    if (sepX != 0.f && rb.velocityX * sepX < 0.f) rb.velocityX = 0.f;
-                    if (sepY != 0.f && rb.velocityY * sepY < 0.f) rb.velocityY = 0.f;
+                        tf.x += sepX;
+                        tf.y += sepY;
+                        world_.patch<Transform>(actor);
 
-                    actorBox = makeEntityAABB(world_, actor);
+                        if (sepX != 0.f && rb.velocityX * sepX < 0.f) rb.velocityX = 0.f;
+                        if (sepY != 0.f && rb.velocityY * sepY < 0.f) rb.velocityY = 0.f;
+
+                        actorBox = makeEntityAABB(world_, actor);
+                    }
                 }
             }
         }
