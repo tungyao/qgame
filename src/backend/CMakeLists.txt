@@ -36,6 +36,22 @@ compile_hlsl_to_spirv(
     "${SHADER_SRC}/particle_gpu.frag.hlsl"  frag
     "${SHADER_GEN}/particle_gpu_frag_spv.h" particle_gpu_frag_spv
 )
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/particle_wboit.vert.hlsl"  vert
+    "${SHADER_GEN}/particle_wboit_vert_spv.h" particle_wboit_vert_spv
+)
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/particle_wboit.frag.hlsl"  frag
+    "${SHADER_GEN}/particle_wboit_frag_spv.h" particle_wboit_frag_spv
+)
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/wboit_composite.vert.hlsl"  vert
+    "${SHADER_GEN}/wboit_composite_vert_spv.h" wboit_composite_vert_spv
+)
+compile_hlsl_to_spirv(
+    "${SHADER_SRC}/wboit_composite.frag.hlsl"  frag
+    "${SHADER_GEN}/wboit_composite_frag_spv.h" wboit_composite_frag_spv
+)
 
 # ── Compute 着色器 (Culling + Sort) ─────────────────────────────────────────
 compile_hlsl_to_spirv(
@@ -100,6 +116,10 @@ set(ALL_SHADER_DEPS
     "${SHADER_GEN}/sprite_gpu_frag_spv.h"
     "${SHADER_GEN}/particle_gpu_vert_spv.h"
     "${SHADER_GEN}/particle_gpu_frag_spv.h"
+    "${SHADER_GEN}/particle_wboit_vert_spv.h"
+    "${SHADER_GEN}/particle_wboit_frag_spv.h"
+    "${SHADER_GEN}/wboit_composite_vert_spv.h"
+    "${SHADER_GEN}/wboit_composite_frag_spv.h"
     "${SHADER_GEN}/particle_update_spv.h"
     "${SHADER_GEN}/particle_emit_spv.h"
     "${SHADER_GEN}/particle_sort_spv.h"

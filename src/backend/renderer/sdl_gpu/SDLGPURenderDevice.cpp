@@ -58,6 +58,10 @@
 #include "sprite_gpu_frag_spv.h"      // GPU-driven 片段着色器
 #include "particle_gpu_vert_spv.h"    // GPU 粒子顶点着色器: 从 storage buffer 展开 quad
 #include "particle_gpu_frag_spv.h"    // GPU 粒子片段着色器
+#include "particle_wboit_vert_spv.h"  // WBOIT 粒子顶点着色器
+#include "particle_wboit_frag_spv.h"  // WBOIT 粒子片段着色器 (MRT accum+reveal)
+#include "wboit_composite_vert_spv.h" // WBOIT 全屏复合顶点着色器
+#include "wboit_composite_frag_spv.h" // WBOIT 全屏复合片段着色器
 #include "lighting2d_spv.h"           // L3 2D lighting compute shader
 #include "lighting2d_cull_spv.h"      // L3 screen-tile light-list builder
 #include "lighting2d_blur_spv.h"      // L4 separable blur for soft lighting
@@ -335,6 +339,12 @@ void SDLGPURenderDevice::shutdown() {
     if (gpuDrivenOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, gpuDrivenOffscreenPipeline_); gpuDrivenOffscreenPipeline_ = nullptr; }
     if (particlePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particlePipeline_); particlePipeline_ = nullptr; }
     if (particleOffscreenPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particleOffscreenPipeline_); particleOffscreenPipeline_ = nullptr; }
+    if (particleWBOITPipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, particleWBOITPipeline_); particleWBOITPipeline_ = nullptr; }
+    if (wboitCompositePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, wboitCompositePipeline_); wboitCompositePipeline_ = nullptr; }
+    if (wboitAccumTex_) { SDL_ReleaseGPUTexture(device_, wboitAccumTex_); wboitAccumTex_ = nullptr; }
+    if (wboitRevealTex_) { SDL_ReleaseGPUTexture(device_, wboitRevealTex_); wboitRevealTex_ = nullptr; }
+    if (wboitPointSampler_) { SDL_ReleaseGPUSampler(device_, wboitPointSampler_); wboitPointSampler_ = nullptr; }
+    wboitWidth_ = wboitHeight_ = 0;
     if (lightingCompositePipeline_) { SDL_ReleaseGPUGraphicsPipeline(device_, lightingCompositePipeline_); lightingCompositePipeline_ = nullptr; }
     if (gpuDrivenQuadIndexBuf_) { SDL_ReleaseGPUBuffer(device_, gpuDrivenQuadIndexBuf_); gpuDrivenQuadIndexBuf_ = nullptr; }
 
@@ -1610,9 +1620,116 @@ void SDLGPURenderDevice::createPipeline() {
         createGPUDrivenIndexBuffer();
     }
 
+    // ── WBOIT particle pipeline (dual MRT: accum + reveal) ──
+    {
+        SDL_GPUShaderCreateInfo vsInfo{};
+        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+            vsInfo.code      = particle_wboit_vert_spv;
+            vsInfo.code_size = particle_wboit_vert_spv_size;
+        }
+        vsInfo.entrypoint = "main";
+        vsInfo.format    = shaderFormat_;
+        vsInfo.stage     = SDL_GPU_SHADERSTAGE_VERTEX;
+        vsInfo.num_storage_buffers  = 2;
+        vsInfo.num_uniform_buffers  = 1;
+        SDL_GPUShader* vs = SDL_CreateGPUShader(device_, &vsInfo);
+
+        SDL_GPUShaderCreateInfo fsInfo{};
+        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+            fsInfo.code      = particle_wboit_frag_spv;
+            fsInfo.code_size = particle_wboit_frag_spv_size;
+        }
+        fsInfo.entrypoint = "main";
+        fsInfo.format    = shaderFormat_;
+        fsInfo.stage     = SDL_GPU_SHADERSTAGE_FRAGMENT;
+        fsInfo.num_samplers = 1;
+        SDL_GPUShader* fs = SDL_CreateGPUShader(device_, &fsInfo);
+
+        if (vs && fs) {
+            // Two color targets with WBOIT blend states:
+            //   [0] accum:  additive  (ONE, ONE)
+            //   [1] reveal: multiplicative (ZERO, ONE_MINUS_SRC_COLOR)
+            SDL_GPUColorTargetDescription targets[2]{};
+            targets[0].format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+            targets[0].blend_state.enable_blend          = true;
+            targets[0].blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+            targets[0].blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+            targets[0].blend_state.color_blend_op        = SDL_GPU_BLENDOP_ADD;
+            targets[0].blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+            targets[0].blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+            targets[0].blend_state.alpha_blend_op        = SDL_GPU_BLENDOP_ADD;
+
+            targets[1].format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT;
+            targets[1].blend_state.enable_blend          = true;
+            targets[1].blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+            targets[1].blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_COLOR;
+            targets[1].blend_state.color_blend_op        = SDL_GPU_BLENDOP_ADD;
+            targets[1].blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+            targets[1].blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_COLOR;
+            targets[1].blend_state.alpha_blend_op        = SDL_GPU_BLENDOP_ADD;
+
+            SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+            pipeInfo.vertex_shader   = vs;
+            pipeInfo.fragment_shader = fs;
+            pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+            pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+            pipeInfo.target_info.color_target_descriptions = targets;
+            pipeInfo.target_info.num_color_targets         = 2;
+
+            particleWBOITPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
+        }
+        if (vs) SDL_ReleaseGPUShader(device_, vs);
+        if (fs) SDL_ReleaseGPUShader(device_, fs);
+    }
+
     lightingCompositePipeline_ = createLightingCompositePipelineForFormat(swapchainFormat);
     if (!lightingCompositePipeline_) {
         core::logError("createPipeline: failed to create lighting composite pipeline");
+    }
+
+    // ── WBOIT → scene composite fullscreen pass ──
+    {
+        SDL_GPUShaderCreateInfo vsInfo{};
+        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+            vsInfo.code      = wboit_composite_vert_spv;
+            vsInfo.code_size = wboit_composite_vert_spv_size;
+        }
+        vsInfo.entrypoint = "main";
+        vsInfo.format    = shaderFormat_;
+        vsInfo.stage     = SDL_GPU_SHADERSTAGE_VERTEX;
+        SDL_GPUShader* vs = SDL_CreateGPUShader(device_, &vsInfo);
+
+        SDL_GPUShaderCreateInfo fsInfo{};
+        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
+            fsInfo.code      = wboit_composite_frag_spv;
+            fsInfo.code_size = wboit_composite_frag_spv_size;
+        }
+        fsInfo.entrypoint = "main";
+        fsInfo.format    = shaderFormat_;
+        fsInfo.stage     = SDL_GPU_SHADERSTAGE_FRAGMENT;
+        fsInfo.num_samplers = 2;
+        fsInfo.num_uniform_buffers = 1;
+        SDL_GPUShader* fs = SDL_CreateGPUShader(device_, &fsInfo);
+
+        if (vs && fs) {
+            SDL_GPUColorTargetDescription ct{};
+            ct.format = swapchainFormat;
+            ct.blend_state.enable_blend = false;
+
+            SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+            pipeInfo.vertex_shader   = vs;
+            pipeInfo.fragment_shader = fs;
+            pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+            pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+            pipeInfo.target_info.color_target_descriptions = &ct;
+            pipeInfo.target_info.num_color_targets         = 1;
+
+            wboitCompositePipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &pipeInfo);
+        }
+        if (vs) SDL_ReleaseGPUShader(device_, vs);
+        if (fs) SDL_ReleaseGPUShader(device_, fs);
     }
 
     core::logInfo("Pipelines created (swapchain: 0x%x, offscreen: R8G8B8A8, gpuDriven: %s, particles: %s, lightingComposite: %s)",
@@ -3042,14 +3159,11 @@ void SDLGPURenderDevice::submitGPUParticlePassToTarget(const PassSubmitInfo& inf
     BufferEntry& freeListBuf = buffers_.get(params.freeListBuffer);
     ComputePipelineEntry& emitPipe = computePipelines_.get(params.emitPipeline);
 
+    const bool useWBOIT = (particleWBOITPipeline_ != nullptr) &&
+                          (wboitCompositePipeline_ != nullptr);
+
     // ═════════════════════════════════════════════════════════════════════
     // Phase 1: GPU self-emission + simulation (single dispatch).
-    // One workgroup per emitter, 64 threads each.  The compute shader:
-    //   - spawns new particles from emitter accumulator
-    //   - advances age / velocity / position
-    //   - pushes dead slots to free list
-    //   - compacts alive indices into AliveIndices[]
-    //   - writes per-emitter DrawArgs for indirect draw
     // ═════════════════════════════════════════════════════════════════════
     {
         struct EmitUniforms {
@@ -3077,31 +3191,6 @@ void SDLGPURenderDevice::submitGPUParticlePassToTarget(const PassSubmitInfo& inf
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════
-    // Phase 1.5: GPU sort (optional).  Currently a per-emitter pass; future
-    // work will merge this into a single global bitonic / radix dispatch.
-    // ═════════════════════════════════════════════════════════════════════
-    if (params.anyEmitterNeedsSort &&
-        computePipelines_.valid(params.sortPipeline) &&
-        computePipelines_.valid(params.bitonicSortPipeline)) {
-
-        ComputePipelineEntry& sortPipe = computePipelines_.get(params.sortPipeline);
-        ComputePipelineEntry& bitonicPipe = computePipelines_.get(params.bitonicSortPipeline);
-
-        // TODO: replace per-emitter sort with global sort dispatch once the
-        //       bitonic shader supports multi-emitter merged ranges.
-        //       For now, loop emitters and sort individually.
-        for (uint32_t e = 0; e < params.emitterCount; ++e) {
-            // The emitter's particleCount determines the sort range.
-            // Since we don't have it here, fall back to the generic path.
-            // In practice, this is skipped for the common None mode.
-            (void)e; (void)sortPipe; (void)bitonicPipe;
-        }
-    }
-
-    // ═════════════════════════════════════════════════════════════════════
-    // Phase 2: indirect draw — one draw per emitter (different textures).
-    // ═════════════════════════════════════════════════════════════════════
     CameraData cam = params.camera;
     if (cam.viewportW == 0) cam.viewportW = static_cast<int>(targetWidth);
     if (cam.viewportH == 0) cam.viewportH = static_cast<int>(targetHeight);
@@ -3118,44 +3207,191 @@ void SDLGPURenderDevice::submitGPUParticlePassToTarget(const PassSubmitInfo& inf
                 viewProj[i * 4 + j] += view[i * 4 + k] * proj[k * 4 + j];
         }
 
-    for (uint32_t e = 0; e < params.emitterCount; ++e) {
-        if (!textures_.valid(params.emitterTextures[e])) continue;
+    // ═════════════════════════════════════════════════════════════════════
+    // Phase 2: WBOIT or direct draw (no sort needed — WBOIT is OIT).
+    // ═════════════════════════════════════════════════════════════════════
+    if (useWBOIT && ensureWBOITTargets(static_cast<int>(targetWidth),
+                                        static_cast<int>(targetHeight))) {
+        // ── WBOIT path: render particles to accum+reveal, then composite ──
+        SDL_GPUColorTargetInfo wboitTargets[2]{};
+        wboitTargets[0].texture     = wboitAccumTex_;
+        wboitTargets[0].load_op     = SDL_GPU_LOADOP_CLEAR;
+        wboitTargets[0].store_op    = SDL_GPU_STOREOP_STORE;
+        wboitTargets[0].clear_color = SDL_FColor{0, 0, 0, 0};
 
-        SDL_GPUColorTargetInfo colorTarget{};
-        colorTarget.texture  = (e == 0) ? target : target;  // all to same target
-        colorTarget.load_op  = (e == 0 && params.clearEnabled)
-                                   ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
-        colorTarget.store_op = SDL_GPU_STOREOP_STORE;
-        colorTarget.clear_color = SDL_FColor{
-            params.clearColor.r / 255.f, params.clearColor.g / 255.f,
-            params.clearColor.b / 255.f, params.clearColor.a / 255.f
-        };
+        wboitTargets[1].texture     = wboitRevealTex_;
+        wboitTargets[1].load_op     = SDL_GPU_LOADOP_CLEAR;
+        wboitTargets[1].store_op    = SDL_GPU_STOREOP_STORE;
+        wboitTargets[1].clear_color = SDL_FColor{1, 0, 0, 0};  // reveal starts at 1
 
-        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
-        if (!pass) continue;
+        SDL_GPURenderPass* wboitPass = SDL_BeginGPURenderPass(gpuCmdBuf_,
+                                                               wboitTargets, 2, nullptr);
+        if (wboitPass) {
+            SDL_BindGPUGraphicsPipeline(wboitPass, particleWBOITPipeline_);
+            SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, viewProj, sizeof(viewProj));
 
-        SDL_BindGPUGraphicsPipeline(pass, pipeline);
-        SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, viewProj, sizeof(viewProj));
+            SDL_GPUBuffer* vsStorage[2] = { particleBuf.gpuBuffer, aliveBuf.gpuBuffer };
+            SDL_BindGPUVertexStorageBuffers(wboitPass, 0, vsStorage, 2);
 
-        SDL_GPUBuffer* vsStorage[2] = { particleBuf.gpuBuffer, aliveBuf.gpuBuffer };
-        SDL_BindGPUVertexStorageBuffers(pass, 0, vsStorage, 2);
+            SDL_GPUBufferBinding idxBinding{ gpuDrivenQuadIndexBuf_, 0 };
+            SDL_BindGPUIndexBuffer(wboitPass, &idxBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
-        SDL_GPUBufferBinding idxBinding{ gpuDrivenQuadIndexBuf_, 0 };
-        SDL_BindGPUIndexBuffer(pass, &idxBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+            for (uint32_t e = 0; e < params.emitterCount; ++e) {
+                if (!textures_.valid(params.emitterTextures[e])) continue;
+                const TextureEntry& tex = textures_.get(params.emitterTextures[e]);
+                SDL_GPUTextureSamplerBinding tb{ tex.gpuTex, tex.sampler };
+                SDL_BindGPUFragmentSamplers(wboitPass, 0, &tb, 1);
+                frameStats_.textureBindCount++;
 
-        const TextureEntry& tex = textures_.get(params.emitterTextures[e]);
-        SDL_GPUTextureSamplerBinding tb{ tex.gpuTex, tex.sampler };
-        SDL_BindGPUFragmentSamplers(pass, 0, &tb, 1);
-        frameStats_.textureBindCount++;
+                const uint32_t argsOffset = e * 5u;
+                SDL_DrawGPUIndexedPrimitivesIndirect(wboitPass, indirectBuf.gpuBuffer,
+                                                     argsOffset * sizeof(uint32_t), 1);
+                frameStats_.gpuDrawBatchCount++;
+                frameStats_.drawCallCount++;
+            }
+            SDL_EndGPURenderPass(wboitPass);
+        }
 
-        const uint32_t argsOffset = e * 5u;  // 5 uints per emitter
-        SDL_DrawGPUIndexedPrimitivesIndirect(pass, indirectBuf.gpuBuffer,
-                                             argsOffset * sizeof(uint32_t), 1);
-        frameStats_.gpuDrawBatchCount++;
-        frameStats_.drawCallCount++;
+        // Composite WBOIT result onto the main target.
+        submitWBOITCompositePass(cam, target, static_cast<int>(targetWidth),
+                                 static_cast<int>(targetHeight));
+    } else {
+        // ── Direct draw path (fallback when WBOIT unavailable) ─────────────
+        for (uint32_t e = 0; e < params.emitterCount; ++e) {
+            if (!textures_.valid(params.emitterTextures[e])) continue;
 
-        SDL_EndGPURenderPass(pass);
+            SDL_GPUColorTargetInfo colorTarget{};
+            colorTarget.texture  = target;
+            colorTarget.load_op  = (e == 0 && params.clearEnabled)
+                                       ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+            colorTarget.clear_color = SDL_FColor{
+                params.clearColor.r / 255.f, params.clearColor.g / 255.f,
+                params.clearColor.b / 255.f, params.clearColor.a / 255.f
+            };
+
+            SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &colorTarget, 1, nullptr);
+            if (!pass) continue;
+
+            SDL_BindGPUGraphicsPipeline(pass, pipeline);
+            SDL_PushGPUVertexUniformData(gpuCmdBuf_, 0, viewProj, sizeof(viewProj));
+
+            SDL_GPUBuffer* vsStorage[2] = { particleBuf.gpuBuffer, aliveBuf.gpuBuffer };
+            SDL_BindGPUVertexStorageBuffers(pass, 0, vsStorage, 2);
+
+            SDL_GPUBufferBinding idxBinding{ gpuDrivenQuadIndexBuf_, 0 };
+            SDL_BindGPUIndexBuffer(pass, &idxBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+            const TextureEntry& tex = textures_.get(params.emitterTextures[e]);
+            SDL_GPUTextureSamplerBinding tb{ tex.gpuTex, tex.sampler };
+            SDL_BindGPUFragmentSamplers(pass, 0, &tb, 1);
+            frameStats_.textureBindCount++;
+
+            const uint32_t argsOffset = e * 5u;
+            SDL_DrawGPUIndexedPrimitivesIndirect(pass, indirectBuf.gpuBuffer,
+                                                 argsOffset * sizeof(uint32_t), 1);
+            frameStats_.gpuDrawBatchCount++;
+            frameStats_.drawCallCount++;
+
+            SDL_EndGPURenderPass(pass);
+        }
     }
+}
+
+// ── WBOIT helper: ensure offscreen targets match viewport size ─────────────────
+bool SDLGPURenderDevice::ensureWBOITTargets(int w, int h) {
+    if (w <= 0 || h <= 0) return false;
+
+    if (wboitWidth_ == w && wboitHeight_ == h &&
+        wboitAccumTex_ && wboitRevealTex_) return true;
+
+    if (wboitAccumTex_)  { SDL_ReleaseGPUTexture(device_, wboitAccumTex_);  wboitAccumTex_  = nullptr; }
+    if (wboitRevealTex_) { SDL_ReleaseGPUTexture(device_, wboitRevealTex_); wboitRevealTex_ = nullptr; }
+
+    {
+        SDL_GPUTextureCreateInfo info{};
+        info.type        = SDL_GPU_TEXTURETYPE_2D;
+        info.format      = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        info.usage       = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width       = static_cast<uint32_t>(w);
+        info.height      = static_cast<uint32_t>(h);
+        info.layer_count_or_depth = 1;
+        info.num_levels  = 1;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        wboitAccumTex_ = SDL_CreateGPUTexture(device_, &info);
+    }
+    {
+        SDL_GPUTextureCreateInfo info{};
+        info.type        = SDL_GPU_TEXTURETYPE_2D;
+        info.format      = SDL_GPU_TEXTUREFORMAT_R16_FLOAT;
+        info.usage       = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width       = static_cast<uint32_t>(w);
+        info.height      = static_cast<uint32_t>(h);
+        info.layer_count_or_depth = 1;
+        info.num_levels  = 1;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        wboitRevealTex_ = SDL_CreateGPUTexture(device_, &info);
+    }
+
+    if (!wboitAccumTex_ || !wboitRevealTex_) {
+        core::logError("ensureWBOITTargets: failed to create WBOIT textures");
+        return false;
+    }
+
+    if (!wboitPointSampler_) {
+        SDL_GPUSamplerCreateInfo sampInfo{};
+        sampInfo.min_filter = SDL_GPU_FILTER_NEAREST;
+        sampInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
+        sampInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        sampInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        sampInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        sampInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        wboitPointSampler_ = SDL_CreateGPUSampler(device_, &sampInfo);
+    }
+
+    wboitWidth_  = w;
+    wboitHeight_ = h;
+    return true;
+}
+
+// ── WBOIT composite: accumulate + reveal → scene ──────────────────────────────
+void SDLGPURenderDevice::submitWBOITCompositePass(const CameraData& cam,
+                                                   SDL_GPUTexture* target,
+                                                   int targetW, int targetH) {
+    if (!target || !wboitAccumTex_ || !wboitRevealTex_ || !wboitPointSampler_) return;
+
+    (void)cam; (void)targetW; (void)targetH;
+
+    SDL_GPUColorTargetInfo ct{};
+    ct.texture     = target;
+    ct.load_op     = SDL_GPU_LOADOP_LOAD;     // blend onto existing scene
+    ct.store_op    = SDL_GPU_STOREOP_STORE;
+
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmdBuf_, &ct, 1, nullptr);
+    if (!pass) return;
+
+    SDL_BindGPUGraphicsPipeline(pass, wboitCompositePipeline_);
+
+    struct CompositeUniforms {
+        float bgR, bgG, bgB, bgA;
+        float intensity;
+        float pad0, pad1, pad2;
+    } uniforms{ 0, 0, 0, 1, 1.0f, 0, 0, 0 };
+    SDL_PushGPUFragmentUniformData(gpuCmdBuf_, 0, &uniforms, sizeof(uniforms));
+
+    SDL_GPUTextureSamplerBinding samplers[2]{};
+    samplers[0].texture = wboitAccumTex_;
+    samplers[0].sampler = wboitPointSampler_;
+    samplers[1].texture = wboitRevealTex_;
+    samplers[1].sampler = wboitPointSampler_;
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers, 2);
+    frameStats_.textureBindCount += 2;
+
+    // Fullscreen triangle: 3 vertices, no vertex buffer.
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    frameStats_.drawCallCount++;
+
+    SDL_EndGPURenderPass(pass);
 }
 
 } // namespace backend

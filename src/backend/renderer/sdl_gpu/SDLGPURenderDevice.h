@@ -107,6 +107,9 @@ private:
     SDL_GPUGraphicsPipeline* createMSDFPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createGPUDrivenPipelineForFormat(SDL_GPUTextureFormat format);
     SDL_GPUGraphicsPipeline* createParticlePipelineForFormat(SDL_GPUTextureFormat format);
+    bool                     ensureWBOITTargets(int w, int h);
+    void                     submitWBOITCompositePass(const CameraData& cam, SDL_GPUTexture* target,
+                                                      int targetW, int targetH);
     SDL_GPUGraphicsPipeline* createLightingCompositePipelineForFormat(SDL_GPUTextureFormat format);
     void                     createGPUDrivenIndexBuffer();
     SDL_GPUShader* loadShader(const uint8_t* code, size_t size,
@@ -148,6 +151,8 @@ private:
     SDL_GPUGraphicsPipeline* gpuDrivenOffscreenPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* particlePipeline_   = nullptr;
     SDL_GPUGraphicsPipeline* particleOffscreenPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* particleWBOITPipeline_ = nullptr;       // WBOIT MRT particle
+    SDL_GPUGraphicsPipeline* wboitCompositePipeline_ = nullptr;      // WBOIT → scene
     SDL_GPUGraphicsPipeline* lightingCompositePipeline_ = nullptr;
     ComputePipelineHandle    lighting2DComputePipeline_{};
     ComputePipelineHandle    lighting2DCullPipeline_{};
@@ -156,6 +161,13 @@ private:
     TextureHandle            lighting2DBlurTexture_{};
     TextureHandle            lighting2DWhiteTexture_{};
     TextureHandle            lighting2DRadialTexture_{};
+
+    // WBOIT offscreen targets (resized to match viewport)
+    SDL_GPUTexture*          wboitAccumTex_  = nullptr;   // RGBA16F  accum
+    SDL_GPUTexture*          wboitRevealTex_ = nullptr;   // R16F     reveal
+    SDL_GPUSampler*          wboitPointSampler_ = nullptr; // nearest for fullscreen
+    int                      wboitWidth_  = 0;
+    int                      wboitHeight_ = 0;
     BufferHandle             lighting2DLightBuffer_{};
     BufferHandle             lighting2DSegmentBuffer_{};
     BufferHandle             lighting2DReflectorBuffer_{};
