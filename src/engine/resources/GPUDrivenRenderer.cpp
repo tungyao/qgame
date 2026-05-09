@@ -1,9 +1,6 @@
 #include "GPUDrivenRenderer.h"
 #include "../../core/Logger.h"
 #include "sprite_culling_spv.h"
-#ifdef QGAME_HAS_DXIL_SHADERS
-#include "sprite_culling_dxil.h"
-#endif
 
 #include <cstring>
 #include <cmath>
@@ -117,10 +114,6 @@ void GPUDrivenRenderer::createPipelines() {
 
     desc.spirvCode = sprite_culling_spv;
     desc.spirvSize = sprite_culling_spv_size;
-    #ifdef QGAME_HAS_DXIL_SHADERS
-        desc.dxilCode = sprite_culling_dxil;
-        desc.dxilSize = sprite_culling_dxil_size;
-    #endif
 
     desc.entryPoint = "main";
     desc.threadCountX = CULLING_WORKGROUP_SIZE;

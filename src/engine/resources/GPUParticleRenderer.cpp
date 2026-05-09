@@ -4,10 +4,6 @@
 #include "../../core/Logger.h"
 #include "particle_update_spv.h"
 #include "particle_sort_spv.h"
-#ifdef QGAME_HAS_DXIL_SHADERS
-#include "particle_update_dxil.h"
-#include "particle_sort_dxil.h"
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -36,10 +32,6 @@ void GPUParticleRenderer::init(backend::IRenderDevice* device) {
     backend::ComputePipelineDesc pipelineDesc{};
     pipelineDesc.spirvCode = particle_update_spv;
     pipelineDesc.spirvSize = particle_update_spv_size;
-#ifdef QGAME_HAS_DXIL_SHADERS
-    pipelineDesc.dxilCode = particle_update_dxil;
-    pipelineDesc.dxilSize = particle_update_dxil_size;
-#endif
     pipelineDesc.entryPoint = "main";
     pipelineDesc.threadCountX = UPDATE_WORKGROUP_SIZE;
     pipelineDesc.threadCountY = 1;
@@ -51,10 +43,6 @@ void GPUParticleRenderer::init(backend::IRenderDevice* device) {
     backend::ComputePipelineDesc sortDesc{};
     sortDesc.spirvCode = particle_sort_spv;
     sortDesc.spirvSize = particle_sort_spv_size;
-#ifdef QGAME_HAS_DXIL_SHADERS
-    sortDesc.dxilCode = particle_sort_dxil;
-    sortDesc.dxilSize = particle_sort_dxil_size;
-#endif
     sortDesc.entryPoint = "main";
     sortDesc.threadCountX = SORT_WORKGROUP_SIZE;
     sortDesc.threadCountY = 1;

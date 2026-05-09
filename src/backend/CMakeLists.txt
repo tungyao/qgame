@@ -87,91 +87,6 @@ compile_hlsl_to_spirv(
     "${SHADER_FALLBACK}/sprite_frag_spv.h"
 )
 
-# ── DXIL 着色器 (D3D12) ──────────────────────────────────────────────────────
-set(DXIL_SHADER_DEPS "")
-if(DXC_EXE)
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/sprite.vert.hlsl"   vert
-        "${SHADER_GEN}/sprite_vert_dxil.h" sprite_vert_dxil
-        "${SHADER_FALLBACK}/sprite_vert_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/sprite.frag.hlsl"   frag
-        "${SHADER_GEN}/sprite_frag_dxil.h" sprite_frag_dxil
-        "${SHADER_FALLBACK}/sprite_frag_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/particle_gpu.vert.hlsl"   vert
-        "${SHADER_GEN}/particle_gpu_vert_dxil.h" particle_gpu_vert_dxil
-        "${SHADER_FALLBACK}/particle_gpu_vert_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/particle_gpu.frag.hlsl"   frag
-        "${SHADER_GEN}/particle_gpu_frag_dxil.h" particle_gpu_frag_dxil
-        "${SHADER_FALLBACK}/particle_gpu_frag_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/msdf.frag.hlsl"   frag
-        "${SHADER_GEN}/msdf_frag_dxil.h" msdf_frag_dxil
-        "${SHADER_FALLBACK}/msdf_frag_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/sprite_culling.comp.hlsl"   comp
-        "${SHADER_GEN}/sprite_culling_dxil.h" sprite_culling_dxil
-        "${SHADER_FALLBACK}/sprite_culling_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/sprite_sort.comp.hlsl"   comp
-        "${SHADER_GEN}/sprite_sort_dxil.h" sprite_sort_dxil
-        "${SHADER_FALLBACK}/sprite_sort_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/particle_update.comp.hlsl"   comp
-        "${SHADER_GEN}/particle_update_dxil.h" particle_update_dxil
-        "${SHADER_FALLBACK}/particle_update_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/particle_sort.comp.hlsl"   comp
-        "${SHADER_GEN}/particle_sort_dxil.h" particle_sort_dxil
-        "${SHADER_FALLBACK}/particle_sort_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/lighting2d.comp.hlsl"   comp
-        "${SHADER_GEN}/lighting2d_dxil.h" lighting2d_dxil
-        "${SHADER_FALLBACK}/lighting2d_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/lighting2d_cull.comp.hlsl"   comp
-        "${SHADER_GEN}/lighting2d_cull_dxil.h" lighting2d_cull_dxil
-        "${SHADER_FALLBACK}/lighting2d_cull_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/lighting2d_blur.comp.hlsl"   comp
-        "${SHADER_GEN}/lighting2d_blur_dxil.h" lighting2d_blur_dxil
-        "${SHADER_FALLBACK}/lighting2d_blur_dxil.h"
-    )
-    compile_hlsl_to_dxil(
-        "${SHADER_SRC}/lighting2d_composite.frag.hlsl"   frag
-        "${SHADER_GEN}/lighting2d_composite_frag_dxil.h" lighting2d_composite_frag_dxil
-        "${SHADER_FALLBACK}/sprite_frag_dxil.h"
-    )
-    list(APPEND DXIL_SHADER_DEPS
-        "${SHADER_GEN}/sprite_vert_dxil.h"
-        "${SHADER_GEN}/sprite_frag_dxil.h"
-        "${SHADER_GEN}/particle_gpu_vert_dxil.h"
-        "${SHADER_GEN}/particle_gpu_frag_dxil.h"
-        "${SHADER_GEN}/msdf_frag_dxil.h"
-        "${SHADER_GEN}/sprite_culling_dxil.h"
-        "${SHADER_GEN}/sprite_sort_dxil.h"
-        "${SHADER_GEN}/particle_update_dxil.h"
-        "${SHADER_GEN}/particle_sort_dxil.h"
-        "${SHADER_GEN}/lighting2d_dxil.h"
-        "${SHADER_GEN}/lighting2d_cull_dxil.h"
-        "${SHADER_GEN}/lighting2d_blur_dxil.h"
-        "${SHADER_GEN}/lighting2d_composite_frag_dxil.h"
-    )
-endif()
-
 add_library(backend STATIC
     renderer/CommandBuffer.cpp
     renderer/RenderGraph.cpp
@@ -200,18 +115,11 @@ set(ALL_SHADER_DEPS
     "${SHADER_GEN}/lighting2d_blur_spv.h"
     "${SHADER_GEN}/lighting2d_composite_frag_spv.h"
 )
-if(DXIL_SHADER_DEPS)
-    list(JOIN DXIL_SHADER_DEPS ";" dxil_deps_str)
-    string(APPEND ALL_SHADER_DEPS ";${dxil_deps_str}")
-endif()
+
 set_source_files_properties(
     renderer/sdl_gpu/SDLGPURenderDevice.cpp PROPERTIES
     OBJECT_DEPENDS "${ALL_SHADER_DEPS}"
 )
-
-if(DXC_EXE)
-    target_compile_definitions(backend PRIVATE QGAME_HAS_DXIL_SHADERS)
-endif()
 
 target_include_directories(backend
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..

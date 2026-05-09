@@ -45,14 +45,6 @@ set(ENGINE_SHADER_DEPS
     "${CMAKE_BINARY_DIR}/generated/shaders/particle_update_spv.h"
     "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_spv.h"
 )
-if(DXC_EXE)
-    list(APPEND ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_dxil.h")
-    list(APPEND ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/particle_update_dxil.h")
-    list(APPEND ENGINE_SHADER_DEPS "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_dxil.h")
-    target_compile_definitions(engine PRIVATE QGAME_HAS_DXIL_SHADERS)
-
-
-endif()
 set_source_files_properties(
     resources/GPUDrivenRenderer.cpp PROPERTIES
     OBJECT_DEPENDS "${ENGINE_SHADER_DEPS}"

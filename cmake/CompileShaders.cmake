@@ -1,12 +1,5 @@
 # CompileShaders.cmake
-# 统一使用 HLSL 作为源文件，编译为 SPIRV 和 DXIL
-#
-# HLSL (唯一源文件)
-#     │
-#     ├──► DXC -spirv ──► SPIRV ──► Vulkan/SDL GPU
-#     │    或 glslangValidator -D -V
-#     │
-#     └──► DXC ──► DXIL ──► D3D12
+# 使用 HLSL 作为源文件，编译为 SPIRV 用于 Vulkan/SDL GPU
 
 # ── 查找 DXC (DirectX Shader Compiler) ──────────────────────────────────────
 find_program(DXC_EXE NAMES dxc
@@ -56,11 +49,7 @@ else()
     message(WARNING "[Shaders] No SPIRV compiler found (dxc/glslangValidator) — using fallback")
 endif()
 
-if(DXC_EXE)
-    message(STATUS "[Shaders] DXC found — DXIL support enabled: ${DXC_EXE}")
-else()
-    message(STATUS "[Shaders] DXC not found — DXIL disabled")
-endif()
+# DXC not used — only SPIRV for Vulkan
 
 # ── compile_hlsl_to_spirv: HLSL → SPIRV ─────────────────────────────────────
 # 参数: hlsl_file stage out_header symbol fallback_header
@@ -132,50 +121,4 @@ function(compile_hlsl_to_spirv hlsl_file stage out_header symbol fallback_header
     endif()
 endfunction()
 
-# ── compile_hlsl_to_dxil: HLSL → DXIL ───────────────────────────────────────
-# 参数: hlsl_file stage out_header symbol fallback_header
-# stage: vert | frag | comp
-function(compile_hlsl_to_dxil hlsl_file stage out_header symbol fallback_header)
-    set(dxil_out_dir "${CMAKE_BINARY_DIR}/shaders/dxil")
-    set(dxil_file    "${dxil_out_dir}/${symbol}.dxil")
-    set(gen_dir      "${CMAKE_BINARY_DIR}/generated/shaders")
 
-    if(DXC_EXE)
-        if("${stage}" STREQUAL "vert")
-            set(profile "vs_6_0")
-        elseif("${stage}" STREQUAL "comp")
-            set(profile "cs_6_0")
-        else()
-            set(profile "ps_6_0")
-        endif()
-
-        add_custom_command(
-            OUTPUT  "${dxil_file}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${dxil_out_dir}"
-            COMMAND "${DXC_EXE}" -T ${profile} -E main -Fo "${dxil_file}" "${hlsl_file}"
-            DEPENDS "${hlsl_file}"
-            COMMENT "dxc: ${hlsl_file} → ${symbol}.dxil"
-        )
-
-        add_custom_command(
-            OUTPUT  "${out_header}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${gen_dir}"
-            COMMAND "${CMAKE_COMMAND}"
-                    -DSPV_FILE="${dxil_file}"
-                    -DOUTPUT="${out_header}"
-                    -DSYMBOL="${symbol}"
-                    -P "${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake"
-            DEPENDS "${dxil_file}"
-            COMMENT "Embedding ${symbol}.dxil → ${symbol}_dxil.h"
-        )
-    else()
-        add_custom_command(
-            OUTPUT  "${out_header}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${gen_dir}"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${fallback_header}" "${out_header}"
-            DEPENDS "${fallback_header}"
-            COMMENT "Using pre-compiled fallback for ${symbol}_dxil"
-        )
-    endif()
-endfunction()
