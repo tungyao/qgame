@@ -54,6 +54,13 @@ public:
     }
 
     template<typename T>
+    const T& get() const {
+        auto it = lookup_.find(std::type_index(typeid(T)));
+        ASSERT_MSG(it != lookup_.end(), "System not registered");
+        return *static_cast<const T*>(it->second);
+    }
+
+    template<typename T>
     bool has() const {
         return lookup_.count(std::type_index(typeid(T))) > 0;
     }

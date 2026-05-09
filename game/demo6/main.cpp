@@ -17,6 +17,7 @@
 #include <engine/runtime/EngineContext.h>
 #include <engine/systems/ISystem.h>
 #include <engine/systems/PhysicsSystem.h>
+#include <engine/runtime/TransformInterpolation.h>
 
 #include <stb_image.h>
 #include <nlohmann/json.hpp>
@@ -315,28 +316,18 @@ private:
     }
 
     engine::Transform computeObservedPlayerPosition(const engine::Transform& playerTf) const {
-        engine::Transform observed = playerTf;
-
-        // PhysicsSystem 用固定时间步推进位置，因此 Transform 只会在每个物理步结束时跳一次。
-        // Camera phase 如果直接盯着这个离散位置，就会在玩家平移时看到轻微“顿点”。
-        //
-        // 这里读取物理系统尚未消费掉的 accumulator，并用当前刚体速度做一个到“渲染时刻”
-        // 的轻量外推：
-        //   observedPosition = physicsPosition + velocity * leftoverTime
-        //
-        // 对纯速度驱动的 top-down 玩家，这个近似已经足够把 60Hz 台阶感抹平，
-        // 又不需要现在就把整套 previous/current transform 插值引擎铺开。
-        if (!ctx_.world.all_of<engine::RigidBody>(player_) ||
-            !ctx_.systems.has<engine::PhysicsSystem>()) {
-            return observed;
+        if (!ctx_.systems.has<engine::PhysicsSystem>()) {
+            return playerTf;
         }
 
-        const auto& rb = ctx_.world.get<engine::RigidBody>(player_);
-        const auto& physics = ctx_.systems.get<engine::PhysicsSystem>();
-        const float leftover = physics.accumulatorSeconds();
-        observed.x += rb.velocityX * leftover;
-        observed.y += rb.velocityY * leftover;
-        return observed;
+        // demo6 的相机应当跟随“本帧真正会被渲染出来的玩家位置”，而不是固定步物理真值。
+        // 这样 Camera phase、RenderSystem、UIWorldAnchor 会共享同一个表现时刻，
+        // 不会再出现玩家和镜头各自平滑、但彼此相位不一致的顿挫感。
+        const float alpha = ctx_.systems.get<engine::PhysicsSystem>().interpolationAlpha();
+        return engine::sampleInterpolatedTransform(
+            playerTf,
+            ctx_.world.try_get<engine::TransformInterpolation>(player_),
+            alpha);
     }
 
     float computeAutoEffectiveZoom(int viewportW, int viewportH) const {

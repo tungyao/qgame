@@ -1,8 +1,10 @@
 #pragma once
+#include <algorithm>
 #include <entt/entt.hpp>
 #include <vector>
 #include "ISystem.h"
 #include "../components/PhysicsComponents.h"
+#include "../runtime/TransformInterpolation.h"
 
 namespace engine {
 
@@ -30,6 +32,9 @@ namespace engine {
 class PhysicsSystem : public ISystem {
 public:
     PhysicsSystem(entt::registry& world, entt::dispatcher& dispatcher);
+
+    void init() override;
+    void shutdown() override;
 
     UpdatePhaseMask phaseMask() const override {
         return updatePhaseBit(UpdatePhase::Physics);
@@ -151,6 +156,9 @@ private:
         update(dt);
     }
 
+    void snapshotInterpolatedBodiesForStep();
+    void onTransformUpdated(entt::registry& reg, entt::entity e);
+
     entt::registry&   world_;
     entt::dispatcher& dispatcher_;
     
@@ -158,6 +166,8 @@ private:
     float gravityY_ = 0.f;       // Y 方向重力
     float fixedTimestep_ = 1.f / 60.f;  // 固定时间步（默认 60Hz）
     float accumulator_ = 0.f;    // 时间累积器
+    bool steppingPhysics_ = false; // true 时 Transform 更新来自 fixed-step，不应触发 snap 逻辑
+    entt::connection transformUpdateConnection_;
 
     void integrateVelocities(float dt);  // 速度积分
     void resolveCollisions();            // 碰撞解决

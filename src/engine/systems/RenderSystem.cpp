@@ -1,6 +1,8 @@
 #include "RenderSystem.h"
 #include "UISystem.h"
+#include "PhysicsSystem.h"
 #include "../runtime/EngineContext.h"
+#include "../runtime/TransformInterpolation.h"
 #include "../components/RenderComponents.h"
 #include "../components/TextComponent.h"
 #include "../components/ParticleComponent.h"
@@ -17,6 +19,15 @@
 namespace engine {
 
 namespace {
+
+float presentationAlpha(const EngineContext& ctx) {
+    // 表现层 alpha 只描述“渲染时刻位于两次物理步之间的哪里”，不影响 gameplay。
+    // Render/UI/Camera 全部共享这一个 alpha，才能保证它们看到的是同一个世界时刻。
+    if (!ctx.systems.has<PhysicsSystem>()) {
+        return 1.f;
+    }
+    return ctx.systems.get<PhysicsSystem>().interpolationAlpha();
+}
 
 struct ViewRect {
     float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
@@ -144,7 +155,8 @@ ResolvedTileFrame resolveTileFrame(const TileMap& tmap,
 backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ctx,
                                                                const backend::CameraData& camera,
                                                                uint32_t viewportW,
-                                                               uint32_t viewportH) {
+                                                               uint32_t viewportH,
+                                                               float alpha) {
     backend::IRenderDevice::Lighting2DParams out{};
     out.camera = camera;
     out.viewportW = viewportW;
@@ -155,13 +167,14 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
     // copies stable ECS data into the backend-facing POD layout.
     auto lightView = ctx.world.view<Transform, Light2D>();
     for (auto [ent, tf, light] : lightView.each()) {
-        (void)ent;
         if (!light.visible || light.radius <= 0.f) continue;
         if (light.type != Light2DType::Point) continue;
         if ((light.layerMask & renderPassBit(RenderPass::World)) == 0u) continue;
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx.world.try_get<TransformInterpolation>(ent), alpha);
         backend::IRenderDevice::Light2DPoint gpu{};
-        gpu.x = tf.x;
-        gpu.y = tf.y;
+        gpu.x = presentTf.x;
+        gpu.y = presentTf.y;
         gpu.radius = light.radius;
         gpu.intensity = light.intensity;
         gpu.colorR = light.color.r / 255.f;
@@ -186,22 +199,23 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
 
     auto occView = ctx.world.view<Transform, LightOccluder2D>();
     for (auto [ent, tf, occ] : occView.each()) {
-        (void)ent;
         if (!occ.castsShadow || occ.opacity <= 0.f) continue;
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx.world.try_get<TransformInterpolation>(ent), alpha);
 
         if (occ.shape == LightOccluder2D::Shape::Segment) {
-            pushSegment(tf.x + occ.ax, tf.y + occ.ay,
-                        tf.x + occ.bx, tf.y + occ.by,
+            pushSegment(presentTf.x + occ.ax, presentTf.y + occ.ay,
+                        presentTf.x + occ.bx, presentTf.y + occ.by,
                         occ.opacity);
         } else {
             // AABB is treated as centered on Transform. That matches demo3's
             // debug rectangles and keeps the first GPU data path unambiguous.
             const float hw = occ.width * 0.5f;
             const float hh = occ.height * 0.5f;
-            const float x0 = tf.x - hw;
-            const float y0 = tf.y - hh;
-            const float x1 = tf.x + hw;
-            const float y1 = tf.y + hh;
+            const float x0 = presentTf.x - hw;
+            const float y0 = presentTf.y - hh;
+            const float x1 = presentTf.x + hw;
+            const float y1 = presentTf.y + hh;
             pushSegment(x0, y0, x1, y0, occ.opacity);
             pushSegment(x1, y0, x1, y1, occ.opacity);
             pushSegment(x1, y1, x0, y1, occ.opacity);
@@ -216,14 +230,15 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
     // or mirror line; both are in world pixels like lights and occluders.
     auto reflView = ctx.world.view<Transform, Reflector2D>();
     for (auto [ent, tf, refl] : reflView.each()) {
-        (void)ent;
         if (!refl.visible || refl.reflectivity <= 0.f) continue;
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx.world.try_get<TransformInterpolation>(ent), alpha);
 
         backend::IRenderDevice::Reflector2DRegion gpu{};
-        gpu.ax = tf.x + refl.ax;
-        gpu.ay = tf.y + refl.ay;
-        gpu.bx = tf.x + refl.bx;
-        gpu.by = tf.y + refl.by;
+        gpu.ax = presentTf.x + refl.ax;
+        gpu.ay = presentTf.y + refl.ay;
+        gpu.bx = presentTf.x + refl.bx;
+        gpu.by = presentTf.y + refl.by;
         gpu.width = refl.width;
         gpu.height = refl.height;
         gpu.reflectivity = refl.reflectivity;
@@ -306,21 +321,24 @@ ResolvedCameraView2D RenderSystem::resolveActiveWorldCamera(const EngineContext&
     ResolvedCameraView2D out{};
     if (!ctx.window) return out;
 
-    const int viewportW = ctx.window->width();
-    const int viewportH = ctx.window->height();
+    const int viewportW = (ctx.windowWidth > 0) ? ctx.windowWidth : ctx.window->width();
+    const int viewportH = (ctx.windowHeight > 0) ? ctx.windowHeight : ctx.window->height();
+    const float alpha = presentationAlpha(ctx);
 
     struct CamEntry {
-        const Transform* tf = nullptr;
+        Transform tf{};
         const Camera* cam = nullptr;
     };
 
     std::vector<CamEntry> cameras;
     auto camView = ctx.world.view<Transform, Camera>();
     for (auto [ent, tf, cam] : camView.each()) {
-        (void)ent;
         if (!cam.primary) continue;
         if ((cam.layerMask & renderPassBit(RenderPass::World)) == 0u) continue;
-        cameras.push_back({ &tf, &cam });
+        cameras.push_back({
+            sampleInterpolatedTransform(tf, ctx.world.try_get<TransformInterpolation>(ent), alpha),
+            &cam
+        });
     }
 
     std::stable_sort(cameras.begin(), cameras.end(),
@@ -329,7 +347,7 @@ ResolvedCameraView2D RenderSystem::resolveActiveWorldCamera(const EngineContext&
                      });
 
     if (cameras.empty()) return out;
-    return resolveCameraView(*cameras.front().tf, *cameras.front().cam, viewportW, viewportH);
+    return resolveCameraView(cameras.front().tf, *cameras.front().cam, viewportW, viewportH);
 }
 
 RenderSystem::RenderSystem(EngineContext& ctx) 
@@ -433,6 +451,7 @@ void RenderSystem::syncParticleEmitters(float dt) {
     (void)dt;  // dt is consumed by GPU via uniform, not CPU
 
     auto view = ctx_.world.view<Transform, ParticleComponent>();
+    const float alpha = presentationAlpha(ctx_);
     for (auto [ent, tf, pc] : view.each()) {
         (void)ent;
         if (!pc.visible || !pc.playing) continue;
@@ -448,7 +467,9 @@ void RenderSystem::syncParticleEmitters(float dt) {
 
         // Upload position/rotation each frame (just 12 bytes)
         if (pc.gpuEmitterIndex != 0xFFFFFFFFu) {
-            particleRenderer_.syncEmitterPosition(pc.gpuEmitterIndex, tf,
+            const Transform presentTf =
+                sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(ent), alpha);
+            particleRenderer_.syncEmitterPosition(pc.gpuEmitterIndex, presentTf,
                                                   ctx_.renderDevice());
         }
     }
@@ -517,6 +538,7 @@ void RenderSystem::onTransformUpdate(entt::registry& reg, entt::entity e) {
 
 void RenderSystem::syncEntitiesToGPU() {
     auto view = ctx_.world.view<Transform, Sprite>();
+    const float alpha = presentationAlpha(ctx_);
     for (auto [e, tf, spr] : view.each()) {
         if (!spr.gpuHandle.valid()) {
             allocateGPUSlot(e, spr);
@@ -524,9 +546,15 @@ void RenderSystem::syncEntitiesToGPU() {
         }
         // Phase 5.3: 程序化输出每帧重新合成
         const AnimatorOutput* aout = ctx_.world.try_get<AnimatorOutput>(e);
+        // 带 TransformInterpolation 的实体，即使本帧没有新的 Transform patch，
+        // 只要 alpha 变化，真正应该显示的位置也在变化。因此这类 sprite 必须每帧
+        // 重建一次 GPU transform，而不能只依赖“组件是否 dirty”。
+        const bool presentsInterpolated = ctx_.world.all_of<TransformInterpolation>(e);
         if (aout) spr.gpuDirty = true;
-        if (spr.gpuDirty) {
-            updateGPUSlot(tf, spr, aout);
+        if (spr.gpuDirty || presentsInterpolated) {
+            const Transform presentTf =
+                sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(e), alpha);
+            updateGPUSlot(presentTf, spr, aout);
             spr.gpuDirty = false;
         }
     }
@@ -859,6 +887,7 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
                                       int /*viewportW*/, int /*viewportH*/,
                                       float tileAnimationTimeSeconds) {
     cb.begin();
+    const float alpha = presentationAlpha(ctx);
 
     static std::vector<Drawable> drawables;
     drawables.clear();
@@ -866,6 +895,8 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
 
     auto tileView = ctx.world.view<Transform, TileMap>();
     for (auto [ent, tf, tmap] : tileView.each()) {
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx.world.try_get<TransformInterpolation>(ent), alpha);
         if (tmap.tileSize <= 0) continue;
         for (int layer = 0; layer < static_cast<int>(tmap.layers.size()); ++layer) {
             const auto& tileLayer = tmap.layers[static_cast<size_t>(layer)];
@@ -880,14 +911,14 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
                     d.pass    = RenderPass::World;
                     d.layer   = tileLayer.renderLayer;
                     d.ySort   = true;
-                    d.y       = tf.y + static_cast<float>(y * tmap.tileSize);
+                    d.y       = presentTf.y + static_cast<float>(y * tmap.tileSize);
                     d.sortKey = 0;
                     d.seq     = seq++;
                     d.kind    = DrawKind::Tile;
                     d.tile.tileset  = frame.tileset->texture;
                     d.tile.tileId   = frame.localTileId;
-                    d.tile.x        = tf.x + static_cast<float>(x * tmap.tileSize);
-                    d.tile.y        = tf.y + static_cast<float>(y * tmap.tileSize);
+                    d.tile.x        = presentTf.x + static_cast<float>(x * tmap.tileSize);
+                    d.tile.y        = presentTf.y + static_cast<float>(y * tmap.tileSize);
                     d.tile.tileSize = tmap.tileSize;
                     d.tile.layer    = tileLayer.renderLayer;
                     d.tile.sortKey  = 0;
@@ -902,23 +933,25 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
     auto spriteView = ctx.world.view<Transform, Sprite>();
     for (auto [ent, tf, sprite] : spriteView.each()) {
         if (!sprite.visible) continue;
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx.world.try_get<TransformInterpolation>(ent), alpha);
         const AnimatorOutput* aout = ctx.world.try_get<AnimatorOutput>(ent);
 
         Drawable d{};
         d.pass    = sprite.pass;
         d.layer   = sprite.layer;
         d.ySort   = sprite.ySort;
-        d.y       = tf.y + (aout ? aout->offsetY : 0.f);
+        d.y       = presentTf.y + (aout ? aout->offsetY : 0.f);
         d.sortKey = sprite.sortOrder;
         d.seq     = seq++;
         d.kind    = DrawKind::Sprite;
         auto& s = d.sprite;
         s.texture  = sprite.texture;
-        s.x        = tf.x + (aout ? aout->offsetX : 0.f);
-        s.y        = tf.y + (aout ? aout->offsetY : 0.f);
-        s.rotation = tf.rotation + (aout ? aout->rotationOffset : 0.f);
-        s.scaleX   = tf.scaleX * (aout ? aout->scaleMulX : 1.f);
-        s.scaleY   = tf.scaleY * (aout ? aout->scaleMulY : 1.f);
+        s.x        = presentTf.x + (aout ? aout->offsetX : 0.f);
+        s.y        = presentTf.y + (aout ? aout->offsetY : 0.f);
+        s.rotation = presentTf.rotation + (aout ? aout->rotationOffset : 0.f);
+        s.scaleX   = presentTf.scaleX * (aout ? aout->scaleMulX : 1.f);
+        s.scaleY   = presentTf.scaleY * (aout ? aout->scaleMulY : 1.f);
         s.pivotX   = sprite.pivotX;
         s.pivotY   = sprite.pivotY;
         s.srcRect  = sprite.srcRect;
@@ -957,19 +990,21 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
     auto textView = ctx.world.view<Transform, TextComponent>();
     for (auto [ent, tf, text] : textView.each()) {
         if (!text.visible || text.text.empty()) continue;
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx.world.try_get<TransformInterpolation>(ent), alpha);
         Drawable d{};
         d.pass    = text.pass;
         d.layer   = text.layer;
         d.ySort   = text.ySort;
-        d.y       = tf.y;
+        d.y       = presentTf.y;
         d.sortKey = text.sortOrder;
         d.seq     = seq++;
         d.kind    = DrawKind::Text;
         auto& t = d.text;
         t.font     = text.font;
         t.text     = text.text;
-        t.x        = tf.x;
-        t.y        = tf.y;
+        t.x        = presentTf.x;
+        t.y        = presentTf.y;
         t.fontSize = text.fontSize;
         t.layer    = text.layer;
         t.sortKey  = text.sortOrder;
@@ -998,21 +1033,25 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
 }
 
 void RenderSystem::buildCommandBuffer() {
-    const int w = ctx_.window->width();
-    const int h = ctx_.window->height();
+    const int w = (ctx_.windowWidth > 0) ? ctx_.windowWidth : ctx_.window->width();
+    const int h = (ctx_.windowHeight > 0) ? ctx_.windowHeight : ctx_.window->height();
+    const float alpha = presentationAlpha(ctx_);
 
     backend::CommandBuffer& cb = ctx_.renderCommandBuffer();
     buildSceneCommands(ctx_, cb, w, h, tileAnimationTimeSeconds_);
 
     struct CamEntry {
-        const Transform* tf;
+        Transform tf;
         const Camera*    cam;
     };
     std::vector<CamEntry> cameras;
     auto camView = ctx_.world.view<Transform, Camera>();
     for (auto [ent, tf, cam] : camView.each()) {
         if (!cam.primary) continue;
-        cameras.push_back({ &tf, &cam });
+        cameras.push_back({
+            sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(ent), alpha),
+            &cam
+        });
     }
     std::stable_sort(cameras.begin(), cameras.end(),
                      [](const CamEntry& a, const CamEntry& b) {
@@ -1036,7 +1075,7 @@ void RenderSystem::buildCommandBuffer() {
 
     static std::vector<const backend::RenderCmd*> filtered;
     for (size_t i = 0; i < cameras.size(); ++i) {
-        const Transform& tf = *cameras[i].tf;
+        const Transform& tf = cameras[i].tf;
         const Camera&    cam = *cameras[i].cam;
 
         // 先把“组件里的 camera”解析成“当前窗口下真正生效的视图”。
@@ -1077,7 +1116,8 @@ void RenderSystem::buildCommandBuffer() {
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
                                                   static_cast<uint32_t>(resolved.viewportW),
-                                                  static_cast<uint32_t>(resolved.viewportH));
+                                                  static_cast<uint32_t>(resolved.viewportH),
+                                                  alpha);
             if (ctx_.renderDevice().capabilities().supportsLighting2D &&
                 !lighting.lights.empty()) {
                 std::vector<const backend::RenderCmd*> worldCmdPtrs;
@@ -1126,18 +1166,22 @@ void RenderSystem::buildCommandBuffer() {
 }
 
 void RenderSystem::buildCommandBufferGPUDriven() {
-    const int w = ctx_.window->width();
-    const int h = ctx_.window->height();
+    const int w = (ctx_.windowWidth > 0) ? ctx_.windowWidth : ctx_.window->width();
+    const int h = (ctx_.windowHeight > 0) ? ctx_.windowHeight : ctx_.window->height();
+    const float alpha = presentationAlpha(ctx_);
     
     struct CamEntry {
-        const Transform* tf;
+        Transform tf;
         const Camera*    cam;
     };
     std::vector<CamEntry> cameras;
     auto camView = ctx_.world.view<Transform, Camera>();
     for (auto [ent, tf, cam] : camView.each()) {
         if (!cam.primary) continue;
-        cameras.push_back({ &tf, &cam });
+        cameras.push_back({
+            sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(ent), alpha),
+            &cam
+        });
     }
     std::stable_sort(cameras.begin(), cameras.end(),
                      [](const CamEntry& a, const CamEntry& b) {
@@ -1200,7 +1244,45 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         item.texture = frame.tileset->texture;
         hasAnimatedTileFrames = true;
     }
-    if (hasAnimatedTileFrames && mixedGpuSpriteBuffer_.valid() && !tileGpuInstances_.empty()) {
+    bool hasInterpolatedTileTransforms = false;
+    for (CachedGPUTile& item : tileGpuItems_) {
+        if (item.mapEntity == entt::null || !ctx_.world.valid(item.mapEntity) ||
+            !ctx_.world.all_of<Transform, TileMap, TransformInterpolation>(item.mapEntity)) {
+            continue;
+        }
+
+        const Transform& mapTf = ctx_.world.get<Transform>(item.mapEntity);
+        const TileMap& tmap = ctx_.world.get<TileMap>(item.mapEntity);
+        const Transform presentTf =
+            sampleInterpolatedTransform(mapTf,
+                                        ctx_.world.try_get<TransformInterpolation>(item.mapEntity),
+                                        alpha);
+        const float worldX = presentTf.x + static_cast<float>(item.cellX * tmap.tileSize);
+        const float worldY = presentTf.y + static_cast<float>(item.cellY * tmap.tileSize);
+        const float centerX = worldX + tmap.tileSize * 0.5f;
+        const float centerY = worldY + tmap.tileSize * 0.5f;
+        const size_t localIndex = static_cast<size_t>(item.gpuIndex - tileGpuBaseIndex_);
+        if (localIndex >= tileGpuInstances_.size()) continue;
+
+        buildTransform2D(tileGpuInstances_[localIndex].transform,
+                         centerX,
+                         centerY,
+                         0.f,
+                         1.f,
+                         1.f,
+                         0.5f,
+                         0.5f,
+                         static_cast<float>(tmap.tileSize),
+                         static_cast<float>(tmap.tileSize));
+        item.y = worldY;
+        item.centerX = centerX;
+        item.centerY = centerY;
+        item.halfW = tmap.tileSize * 0.5f;
+        item.halfH = tmap.tileSize * 0.5f;
+        hasInterpolatedTileTransforms = true;
+    }
+    if ((hasAnimatedTileFrames || hasInterpolatedTileTransforms) &&
+        mixedGpuSpriteBuffer_.valid() && !tileGpuInstances_.empty()) {
         ctx_.renderDevice().uploadToBuffer(mixedGpuSpriteBuffer_,
                                            tileGpuInstances_.data(),
                                            tileGpuInstances_.size() * sizeof(GPUSprite),
@@ -1219,19 +1301,21 @@ void RenderSystem::buildCommandBufferGPUDriven() {
     auto textView = ctx_.world.view<Transform, TextComponent>();
     for (auto [ent, tf, text] : textView.each()) {
         if (!text.visible || text.text.empty()) continue;
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(ent), alpha);
         Drawable d{};
         d.pass    = text.pass;
         d.layer   = text.layer;
         d.ySort   = text.ySort;
-        d.y       = tf.y;
+        d.y       = presentTf.y;
         d.sortKey = text.sortOrder;
         d.seq     = seq++;
         d.kind    = DrawKind::Text;
         auto& t = d.text;
         t.font     = text.font;
         t.text     = text.text;
-        t.x        = tf.x;
-        t.y        = tf.y;
+        t.x        = presentTf.x;
+        t.y        = presentTf.y;
         t.fontSize = text.fontSize;
         t.layer    = text.layer;
         t.sortKey  = text.sortOrder;
@@ -1242,7 +1326,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
     }
 
     for (size_t i = 0; i < cameras.size(); ++i) {
-        const Transform& tf = *cameras[i].tf;
+        const Transform& tf = cameras[i].tf;
         const Camera&    cam = *cameras[i].cam;
 
         // GPU-driven 路径必须与 CPU 路径使用同一份 resolved camera。
@@ -1298,6 +1382,8 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             if (!spr.gpuHandle.valid()) continue;
             const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
             if (!slot) continue;
+            const Transform presentTf =
+                sampleInterpolatedTransform(eTf, ctx_.world.try_get<TransformInterpolation>(ent), alpha);
 
             const uint32_t passBits = (slot->flags >> 1) & 0x7;
             if ((cam.layerMask & (1u << passBits)) == 0) continue;
@@ -1319,7 +1405,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 spr.pass,
                 spr.layer,
                 spr.ySort,
-                eTf.y,
+                presentTf.y,
                 spr.sortOrder,
                 seq++
             });
@@ -1440,7 +1526,8 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
                                                   static_cast<uint32_t>(resolved.viewportW),
-                                                  static_cast<uint32_t>(resolved.viewportH));
+                                                  static_cast<uint32_t>(resolved.viewportH),
+                                                  alpha);
             if (dev.capabilities().supportsLighting2D && !lighting.lights.empty()) {
                 backend::IRenderDevice::FrameGraphCameraPass node;
                 node.kind = backend::IRenderDevice::FrameGraphPassKind::WorldLighting;

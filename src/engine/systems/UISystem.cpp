@@ -1,7 +1,9 @@
 #include "UISystem.h"
 #include "RenderSystem.h"
+#include "PhysicsSystem.h"
 
 #include "../runtime/EngineContext.h"
+#include "../runtime/TransformInterpolation.h"
 #include "../input/InputState.h"
 #include "../components/RenderComponents.h"
 #include "../../backend/renderer/IRenderDevice.h"
@@ -18,6 +20,17 @@
 #include <unordered_map>
 
 namespace engine {
+
+namespace {
+
+float presentationAlpha(const EngineContext& ctx) {
+    if (!ctx.systems.has<PhysicsSystem>()) {
+        return 1.f;
+    }
+    return ctx.systems.get<PhysicsSystem>().interpolationAlpha();
+}
+
+}
 
 UISystem::UISystem(EngineContext& ctx) : ctx_(ctx) {}
 UISystem::~UISystem() = default;
@@ -50,7 +63,10 @@ void UISystem::ensureWhiteTexture() {
 void UISystem::update(float dt) {
     ensureWhiteTexture();
 
-    if (ctx_.window) {
+    if (ctx_.windowWidth > 0 && ctx_.windowHeight > 0) {
+        screenW_ = static_cast<float>(ctx_.windowWidth);
+        screenH_ = static_cast<float>(ctx_.windowHeight);
+    } else if (ctx_.window) {
         screenW_ = static_cast<float>(ctx_.window->width());
         screenH_ = static_cast<float>(ctx_.window->height());
     }
@@ -164,7 +180,8 @@ void UISystem::layoutNode(entt::entity e, float parentX, float parentY,
     // 世界锚点：把目标实体的世界坐标投影到屏幕像素，作为本节点 anchor 中心。
     if (auto* wa = world.try_get<UIWorldAnchor>(e)) {
         if (wa->target != entt::null && world.all_of<Transform>(wa->target)) {
-            const auto& tf = world.get<Transform>(wa->target);
+            const Transform tf =
+                sampleInterpolatedTransform(world, wa->target, presentationAlpha(ctx_));
             float camX, camY, camZoom;
             getWorldCamera(camX, camY, camZoom);
 

@@ -10,6 +10,15 @@ namespace engine {
 PhysicsSystem::PhysicsSystem(entt::registry& world, entt::dispatcher& dispatcher)
     : world_(world), dispatcher_(dispatcher) {}
 
+void PhysicsSystem::init() {
+    transformUpdateConnection_ =
+        world_.on_update<Transform>().connect<&PhysicsSystem::onTransformUpdated>(this);
+}
+
+void PhysicsSystem::shutdown() {
+    transformUpdateConnection_.release();
+}
+
 /**
  * 主更新函数 - 使用固定时间步进行物理模拟
  * 
@@ -26,10 +35,39 @@ PhysicsSystem::PhysicsSystem(entt::registry& world, entt::dispatcher& dispatcher
 void PhysicsSystem::update(float dt) {
     accumulator_ += dt;
     while (accumulator_ >= fixedTimestep_) {
+        snapshotInterpolatedBodiesForStep();
+        steppingPhysics_ = true;
         integrateVelocities(fixedTimestep_);
         resolveCollisions();
+        steppingPhysics_ = false;
         accumulator_ -= fixedTimestep_;
     }
+}
+
+void PhysicsSystem::snapshotInterpolatedBodiesForStep() {
+    auto view = world_.view<Transform, RigidBody>();
+    for (auto [e, tf, rb] : view.each()) {
+        (void)rb;
+        auto& interpolation = world_.get_or_emplace<TransformInterpolation>(e);
+        interpolation.previous = tf;
+        interpolation.initialized = true;
+    }
+}
+
+void PhysicsSystem::onTransformUpdated(entt::registry& reg, entt::entity e) {
+    if (steppingPhysics_) {
+        return;
+    }
+    if (!reg.all_of<RigidBody, Transform>(e)) {
+        return;
+    }
+
+    // 物理步之外的 Transform 修改通常意味着 teleport、脚本 snap、关卡重置等。
+    // 这些场景不应继续沿用旧的 previous snapshot，否则表现层会把一次瞬移插值成
+    // 一段拖影。因此这里立刻把 previous 追到 current，强制下一帧直接显示新位置。
+    auto& interpolation = reg.get_or_emplace<TransformInterpolation>(e);
+    interpolation.previous = reg.get<Transform>(e);
+    interpolation.initialized = true;
 }
 
 /**
