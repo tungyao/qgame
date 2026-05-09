@@ -11,6 +11,10 @@ class AudioSystem final : public ISystem {
 public:
     explicit AudioSystem(EngineContext& ctx) : ctx_(ctx) {}
 
+    UpdatePhaseMask phaseMask() const override {
+        return updatePhaseBit(UpdatePhase::GameplayPostPhysics);
+    }
+
     void init()           override;
     void update(float dt) override;
     void shutdown()       override;
@@ -46,6 +50,10 @@ public:
     void setSpatialListener(float x, float y);
 
 private:
+    void onGameplayPostPhysicsPhase(float dt) override {
+        update(dt);
+    }
+
     void enqueue(const backend::AudioCmd& cmd);
     static float clamp01(float value);
 

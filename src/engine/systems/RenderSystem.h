@@ -19,6 +19,10 @@ public:
     explicit RenderSystem(EngineContext& ctx);
     ~RenderSystem();
 
+    UpdatePhaseMask phaseMask() const override {
+        return updatePhaseBit(UpdatePhase::Render);
+    }
+
     void init()           override;
     void update(float dt) override;
     void shutdown()       override;
@@ -58,6 +62,10 @@ public:
     bool isGPUDrivenEnabled() const { return gpuDrivenEnabled_; }
 
 private:
+    void onRenderPhase(float dt) override {
+        update(dt);
+    }
+
     void buildCommandBuffer();
     void buildCommandBufferGPUDriven();
     void syncEntitiesToGPU();

@@ -9,9 +9,17 @@ class TweenSystem final : public ISystem {
 public:
     explicit TweenSystem(EngineContext& ctx) : ctx_(ctx) {}
 
+    UpdatePhaseMask phaseMask() const override {
+        return updatePhaseBit(UpdatePhase::GameplayPostPhysics);
+    }
+
     void update(float dt) override;
 
 private:
+    void onGameplayPostPhysicsPhase(float dt) override {
+        update(dt);
+    }
+
     EngineContext& ctx_;
 };
 

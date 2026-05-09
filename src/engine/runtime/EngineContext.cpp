@@ -43,6 +43,8 @@ void EngineContext::init(const EngineConfig& cfg) {
     wcfg.debug      = cfg.debug;
     wcfg.openglMode = (cfg.renderBackend == RenderBackend::OpenGL);
     window = std::make_unique<platform::Window>(wcfg);
+    windowWidth = wcfg.width;
+    windowHeight = wcfg.height;
 
     // Command buffer
     renderCmdBuf_ = std::make_unique<backend::CommandBuffer>();
@@ -70,6 +72,8 @@ void EngineContext::init(const EngineConfig& cfg) {
             window.reset();
             wcfg.openglMode = true;
             window = std::make_unique<platform::Window>(wcfg);
+            windowWidth = wcfg.width;
+            windowHeight = wcfg.height;
             sdlWin = static_cast<SDL_Window*>(window->sdlWindow());
             
             renderDevice_ = std::make_unique<backend::GLRenderDevice>(sdlWin);

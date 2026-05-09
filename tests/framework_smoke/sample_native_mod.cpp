@@ -14,8 +14,11 @@ void touchFile(const char* path) {
     }
 }
 
-void systemUpdate(void*, float) {
-    touchFile("framework_smoke_native_system_update.txt");
+bool systemRunPhase(void*, uint32_t phase, float) {
+    if (phase == engine::QGAME_UPDATE_PHASE_GAMEPLAY_POST_PHYSICS) {
+        touchFile("framework_smoke_native_system_update.txt");
+    }
+    return true;
 }
 
 void systemShutdown(void*) {
@@ -46,11 +49,13 @@ QGAME_MOD_EXPORT bool qgame_mod_init(engine::QGameModContext* ctx) {
         return false;
     }
 
-    engine::QGameNativeSystemDesc system{};
+    engine::QGameNativePhasedSystemDesc system{};
     system.id = "native_smoke.system";
-    system.update = systemUpdate;
+    system.run_phase = systemRunPhase;
     system.shutdown = systemShutdown;
-    if (!ctx->systems->register_system(ctx, &system)) {
+    system.phaseMask = engine::QGAME_UPDATE_PHASE_BIT_GAMEPLAY_POST_PHYSICS;
+    if (!ctx->systems->register_phased_system ||
+        !ctx->systems->register_phased_system(ctx, &system)) {
         return false;
     }
     if (!ctx->events->subscribe(ctx, "native.smoke", nullptr, onSmokeEvent)) {

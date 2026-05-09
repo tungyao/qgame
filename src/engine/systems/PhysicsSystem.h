@@ -31,8 +31,11 @@ class PhysicsSystem : public ISystem {
 public:
     PhysicsSystem(entt::registry& world, entt::dispatcher& dispatcher);
 
+    UpdatePhaseMask phaseMask() const override {
+        return updatePhaseBit(UpdatePhase::Physics);
+    }
+
     void update(float dt) override;
-    bool isManuallyScheduled() const override { return true; }
 
     // ── 重力设置 ─────────────────────────────────────────────────────────────
     
@@ -64,6 +67,25 @@ public:
      */
     void setFixedTimestep(float step) { fixedTimestep_ = step; }
     float fixedTimestep() const { return fixedTimestep_; }
+    float accumulatorSeconds() const { return accumulator_; }
+
+    /**
+     * 返回“当前渲染时刻位于下一个物理步之前的比例”。
+     *
+     * 解释：
+     * - fixedTimestep = 1/60 时，PhysicsSystem 每 16.67ms 才真正推进一次世界。
+     * - 两次物理步之间，accumulator_ 保存的是“还没来得及模拟的剩余时间”。
+     * - 渲染/相机若直接读取 Transform，会看到 60Hz 的离散台阶。
+     *
+     * 这个比例可用于表现层插值/外推：
+     * - 插值：需要 previous/current 两份状态时使用
+     * - 外推：只有 current + velocity 时，也能用 accumulator_ 做一个轻量预测
+     */
+    float interpolationAlpha() const {
+        if (fixedTimestep_ <= 0.f) return 0.f;
+        const float alpha = accumulator_ / fixedTimestep_;
+        return std::clamp(alpha, 0.f, 1.f);
+    }
 
     // ── 查询功能 ─────────────────────────────────────────────────────────────
     
@@ -125,6 +147,10 @@ public:
                                             CollisionLayer layerMask = COLLISION_LAYER_ALL);
 
 private:
+    void onPhysicsPhase(float dt) override {
+        update(dt);
+    }
+
     entt::registry&   world_;
     entt::dispatcher& dispatcher_;
     

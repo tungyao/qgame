@@ -87,6 +87,8 @@ public:
     };
 
     bool registerNativeSystem(QGameModContext* ctx, const QGameNativeSystemDesc* desc);
+    bool registerNativePhasedSystem(QGameModContext* ctx,
+                                    const QGameNativePhasedSystemDesc* desc);
     bool subscribeNativeEvent(QGameModContext* ctx,
                               const char* eventName,
                               void* userData,

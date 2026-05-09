@@ -9,6 +9,10 @@ class SceneSystem final : public ISystem {
 public:
     explicit SceneSystem(EngineContext& ctx) : ctx_(ctx) {}
 
+    UpdatePhaseMask phaseMask() const override {
+        return updatePhaseBit(UpdatePhase::GameplayPrePhysics);
+    }
+
     void preUpdate() override;
 
     bool loadScene(const char* path);

@@ -11,6 +11,10 @@ bool InputSystem::pollInput() {
     return provider_->poll(state_);
 }
 
+bool InputSystem::onInputPhase(float /*dt*/) {
+    return pollInput();
+}
+
 void InputSystem::setProvider(std::unique_ptr<IInputProvider> provider) {
     provider_ = std::move(provider);
 }

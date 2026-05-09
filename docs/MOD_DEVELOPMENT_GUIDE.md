@@ -172,9 +172,11 @@ macOS:   .dylib
 ```cpp
 #include <engine/framework/NativeModAPI.h>
 
-static void update(void* userData, float dt) {
+static bool run_phase(void* userData, uint32_t phase, float dt) {
     (void)userData;
+    (void)phase;
     (void)dt;
+    return true;
 }
 
 QGAME_MOD_EXPORT bool qgame_mod_init(engine::QGameModContext* ctx) {
@@ -184,10 +186,11 @@ QGAME_MOD_EXPORT bool qgame_mod_init(engine::QGameModContext* ctx) {
 
     ctx->log->info("native_sample init");
 
-    engine::QGameNativeSystemDesc sys{};
+    engine::QGameNativePhasedSystemDesc sys{};
     sys.id = "native_sample.system";
-    sys.update = update;
-    return ctx->systems->register_system(ctx, &sys);
+    sys.run_phase = run_phase;
+    sys.phaseMask = engine::QGAME_UPDATE_PHASE_BIT_GAMEPLAY_POST_PHYSICS;
+    return ctx->systems->register_phased_system(ctx, &sys);
 }
 
 QGAME_MOD_EXPORT void qgame_mod_shutdown(engine::QGameModContext* ctx) {
@@ -206,15 +209,45 @@ ctx->scenes->register_manifest(ctx, path)
 ctx->prefabs->register_manifest(ctx, path)
 ctx->configs->register_manifest(ctx, path)
 ctx->systems->register_system(ctx, desc)
+ctx->systems->register_phased_system(ctx, desc)
 ctx->events->subscribe(ctx, eventName, userData, handler)
 ctx->events->emit(ctx, eventName, payload)
 ctx->assetLoaders->register_loader(ctx, type, userData, load, unload)
 ctx->log->info/warn/error(message)
 ```
 
+显式 phase 可选值：
+
+```text
+QGAME_UPDATE_PHASE_INPUT
+QGAME_UPDATE_PHASE_GAMEPLAY_PRE_PHYSICS
+QGAME_UPDATE_PHASE_PHYSICS
+QGAME_UPDATE_PHASE_GAMEPLAY_POST_PHYSICS
+QGAME_UPDATE_PHASE_ANIMATION
+QGAME_UPDATE_PHASE_CAMERA
+QGAME_UPDATE_PHASE_UI
+QGAME_UPDATE_PHASE_RENDER
+QGAME_UPDATE_PHASE_POST_FRAME
+```
+
+对应 bit mask 常量：
+
+```text
+QGAME_UPDATE_PHASE_BIT_INPUT
+QGAME_UPDATE_PHASE_BIT_GAMEPLAY_PRE_PHYSICS
+QGAME_UPDATE_PHASE_BIT_PHYSICS
+QGAME_UPDATE_PHASE_BIT_GAMEPLAY_POST_PHYSICS
+QGAME_UPDATE_PHASE_BIT_ANIMATION
+QGAME_UPDATE_PHASE_BIT_CAMERA
+QGAME_UPDATE_PHASE_BIT_UI
+QGAME_UPDATE_PHASE_BIT_RENDER
+QGAME_UPDATE_PHASE_BIT_POST_FRAME
+```
+
 注意：
 
 - `qgame_mod_init` 只做注册，不直接创建场景实体。
+- 新 mod 优先用 `register_phased_system`，旧 `register_system` 仍保留兼容。
 - 引擎会在 unload 前注销 Native 注册的系统、事件和 asset loader。
 - `components` 目前保留但不开放。组件注册要等反射、序列化、编辑器字段和存档兼容设计完成。
 - Mod 不要保存 `QGameModContext*` 长期跨生命周期使用。

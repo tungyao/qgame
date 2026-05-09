@@ -30,6 +30,10 @@ public:
     explicit UISystem(EngineContext& ctx);
     ~UISystem() override;
 
+    UpdatePhaseMask phaseMask() const override {
+        return updatePhaseBit(UpdatePhase::UI);
+    }
+
     void init() override;
     void update(float dt) override;
     void shutdown() override;
@@ -52,6 +56,10 @@ public:
     TextureHandle whiteTexture() const { return whiteTexture_; }
 
 private:
+    void onUIPhase(float dt) override {
+        update(dt);
+    }
+
     void ensureWhiteTexture();
     void updateCanvases();
     void runLayout();

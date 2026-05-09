@@ -26,6 +26,64 @@ namespace engine {
 
 namespace {
 
+UpdatePhaseMask nativePhaseMaskToEnginePhaseMask(uint32_t nativeMask) {
+    UpdatePhaseMask engineMask = 0u;
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_INPUT) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::Input);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_GAMEPLAY_PRE_PHYSICS) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::GameplayPrePhysics);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_PHYSICS) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::Physics);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_GAMEPLAY_POST_PHYSICS) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::GameplayPostPhysics);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_ANIMATION) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::Animation);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_CAMERA) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::Camera);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_UI) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::UI);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_RENDER) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::Render);
+    }
+    if ((nativeMask & QGAME_UPDATE_PHASE_BIT_POST_FRAME) != 0u) {
+        engineMask |= updatePhaseBit(UpdatePhase::PostFrame);
+    }
+    return engineMask;
+}
+
+uint32_t enginePhaseToNativePhase(UpdatePhase phase) {
+    switch (phase) {
+        case UpdatePhase::Input:
+            return QGAME_UPDATE_PHASE_INPUT;
+        case UpdatePhase::GameplayPrePhysics:
+            return QGAME_UPDATE_PHASE_GAMEPLAY_PRE_PHYSICS;
+        case UpdatePhase::Physics:
+            return QGAME_UPDATE_PHASE_PHYSICS;
+        case UpdatePhase::GameplayPostPhysics:
+            return QGAME_UPDATE_PHASE_GAMEPLAY_POST_PHYSICS;
+        case UpdatePhase::Animation:
+            return QGAME_UPDATE_PHASE_ANIMATION;
+        case UpdatePhase::Camera:
+            return QGAME_UPDATE_PHASE_CAMERA;
+        case UpdatePhase::UI:
+            return QGAME_UPDATE_PHASE_UI;
+        case UpdatePhase::Render:
+            return QGAME_UPDATE_PHASE_RENDER;
+        case UpdatePhase::PostFrame:
+            return QGAME_UPDATE_PHASE_POST_FRAME;
+        case UpdatePhase::Count:
+        default:
+            return QGAME_UPDATE_PHASE_POST_FRAME;
+    }
+}
+
 class NativeCallbackSystem final : public ISystem {
 public:
     explicit NativeCallbackSystem(const QGameNativeSystemDesc& desc)
@@ -38,8 +96,33 @@ public:
         , shutdown_(desc.shutdown)
         , manuallyScheduled_(desc.manuallyScheduled) {}
 
+    explicit NativeCallbackSystem(const QGameNativePhasedSystemDesc& desc)
+        : id_(desc.id ? desc.id : "")
+        , userData_(desc.userData)
+        , init_(desc.init)
+        , runPhase_(desc.run_phase)
+        , shutdown_(desc.shutdown)
+        , explicitPhaseMask_(nativePhaseMaskToEnginePhaseMask(desc.phaseMask)) {}
+
     void init() override {
         if (init_) init_(userData_);
+    }
+
+    UpdatePhaseMask phaseMask() const override {
+        // 显式 phase 注册优先。如果 native mod 提供了 phased descriptor，
+        // 它的生命周期完全由 phaseMask/runPhase 驱动，不再回退到旧的
+        // pre/update/post 兼容映射。
+        if (runPhase_) {
+            return explicitPhaseMask_;
+        }
+        return ISystem::phaseMask();
+    }
+
+    bool runPhase(UpdatePhase phase, float dt) override {
+        if (runPhase_) {
+            return runPhase_(userData_, enginePhaseToNativePhase(phase), dt);
+        }
+        return ISystem::runPhase(phase, dt);
     }
 
     void preUpdate() override {
@@ -71,8 +154,10 @@ private:
     QGameNativeSystemUpdateFn preUpdate_ = nullptr;
     QGameNativeSystemUpdateFn update_ = nullptr;
     QGameNativeSystemUpdateFn postUpdate_ = nullptr;
+    QGameNativeSystemRunPhaseFn runPhase_ = nullptr;
     QGameNativeSystemShutdownFn shutdown_ = nullptr;
     bool manuallyScheduled_ = false;
+    UpdatePhaseMask explicitPhaseMask_ = 0u;
 };
 
 std::string normalizePath(const std::filesystem::path& path) {
@@ -139,6 +224,12 @@ bool modRegisterSystem(QGameModContext* ctx, const QGameNativeSystemDesc* desc) 
     return runtime && runtime->manager && runtime->manager->registerNativeSystem(ctx, desc);
 }
 
+bool modRegisterPhasedSystem(QGameModContext* ctx, const QGameNativePhasedSystemDesc* desc) {
+    auto* runtime = runtimeFrom(ctx);
+    return runtime && runtime->manager &&
+           runtime->manager->registerNativePhasedSystem(ctx, desc);
+}
+
 bool modSubscribeEvent(QGameModContext* ctx,
                        const char* eventName,
                        void* userData,
@@ -169,7 +260,7 @@ QGameAssetManagerAPI gAssetApi{modLoadAssetManifest};
 QGameSceneRegistryAPI gSceneApi{modRegisterScene, modRegisterSceneManifest};
 QGamePrefabRegistryAPI gPrefabApi{modRegisterPrefabManifest};
 QGameConfigRegistryAPI gConfigApi{modRegisterConfigManifest};
-QGameSystemRegistryAPI gSystemApi{modRegisterSystem};
+QGameSystemRegistryAPI gSystemApi{modRegisterSystem, modRegisterPhasedSystem};
 QGameEventBusAPI gEventApi{modSubscribeEvent, modEmitEvent};
 QGameAssetLoaderRegistryAPI gAssetLoaderApi{modRegisterAssetLoader};
 QGameComponentRegistryAPI gComponentApi{0};
@@ -541,6 +632,28 @@ bool ModManager::registerNativeSystem(QGameModContext* ctx,
     // called SystemRegistry::initAll(), so the wrapper is initialized eagerly.
     raw->init();
     core::logInfo("[ModManager] registered native system %s",
+                  raw->id().empty() ? "(unnamed)" : raw->id().c_str());
+    return true;
+}
+
+bool ModManager::registerNativePhasedSystem(QGameModContext* ctx,
+                                            const QGameNativePhasedSystemDesc* desc) {
+    auto* runtime = runtimeFrom(ctx);
+    if (!runtime || !runtime->game || !runtime->mod || !desc || !desc->run_phase ||
+        desc->phaseMask == 0u) {
+        core::logError("[ModManager] invalid native phased system registration");
+        return false;
+    }
+
+    auto system = std::make_unique<NativeCallbackSystem>(*desc);
+    NativeCallbackSystem* raw = system.get();
+    ISystem& registered = runtime->game->systems.registerSystem(std::move(system));
+    runtime->mod->systems.push_back(&registered);
+
+    // 和旧 API 一样，native mod 往往在引擎初始化完成后才被加载，因此这里要
+    // 立即触发一次 init，避免错过 SystemRegistry::initAll()。
+    raw->init();
+    core::logInfo("[ModManager] registered native phased system %s",
                   raw->id().empty() ? "(unnamed)" : raw->id().c_str());
     return true;
 }

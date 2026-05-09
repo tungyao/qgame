@@ -68,7 +68,8 @@ public:
             order_[i]->shutdown();
     }
 
-    // FrameScheduler 分步调用，不提供 updateAll — 强制显式排序
+    // FrameScheduler 按显式 phase 顺序扫描所有系统，不提供 updateAll，
+    // 避免系统绕过阶段语义直接“整帧全跑一遍”。
     const std::vector<std::unique_ptr<ISystem>>& systems() const { return order_; }
 
 private:
