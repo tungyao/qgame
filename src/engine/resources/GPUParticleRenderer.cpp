@@ -2,12 +2,12 @@
 
 #include "../components/RenderComponents.h"
 #include "../../core/Logger.h"
-#include "particle_update_spv.h"
+#include "particle_emit_spv.h"
 #include "particle_sort_spv.h"
 #include "particle_sort_bitonic_spv.h"
 
 #include <algorithm>
-#include <cmath>
+#include <cstring>
 
 namespace engine {
 
@@ -16,215 +16,208 @@ void GPUParticleRenderer::init(backend::IRenderDevice* device) {
     if (!device_) return;
 
     backend::BufferDesc bufferDesc{};
+
+    // ── Particle pool ──
     bufferDesc.size = MAX_PARTICLES * sizeof(GPUParticle);
     bufferDesc.usage = backend::BufferUsage::Storage | backend::BufferUsage::Vertex;
     particleBuffer_ = device_->createBuffer(bufferDesc);
 
+    // ── Alive index ──
     bufferDesc.size = MAX_PARTICLES * sizeof(uint32_t);
     bufferDesc.usage = backend::BufferUsage::Storage;
     aliveIndexBuffer_ = device_->createBuffer(bufferDesc);
 
-    // SDL_GPUIndexedIndirectDrawCommand = 5 uint32-sized fields.
-    // The update compute writes num_instances, and the render pass consumes it.
-    bufferDesc.size = sizeof(uint32_t) * 5;
+    // ── Indirect draw args: 5 uints per emitter ──
+    bufferDesc.size = MAX_EMITTERS * sizeof(uint32_t) * 5;
     bufferDesc.usage = backend::BufferUsage::Storage | backend::BufferUsage::Indirect;
     indirectArgsBuffer_ = device_->createBuffer(bufferDesc);
 
-    backend::ComputePipelineDesc pipelineDesc{};
-    pipelineDesc.spirvCode = particle_update_spv;
-    pipelineDesc.spirvSize = particle_update_spv_size;
-    pipelineDesc.entryPoint = "main";
-    pipelineDesc.threadCountX = UPDATE_WORKGROUP_SIZE;
-    pipelineDesc.threadCountY = 1;
-    pipelineDesc.threadCountZ = 1;
-    pipelineDesc.numReadwriteStorageBuffers = 3;
-    pipelineDesc.numUniformBuffers = 1;
-    updatePipeline_ = device_->createComputePipeline(pipelineDesc);
+    // ── Emitter descriptor buffer ──
+    bufferDesc.size = MAX_EMITTERS * sizeof(GPUEmitter);
+    bufferDesc.usage = backend::BufferUsage::Storage;
+    emitterBuffer_ = device_->createBuffer(bufferDesc);
+    {
+        // Init all emitter slots to inactive.
+        std::vector<GPUEmitter> init(MAX_EMITTERS);
+        std::memset(init.data(), 0, init.size() * sizeof(GPUEmitter));
+        for (auto& e : init) em_setParticleCount(e, 0);
+        device_->uploadToBuffer(emitterBuffer_, init.data(),
+                                init.size() * sizeof(GPUEmitter), 0);
+    }
 
-    backend::ComputePipelineDesc sortDesc{};
-    sortDesc.spirvCode = particle_sort_spv;
-    sortDesc.spirvSize = particle_sort_spv_size;
-    sortDesc.entryPoint = "main";
-    sortDesc.threadCountX = SORT_WORKGROUP_SIZE;
-    sortDesc.threadCountY = 1;
-    sortDesc.threadCountZ = 1;
-    sortDesc.numReadonlyStorageBuffers = 2;
-    sortDesc.numReadwriteStorageBuffers = 1;
-    sortDesc.numUniformBuffers = 1;
-    sortPipeline_ = device_->createComputePipeline(sortDesc);
+    // ── Free list: N particle slots + 1 head ──
+    bufferDesc.size = (MAX_PARTICLES + 1) * sizeof(uint32_t);
+    bufferDesc.usage = backend::BufferUsage::Storage;
+    freeListBuffer_ = device_->createBuffer(bufferDesc);
+    {
+        // Populate free list with all particle indices (0 → 1 → 2 → ... → SENTINEL).
+        std::vector<uint32_t> freeInit(MAX_PARTICLES + 1);
+        for (uint32_t i = 0; i < MAX_PARTICLES; ++i) {
+            freeInit[i] = (i + 1 < MAX_PARTICLES) ? (i + 1) : 0xFFFFFFFFu;
+        }
+        freeInit[MAX_PARTICLES] = 0;  // head points to slot 0
+        device_->uploadToBuffer(freeListBuffer_, freeInit.data(),
+                                freeInit.size() * sizeof(uint32_t), 0);
+    }
 
-    // Bitonic sort pipeline: single-pass sort for maxParticleCount ≤ 256.
-    // Uses 256 threads × 1 workgroup with groupshared memory and
-    // GroupMemoryBarrierWithGroupSync barriers between merge stages.
-    backend::ComputePipelineDesc bitonicDesc{};
-    bitonicDesc.spirvCode = particle_sort_bitonic_spv;
-    bitonicDesc.spirvSize = particle_sort_bitonic_spv_size;
-    bitonicDesc.entryPoint = "main";
-    bitonicDesc.threadCountX = BITONIC_SORT_WORKGROUP_SIZE;
-    bitonicDesc.threadCountY = 1;
-    bitonicDesc.threadCountZ = 1;
-    bitonicDesc.numReadonlyStorageBuffers = 2;
-    bitonicDesc.numReadwriteStorageBuffers = 1;
-    bitonicDesc.numUniformBuffers = 1;
-    bitonicSortPipeline_ = device_->createComputePipeline(bitonicDesc);
+    // ── Emit pipeline (replaces old update pipeline) ──
+    {
+        backend::ComputePipelineDesc desc{};
+        desc.spirvCode = particle_emit_spv;
+        desc.spirvSize = particle_emit_spv_size;
+        desc.entryPoint = "main";
+        desc.threadCountX = EMIT_WORKGROUP_SIZE;
+        desc.threadCountY = 1;
+        desc.threadCountZ = 1;
+        desc.numReadwriteStorageBuffers = 5;  // Particles, Alive, FreeList, DrawArgs, Emitters
+        desc.numUniformBuffers = 1;
+        emitPipeline_ = device_->createComputePipeline(desc);
+    }
+
+    // ── Sort pipeline (odd-even fallback) ──
+    {
+        backend::ComputePipelineDesc desc{};
+        desc.spirvCode = particle_sort_spv;
+        desc.spirvSize = particle_sort_spv_size;
+        desc.entryPoint = "main";
+        desc.threadCountX = SORT_WORKGROUP_SIZE;
+        desc.threadCountY = 1;
+        desc.threadCountZ = 1;
+        desc.numReadonlyStorageBuffers = 2;
+        desc.numReadwriteStorageBuffers = 1;
+        desc.numUniformBuffers = 1;
+        sortPipeline_ = device_->createComputePipeline(desc);
+    }
+
+    // ── Bitonic sort pipeline ──
+    {
+        backend::ComputePipelineDesc desc{};
+        desc.spirvCode = particle_sort_bitonic_spv;
+        desc.spirvSize = particle_sort_bitonic_spv_size;
+        desc.entryPoint = "main";
+        desc.threadCountX = BITONIC_SORT_WORKGROUP_SIZE;
+        desc.threadCountY = 1;
+        desc.threadCountZ = 1;
+        desc.numReadonlyStorageBuffers = 2;
+        desc.numReadwriteStorageBuffers = 1;
+        desc.numUniformBuffers = 1;
+        bitonicSortPipeline_ = device_->createComputePipeline(desc);
+    }
 
     initialized_ = particleBuffer_.valid() &&
                    aliveIndexBuffer_.valid() &&
                    indirectArgsBuffer_.valid() &&
-                   updatePipeline_.valid() &&
-                   sortPipeline_.valid();
+                   emitterBuffer_.valid() &&
+                   freeListBuffer_.valid() &&
+                   emitPipeline_.valid();
     if (initialized_) {
-        core::logInfo("GPUParticleRenderer initialized");
+        core::logInfo("GPUParticleRenderer initialized (GPU self-emission, %u max emitters)", MAX_EMITTERS);
     } else {
-        core::logWarn("GPUParticleRenderer disabled: buffer or compute pipeline unavailable");
+        core::logWarn("GPUParticleRenderer disabled");
     }
 }
 
 void GPUParticleRenderer::shutdown() {
     if (!device_) return;
 
-    if (updatePipeline_.valid()) {
-        device_->destroyComputePipeline(updatePipeline_);
-    }
-    if (sortPipeline_.valid()) {
-        device_->destroyComputePipeline(sortPipeline_);
-    }
-    if (bitonicSortPipeline_.valid()) {
-        device_->destroyComputePipeline(bitonicSortPipeline_);
-    }
-    if (particleBuffer_.valid()) {
-        device_->destroyBuffer(particleBuffer_);
-    }
-    if (aliveIndexBuffer_.valid()) {
-        device_->destroyBuffer(aliveIndexBuffer_);
-    }
-    if (indirectArgsBuffer_.valid()) {
-        device_->destroyBuffer(indirectArgsBuffer_);
-    }
+    auto destroy = [&](auto& h) { if (h.valid()) device_->destroyComputePipeline(h); h = {}; };
+    destroy(emitPipeline_);
+    destroy(sortPipeline_);
+    destroy(bitonicSortPipeline_);
 
-    updatePipeline_ = {};
-    sortPipeline_ = {};
-    bitonicSortPipeline_ = {};
-    particleBuffer_ = {};
-    aliveIndexBuffer_ = {};
-    indirectArgsBuffer_ = {};
-    nextOffset_ = 0;
+    auto destroyBuf = [&](auto& h) { if (h.valid()) device_->destroyBuffer(h); h = {}; };
+    destroyBuf(particleBuffer_);
+    destroyBuf(aliveIndexBuffer_);
+    destroyBuf(indirectArgsBuffer_);
+    destroyBuf(emitterBuffer_);
+    destroyBuf(freeListBuffer_);
+
+    particleOffset_ = 0;
+    emitterCount_ = 0;
     initialized_ = false;
 }
 
-void GPUParticleRenderer::ensureEmitter(ParticleComponent& pc) {
-    if (!initialized_) return;
-    if (pc.gpuOffset != 0xFFFFFFFFu && pc.gpuCount == pc.maxParticles) return;
-
-    pc.gpuCount = std::max(1u, std::min(pc.maxParticles, MAX_PARTICLES));
-    pc.gpuOffset = allocateRange(pc.gpuCount);
-
-    // 新 range 默认写成 inactive，避免 GPU 第一次绘制未初始化数据。
-    std::vector<GPUParticle> inactive(pc.gpuCount);
-    for (GPUParticle& p : inactive) {
-        p.posLife[2] = -1.f;
-        p.posLife[3] = std::max(pc.lifetime, 0.001f);
-    }
-    device_->uploadToBuffer(particleBuffer_, inactive.data(),
-                            inactive.size() * sizeof(GPUParticle),
-                            pc.gpuOffset * sizeof(GPUParticle));
-}
-
-void GPUParticleRenderer::emit(ParticleComponent& pc, const Transform& tf,
-                               float dt, backend::IRenderDevice& device) {
-    if (!initialized_ || !pc.visible || !pc.playing || !pc.texture.valid()) return;
-    ensureEmitter(pc);
-    if (pc.gpuOffset == 0xFFFFFFFFu || pc.gpuCount == 0) return;
-
-    pc.accumulator += std::max(0.f, dt) * std::max(0.f, pc.emissionRate);
-    const uint32_t spawnCount = static_cast<uint32_t>(pc.accumulator);
-    if (spawnCount == 0) return;
-    pc.accumulator -= static_cast<float>(spawnCount);
-
-    const uint32_t cappedSpawn = std::min(spawnCount, pc.gpuCount);
-    std::vector<GPUParticle> spawned(cappedSpawn);
-    for (uint32_t i = 0; i < cappedSpawn; ++i) {
-        spawned[i] = makeParticle(pc, tf, device);
-    }
-
-    // Batch upload all spawned particles in at most two contiguous transfers.
-    // The emitter operates as a ring buffer: new particles are written
-    // sequentially starting at a write cursor; when the cursor reaches the
-    // end of the range it wraps. This avoids the per-particle
-    // SDL_AcquireGPUCommandBuffer / SDL_SubmitGPUCommandBuffer overhead that
-    // scattered round-robin writes would incur.
-    const size_t base = static_cast<size_t>(pc.gpuOffset) * sizeof(GPUParticle);
-    const size_t rangeBytes = static_cast<size_t>(pc.gpuCount) * sizeof(GPUParticle);
-    const size_t chunkBytes = static_cast<size_t>(cappedSpawn) * sizeof(GPUParticle);
-    const size_t writeStart = base + (static_cast<size_t>(pc.seed) * sizeof(GPUParticle)) % rangeBytes;
-    const size_t chunk1 = std::min(rangeBytes - (writeStart - base), chunkBytes);
-
-    device_->uploadToBuffer(particleBuffer_, spawned.data(), chunk1, writeStart);
-
-    if (chunk1 < chunkBytes) {
-        const size_t remaining = chunkBytes - chunk1;
-        device_->uploadToBuffer(particleBuffer_,
-                                spawned.data() + chunk1 / sizeof(GPUParticle),
-                                remaining, base);
-    }
-
-    pc.seed += cappedSpawn;
-}
-
-uint32_t GPUParticleRenderer::allocateRange(uint32_t count) {
+uint32_t GPUParticleRenderer::allocateParticleRange(uint32_t count) {
     if (count > MAX_PARTICLES) count = MAX_PARTICLES;
-    if (nextOffset_ + count > MAX_PARTICLES) {
-        core::logWarn("GPUParticleRenderer: particle pool exhausted, wrapping allocations");
-        nextOffset_ = 0;
+    if (particleOffset_ + count > MAX_PARTICLES) {
+        core::logWarn("GPUParticleRenderer: pool exhausted, wrapping");
+        particleOffset_ = 0;
     }
-
-    const uint32_t out = nextOffset_;
-    nextOffset_ += count;
+    uint32_t out = particleOffset_;
+    particleOffset_ += count;
     return out;
 }
 
-GPUParticle GPUParticleRenderer::makeParticle(const ParticleComponent& pc,
-                                              const Transform& tf,
-                                              backend::IRenderDevice& device) {
-    uint32_t seed = pc.seed * 747796405u + 2891336453u;
-    const float angleJitter = (rand01(seed) - 0.5f) * std::max(0.f, pc.spread);
-    const float angle = tf.rotation + angleJitter;
-    const float speed = pc.speedMin + (pc.speedMax - pc.speedMin) * rand01(seed);
+void GPUParticleRenderer::uploadEmitterConfig(uint32_t idx,
+                                               const ParticleComponent& pc,
+                                               backend::IRenderDevice& device) {
+    GPUEmitter e{};
+    em_setFirstParticle(e, pc.gpuOffset);
+    em_setParticleCount(e, pc.gpuCount);
+    em_setEmissionRate(e, pc.emissionRate);
+    em_setLifetime(e, pc.lifetime);
+    em_setSpeedMin(e, pc.speedMin);
+    em_setSpeedMax(e, pc.speedMax);
+    em_setSizeStart(e, pc.sizeStart);
+    em_setSizeEnd(e, pc.sizeEnd);
+    em_setSpread(e, pc.spread);
+    em_setLayer(e, static_cast<uint32_t>(pc.layer));
+    em_setSortKey(e, pc.sortOrder);
 
-    GPUParticle p{};
-    p.posLife[0] = tf.x;
-    p.posLife[1] = tf.y;
-    p.posLife[2] = 0.f;
-    p.posLife[3] = std::max(pc.lifetime, 0.001f);
-
-    p.velSize[0] = std::cos(angle) * speed;
-    p.velSize[1] = std::sin(angle) * speed;
-    p.velSize[2] = pc.sizeStart;
-    p.velSize[3] = pc.sizeEnd;
-
-    packParticleColor(p.color0, pc.colorStart.r, pc.colorStart.g,
+    packParticleColor(e.colorStart, pc.colorStart.r, pc.colorStart.g,
                       pc.colorStart.b, pc.colorStart.a);
-    packParticleColor(p.color1, pc.colorEnd.r, pc.colorEnd.g,
+    packParticleColor(e.colorEnd, pc.colorEnd.r, pc.colorEnd.g,
                       pc.colorEnd.b, pc.colorEnd.a);
 
     int texW = 1, texH = 1;
     device.getTextureDimensions(pc.texture, texW, texH);
-    p.uv[0] = pc.srcRect.x / static_cast<float>(texW);
-    p.uv[1] = pc.srcRect.y / static_cast<float>(texH);
-    p.uv[2] = (pc.srcRect.x + pc.srcRect.w) / static_cast<float>(texW);
-    p.uv[3] = (pc.srcRect.y + pc.srcRect.h) / static_cast<float>(texH);
+    e.uvRect[0] = pc.srcRect.x / static_cast<float>(texW);
+    e.uvRect[1] = pc.srcRect.y / static_cast<float>(texH);
+    e.uvRect[2] = (pc.srcRect.x + pc.srcRect.w) / static_cast<float>(texW);
+    e.uvRect[3] = (pc.srcRect.y + pc.srcRect.h) / static_cast<float>(texH);
 
-    p.textureIndex = pc.texture.index;
-    p.layer = static_cast<uint32_t>(pc.layer);
-    p.sortKey = pc.sortOrder;
-    p.flags = static_cast<uint32_t>(pc.pass) | (pc.ySort ? (1u << 8) : 0u);
-    return p;
+    em_setTextureIndex(e, pc.texture.index);
+
+    uint32_t flags = static_cast<uint32_t>(pc.pass) | sortModeBits(pc.sortMode);
+    em_setFlags(e, flags);
+
+    // GPU-side initial state
+    em_setAccumulator(e, 0.f);
+    em_setSeed(e, pc.seed);
+    em_setWriteCursor(e, 0);
+
+    device.uploadToBuffer(emitterBuffer_, &e, sizeof(GPUEmitter),
+                          idx * sizeof(GPUEmitter));
 }
 
-float GPUParticleRenderer::rand01(uint32_t& state) {
-    // 小型 LCG 足够用于发射角度/速度抖动；粒子确定性来自组件 seed。
-    state = state * 1664525u + 1013904223u;
-    return static_cast<float>((state >> 8) & 0x00FFFFFFu) / 16777215.0f;
+uint32_t GPUParticleRenderer::registerEmitter(ParticleComponent& pc) {
+    if (!initialized_ || emitterCount_ >= MAX_EMITTERS) return 0xFFFFFFFFu;
+
+    // Check if already registered
+    if (pc.gpuEmitterIndex != 0xFFFFFFFFu) return pc.gpuEmitterIndex;
+
+    pc.gpuCount = std::max(1u, std::min(pc.maxParticles, MAX_PARTICLES));
+    pc.gpuOffset = allocateParticleRange(pc.gpuCount);
+    pc.gpuEmitterIndex = emitterCount_++;
+
+    uploadEmitterConfig(pc.gpuEmitterIndex, pc, *device_);
+    return pc.gpuEmitterIndex;
+}
+
+void GPUParticleRenderer::syncEmitterPosition(uint32_t emitterIdx,
+                                              const Transform& tf,
+                                              backend::IRenderDevice& device) {
+    if (!initialized_ || emitterIdx >= emitterCount_) return;
+
+    // Only need to write pos_rot[0..2] — position and rotation.
+    // The GPU reads firstParticle from slot[3] so we must preserve it.
+    GPUEmitter e{};  // Only fields [0..2] matter; rest is never read on this path.
+    em_setPosX(e, tf.x);
+    em_setPosY(e, tf.y);
+    em_setRotation(e, tf.rotation);
+
+    const size_t offset = emitterIdx * sizeof(GPUEmitter);
+    device.uploadToBuffer(emitterBuffer_, &e, 3 * sizeof(float), offset);
 }
 
 } // namespace engine

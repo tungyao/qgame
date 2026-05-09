@@ -43,6 +43,7 @@ target_include_directories(engine PRIVATE "${CMAKE_BINARY_DIR}/generated/shaders
 set(ENGINE_SHADER_DEPS
     "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_spv.h"
     "${CMAKE_BINARY_DIR}/generated/shaders/particle_update_spv.h"
+    "${CMAKE_BINARY_DIR}/generated/shaders/particle_emit_spv.h"
     "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_spv.h"
     "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_bitonic_spv.h"
 )

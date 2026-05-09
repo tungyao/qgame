@@ -51,6 +51,10 @@ compile_hlsl_to_spirv(
     "${SHADER_GEN}/particle_update_spv.h" particle_update_spv
 )
 compile_hlsl_to_spirv(
+    "${SHADER_SRC}/particle_emit.comp.hlsl"  comp
+    "${SHADER_GEN}/particle_emit_spv.h" particle_emit_spv
+)
+compile_hlsl_to_spirv(
     "${SHADER_SRC}/particle_sort.comp.hlsl"  comp
     "${SHADER_GEN}/particle_sort_spv.h" particle_sort_spv
 )
@@ -97,6 +101,7 @@ set(ALL_SHADER_DEPS
     "${SHADER_GEN}/particle_gpu_vert_spv.h"
     "${SHADER_GEN}/particle_gpu_frag_spv.h"
     "${SHADER_GEN}/particle_update_spv.h"
+    "${SHADER_GEN}/particle_emit_spv.h"
     "${SHADER_GEN}/particle_sort_spv.h"
     "${SHADER_GEN}/particle_sort_bitonic_spv.h"
     "${SHADER_GEN}/lighting2d_spv.h"

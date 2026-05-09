@@ -10,11 +10,27 @@ namespace engine {
 
 // GPU 粒子发射器组件。
 //
-// 第一版故意保持窄接口：
-// - CPU 只根据 emissionRate 生成新粒子的初始状态。
-// - GPU compute 每帧推进生命周期、速度和位置。
-// - SDL_GPU 后端直接从粒子 storage buffer 绘制 instanced quad。
-// - OpenGL 后端不做优化，也不会渲染 GPU 粒子。
+// CPU 职责（每帧）：
+//   - syncEmitterPosition: 仅上传位置 / 旋转（2 floats × 3 = 12 bytes）。
+//   - 配置参数（寿命、速度、颜色等）仅在组件创建或修改时上传一次。
+//
+// GPU 职责（particle_emit.comp.hlsl）：
+//   - 从 emitter buffer 读取参数，自主发射新粒子。
+//   - 使用 lock-free free list 回收死亡粒子的槽位。
+//   - 推进生命周期、速度、位置。
+//   - 把活粒子压缩到 AliveIndices 并写入间接绘制参数。
+//
+// OpenGL 后端：不支持 compute，粒子不渲染。
+
+enum class ParticleSortMode : uint32_t {
+    None      = 0,   // 不排序（火/烟/叠加混合）
+    Y         = 1,   // 按 Y 轴深度排序
+    Depth     = 2,   // 按相机距离排序（预留）
+    CustomKey = 3,   // 按 sortKey 排序
+};
+
+inline uint32_t sortModeBits(ParticleSortMode m) { return static_cast<uint32_t>(m) << 8; }
+
 struct ParticleComponent {
     TextureHandle texture;
     core::Rect    srcRect;
@@ -26,24 +42,24 @@ struct ParticleComponent {
     float         speedMax     = 80.f;
     float         sizeStart    = 8.f;
     float         sizeEnd      = 0.f;
-    float         spread       = 6.28318530718f; // radians, centered on emitter.rotation
+    float         spread       = 6.28318530718f; // radians
 
     core::Color   colorStart = core::Color::White;
     core::Color   colorEnd   = core::Color{255, 255, 255, 0};
 
     int           layer     = 0;
     int           sortOrder = 0;
-    bool          ySort     = false;
+    ParticleSortMode sortMode = ParticleSortMode::None;
     bool          visible   = true;
     bool          playing   = true;
     RenderPass    pass      = RenderPass::World;
 
-    // RenderSystem / GPUParticleRenderer 内部状态。组件保留这些字段，
-    // 避免额外 side table；场景序列化以后可以选择跳过它们。
-    uint32_t      gpuOffset   = 0xFFFFFFFFu;
-    uint32_t      gpuCount    = 0;
-    float         accumulator = 0.f;
-    uint32_t      seed        = 1u;
+    // ── GPU 侧管理字段（场景序列化跳过）─────────────────────────────────────
+    uint32_t      gpuOffset       = 0xFFFFFFFFu;  // particle pool base
+    uint32_t      gpuCount        = 0;            // allocated slot count
+    uint32_t      gpuEmitterIndex = 0xFFFFFFFFu;  // emitter buffer slot
+    uint32_t      seed            = 1u;           // LCG 初始种子（上传一次）
+    bool          configDirty     = true;          // 配置变化标志
 };
 
 } // namespace engine

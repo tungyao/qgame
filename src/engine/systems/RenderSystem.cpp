@@ -350,10 +350,27 @@ void RenderSystem::syncParticleEmitters(float dt) {
     if (!particleRenderer_.isInitialized()) return;
     if (!ctx_.renderDevice().capabilities().supportsCompute) return;
 
+    (void)dt;  // dt is consumed by GPU via uniform, not CPU
+
     auto view = ctx_.world.view<Transform, ParticleComponent>();
     for (auto [ent, tf, pc] : view.each()) {
         (void)ent;
-        particleRenderer_.emit(pc, tf, dt, ctx_.renderDevice());
+        if (!pc.visible || !pc.playing) continue;
+
+        // Register emitter on first encounter (uploads config once)
+        particleRenderer_.registerEmitter(pc);
+
+        // Re-upload config if the component was modified
+        if (pc.configDirty) {
+            particleRenderer_.registerEmitter(pc);
+            pc.configDirty = false;
+        }
+
+        // Upload position/rotation each frame (just 12 bytes)
+        if (pc.gpuEmitterIndex != 0xFFFFFFFFu) {
+            particleRenderer_.syncEmitterPosition(pc.gpuEmitterIndex, tf,
+                                                  ctx_.renderDevice());
+        }
     }
 }
 
@@ -361,37 +378,44 @@ std::vector<backend::IRenderDevice::GPUParticleParams>
 RenderSystem::collectParticleParams(const Transform& tf, const Camera& cam,
                                     int viewportW, int viewportH, float dt) {
     std::vector<backend::IRenderDevice::GPUParticleParams> out;
-    if (!particleRenderer_.isInitialized() ||
-        !particleRenderer_.hasUpdatePipeline() ||
-        !particleRenderer_.hasSortPipeline()) return out;
+    if (!particleRenderer_.isInitialized()) return out;
+    if (!particleRenderer_.hasEmitPipeline()) return out;
     if (!ctx_.renderDevice().capabilities().supportsCompute) return out;
+    if (particleRenderer_.emitterCount() == 0) return out;
 
     backend::CameraData camera = toBackendCamera(tf, cam, viewportW, viewportH);
 
-    auto view = ctx_.world.view<ParticleComponent>();
-    for (auto [ent, pc] : view.each()) {
-        (void)ent;
-        if (!pc.visible || !pc.texture.valid()) continue;
-        if (pc.gpuOffset == 0xFFFFFFFFu || pc.gpuCount == 0) continue;
-        if ((cam.layerMask & renderPassBit(pc.pass)) == 0) continue;
-
-        backend::IRenderDevice::GPUParticleParams params;
-        params.updatePipeline = particleRenderer_.updatePipeline();
-        params.sortPipeline = particleRenderer_.sortPipeline();
-        params.bitonicSortPipeline = particleRenderer_.bitonicSortPipeline();
-        params.particleBuffer = particleRenderer_.particleBuffer();
-        params.aliveIndexBuffer = particleRenderer_.aliveIndexBuffer();
-        params.indirectArgsBuffer = particleRenderer_.indirectArgsBuffer();
-        params.texture = pc.texture;
-        params.firstParticle = pc.gpuOffset;
-        params.particleCount = pc.gpuCount;
-        params.dt = std::max(0.f, dt);
-        params.camera = camera;
-        params.clearEnabled = false;
-        params.clearColor = cam.clearColor;
-        params.sortEnabled = pc.ySort;
-        out.push_back(params);
+    // Single dispatch processes all emitters whose pass matches the camera.
+    // Group emitters by whether they need sorting.
+    backend::IRenderDevice::GPUParticleParams params;
+    bool anyNeedsSort = false;
+    {
+        auto view = ctx_.world.view<ParticleComponent>();
+        for (auto [ent, pc] : view.each()) {
+            (void)ent;
+            if (!pc.visible || pc.gpuEmitterIndex == 0xFFFFFFFFu) continue;
+            if ((cam.layerMask & renderPassBit(pc.pass)) == 0) continue;
+            if (pc.sortMode != ParticleSortMode::None) anyNeedsSort = true;
+            params.emitterTextures[pc.gpuEmitterIndex] = pc.texture;
+        }
     }
+
+    params.emitPipeline = particleRenderer_.emitPipeline();
+    params.sortPipeline = particleRenderer_.sortPipeline();
+    params.bitonicSortPipeline = particleRenderer_.bitonicSortPipeline();
+    params.particleBuffer = particleRenderer_.particleBuffer();
+    params.aliveIndexBuffer = particleRenderer_.aliveIndexBuffer();
+    params.indirectArgsBuffer = particleRenderer_.indirectArgsBuffer();
+    params.emitterBuffer = particleRenderer_.emitterBuffer();
+    params.freeListBuffer = particleRenderer_.freeListBuffer();
+    params.emitterCount = particleRenderer_.emitterCount();
+    params.dt = std::max(0.f, dt);
+    params.camera = camera;
+    params.clearEnabled = false;
+    params.clearColor = cam.clearColor;
+    params.anyEmitterNeedsSort = anyNeedsSort;
+    out.push_back(params);
+
     return out;
 }
 

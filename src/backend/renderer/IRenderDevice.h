@@ -231,20 +231,22 @@ public:
     virtual void submitGPUDrivenPass(const PassSubmitInfo& info, const GPURenderParams& params) = 0;
 
     struct GPUParticleParams {
-        ComputePipelineHandle updatePipeline;
-        ComputePipelineHandle sortPipeline;          // odd-even fallback (>256)
-        ComputePipelineHandle bitonicSortPipeline;   // single-pass bitonic (≤256)
+        ComputePipelineHandle emitPipeline;          // emission + simulation
+        ComputePipelineHandle sortPipeline;          // odd-even fallback
+        ComputePipelineHandle bitonicSortPipeline;   // bitonic single-pass
         BufferHandle particleBuffer;
         BufferHandle aliveIndexBuffer;
         BufferHandle indirectArgsBuffer;
-        TextureHandle texture;
-        uint32_t firstParticle = 0;
-        uint32_t particleCount = 0;
+        BufferHandle emitterBuffer;
+        BufferHandle freeListBuffer;
+        uint32_t emitterCount = 0;
         float dt = 0.f;
         CameraData camera;
         bool clearEnabled = false;
         core::Color clearColor = core::Color::Black;
-        bool sortEnabled = true;  // skip sort when emitter has ySort==false
+        bool anyEmitterNeedsSort = false;
+        // Per-emitter draw info (texture for each registered emitter)
+        TextureHandle emitterTextures[128];  // index = emitter slot
     };
 
     virtual void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) = 0;

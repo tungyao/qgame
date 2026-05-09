@@ -1010,7 +1010,7 @@ int main(int argc, char* argv[]) {
 		particles.colorStart = { 255, 245, 140, 230 };
 		particles.colorEnd = { 255, 80, 40, 0 };
 		particles.layer = 8;
-		particles.ySort = true;
+		particles.sortMode = engine::ParticleSortMode::Y;
 		particles.pass = engine::RenderPass::World;
 		api.addComponent(particleEmitter, particles);
 	}
