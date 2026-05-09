@@ -1,90 +1,74 @@
 include(${CMAKE_SOURCE_DIR}/cmake/CompileShaders.cmake)
 
-set(SHADER_SRC      "${CMAKE_SOURCE_DIR}/assets/shaders")
-set(SHADER_GEN      "${CMAKE_BINARY_DIR}/generated/shaders")
-set(SHADER_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/renderer/sdl_gpu/shaders_precompiled")
+set(SHADER_SRC "${CMAKE_SOURCE_DIR}/assets/shaders")
+set(SHADER_GEN "${CMAKE_BINARY_DIR}/generated/shaders")
 
 # ── Sprite 基础着色器 ────────────────────────────────────────────────────────
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/sprite.vert.hlsl"  vert
     "${SHADER_GEN}/sprite_vert_spv.h" sprite_vert_spv
-    "${SHADER_FALLBACK}/sprite_vert_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/sprite.frag.hlsl"  frag
     "${SHADER_GEN}/sprite_frag_spv.h" sprite_frag_spv
-    "${SHADER_FALLBACK}/sprite_frag_spv.h"
 )
 
 # ── MSDF 字体着色器 ──────────────────────────────────────────────────────────
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/msdf.frag.hlsl"  frag
     "${SHADER_GEN}/msdf_frag_spv.h" msdf_frag_spv
-    "${SHADER_FALLBACK}/msdf_frag_spv.h"
 )
 
 # ── GPU 驱动渲染着色器 ──────────────────────────────────────────────────────
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/sprite_gpu.vert.hlsl"  vert
     "${SHADER_GEN}/sprite_gpu_vert_spv.h" sprite_gpu_vert_spv
-    "${SHADER_FALLBACK}/sprite_gpu_vert_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/sprite_gpu.frag.hlsl"  frag
     "${SHADER_GEN}/sprite_gpu_frag_spv.h" sprite_gpu_frag_spv
-    "${SHADER_FALLBACK}/sprite_gpu_frag_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/particle_gpu.vert.hlsl"  vert
     "${SHADER_GEN}/particle_gpu_vert_spv.h" particle_gpu_vert_spv
-    "${SHADER_FALLBACK}/particle_gpu_vert_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/particle_gpu.frag.hlsl"  frag
     "${SHADER_GEN}/particle_gpu_frag_spv.h" particle_gpu_frag_spv
-    "${SHADER_FALLBACK}/particle_gpu_frag_spv.h"
 )
 
 # ── Compute 着色器 (Culling + Sort) ─────────────────────────────────────────
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/sprite_culling.comp.hlsl"  comp
     "${SHADER_GEN}/sprite_culling_spv.h" sprite_culling_spv
-    "${SHADER_FALLBACK}/sprite_culling_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/sprite_sort.comp.hlsl"  comp
     "${SHADER_GEN}/sprite_sort_spv.h" sprite_sort_spv
-    "${SHADER_FALLBACK}/sprite_sort_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/particle_update.comp.hlsl"  comp
     "${SHADER_GEN}/particle_update_spv.h" particle_update_spv
-    "${SHADER_FALLBACK}/particle_update_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/particle_sort.comp.hlsl"  comp
     "${SHADER_GEN}/particle_sort_spv.h" particle_sort_spv
-    "${SHADER_FALLBACK}/particle_sort_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/lighting2d.comp.hlsl"  comp
     "${SHADER_GEN}/lighting2d_spv.h" lighting2d_spv
-    "${SHADER_FALLBACK}/lighting2d_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/lighting2d_cull.comp.hlsl"  comp
     "${SHADER_GEN}/lighting2d_cull_spv.h" lighting2d_cull_spv
-    "${SHADER_FALLBACK}/lighting2d_cull_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/lighting2d_blur.comp.hlsl"  comp
     "${SHADER_GEN}/lighting2d_blur_spv.h" lighting2d_blur_spv
-    "${SHADER_FALLBACK}/lighting2d_blur_spv.h"
 )
 compile_hlsl_to_spirv(
     "${SHADER_SRC}/lighting2d_composite.frag.hlsl"  frag
     "${SHADER_GEN}/lighting2d_composite_frag_spv.h" lighting2d_composite_frag_spv
-    "${SHADER_FALLBACK}/sprite_frag_spv.h"
 )
 
 add_library(backend STATIC

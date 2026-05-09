@@ -18,7 +18,7 @@ cbuffer SortParams : register(b0, space2)
 {
     uint phase;
     uint maxParticleCount;
-    uint _pad0;
+    uint singlePass;   // 1 = internal loop with barriers, 0 = multi-pass (legacy)
     uint _pad1;
 };
 
@@ -51,23 +51,40 @@ bool Less(uint leftIdx, uint rightIdx)
 [numthreads(128, 1, 1)]
 void main(uint3 gid : SV_DispatchThreadID)
 {
-    // Odd-even transposition sort:
-    // even phase compares (0,1), (2,3)...
-    // odd phase compares (1,2), (3,4)...
-    // Running maxParticleCount phases fully sorts the compact alive list for
-    // any alive count, without CPU readback of DrawArgs[1].
-    uint i = gid.x * 2u + (phase & 1u);
     uint count = DrawArgs[1];
-    if (i + 1u >= count) {
-        return;
-    }
 
-    uint aIdx = AliveIndices[i];
-    uint bIdx = AliveIndices[i + 1u];
-    bool outOfOrder = !Less(aIdx, bIdx);
+    if (singlePass != 0u) {
+        // All sort threads are in a single workgroup. Run the entire
+        // odd-even transposition sort inside this dispatch, using group
+        // memory barriers between phases. This avoids the massive per-pass
+        // overhead of issuing particleCount separate SDL_BeginGPUComputePass
+        // calls from the CPU.
+        for (uint p = 0u; p < maxParticleCount; ++p) {
+            uint i = gid.x * 2u + (p & 1u);
+            if (i + 1u < count) {
+                uint aIdx = AliveIndices[i];
+                uint bIdx = AliveIndices[i + 1u];
+                if (!Less(aIdx, bIdx)) {
+                    AliveIndices[i] = bIdx;
+                    AliveIndices[i + 1u] = aIdx;
+                }
+            }
+            DeviceMemoryBarrierWithGroupSync();
+        }
+    } else {
+        // Multi-pass path for particle pools that span multiple workgroups
+        // (maxParticles > ~256). The CPU dispatches one pass per phase and
+        // the per-pass begin/end provides the global device barrier.
+        uint i = gid.x * 2u + (phase & 1u);
+        if (i + 1u >= count) {
+            return;
+        }
 
-    if (outOfOrder) {
-        AliveIndices[i] = bIdx;
-        AliveIndices[i + 1u] = aIdx;
+        uint aIdx = AliveIndices[i];
+        uint bIdx = AliveIndices[i + 1u];
+        if (!Less(aIdx, bIdx)) {
+            AliveIndices[i] = bIdx;
+            AliveIndices[i + 1u] = aIdx;
+        }
     }
 }

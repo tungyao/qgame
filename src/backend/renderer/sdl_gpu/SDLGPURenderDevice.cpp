@@ -3082,28 +3082,57 @@ void SDLGPURenderDevice::submitGPUParticlePassToTarget(const PassSubmitInfo& inf
     // Phase 1.5: GPU sort. The alive list was compacted by update compute,
     // and DrawArgs[1] carries the current alive count. Odd-even sort needs
     // particleCount phases to be correct for any alive count without readback.
+    //
+    // When all sort work fits in a single workgroup (particleCount <= 256),
+    // the shader runs an internal phase loop with DeviceMemoryBarrierWithGroupSync
+    // so the CPU only issues one compute pass instead of particleCount passes.
     const uint32_t sortGroups = ((params.particleCount + 1u) / 2u + 127u) / 128u;
-    for (uint32_t phase = 0; phase < params.particleCount; ++phase) {
-        struct SortUniforms {
-            uint32_t phase;
-            uint32_t maxParticleCount;
-            uint32_t pad0;
-            uint32_t pad1;
-        } sortUniforms{ phase, params.particleCount, 0u, 0u };
-
+    if (sortGroups <= 1u) {
+        // Single-workgroup: shader handles all phases internally
         SDL_GPUStorageBufferReadWriteBinding sortRw{};
         sortRw.buffer = aliveBuf.gpuBuffer;
         sortRw.cycle = false;
         SDL_GPUComputePass* sortPass = SDL_BeginGPUComputePass(gpuCmdBuf_, nullptr, 0, &sortRw, 1);
-        if (!sortPass) break;
+        if (sortPass) {
+            SDL_BindGPUComputePipeline(sortPass, sort.pipeline);
+            SDL_GPUBuffer* readonlyBuffers[2] = { particleBuf.gpuBuffer, indirectBuf.gpuBuffer };
+            SDL_BindGPUComputeStorageBuffers(sortPass, 0, readonlyBuffers, 2);
 
-        SDL_BindGPUComputePipeline(sortPass, sort.pipeline);
-        SDL_GPUBuffer* readonlyBuffers[2] = { particleBuf.gpuBuffer, indirectBuf.gpuBuffer };
-        SDL_BindGPUComputeStorageBuffers(sortPass, 0, readonlyBuffers, 2);
-        SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &sortUniforms, sizeof(sortUniforms));
-        SDL_DispatchGPUCompute(sortPass, sortGroups, 1, 1);
-        SDL_EndGPUComputePass(sortPass);
-        frameStats_.computeDispatchCount++;
+            struct SortUniforms {
+                uint32_t phase;
+                uint32_t maxParticleCount;
+                uint32_t singlePass;  // 1 = internal loop
+                uint32_t pad1;
+            } sortUniforms{ 0u, params.particleCount, 1u, 0u };
+            SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &sortUniforms, sizeof(sortUniforms));
+            SDL_DispatchGPUCompute(sortPass, sortGroups, 1, 1);
+            frameStats_.computeDispatchCount++;
+            SDL_EndGPUComputePass(sortPass);
+        }
+    } else {
+        // Multi-workgroup: one pass per phase for cross-group barrier semantics
+        for (uint32_t phase = 0; phase < params.particleCount; ++phase) {
+            struct SortUniforms {
+                uint32_t phase;
+                uint32_t maxParticleCount;
+                uint32_t singlePass;  // 0 = multi-pass
+                uint32_t pad1;
+            } sortUniforms{ phase, params.particleCount, 0u, 0u };
+
+            SDL_GPUStorageBufferReadWriteBinding sortRw{};
+            sortRw.buffer = aliveBuf.gpuBuffer;
+            sortRw.cycle = false;
+            SDL_GPUComputePass* sortPass = SDL_BeginGPUComputePass(gpuCmdBuf_, nullptr, 0, &sortRw, 1);
+            if (!sortPass) break;
+
+            SDL_BindGPUComputePipeline(sortPass, sort.pipeline);
+            SDL_GPUBuffer* readonlyBuffers[2] = { particleBuf.gpuBuffer, indirectBuf.gpuBuffer };
+            SDL_BindGPUComputeStorageBuffers(sortPass, 0, readonlyBuffers, 2);
+            SDL_PushGPUComputeUniformData(gpuCmdBuf_, 0, &sortUniforms, sizeof(sortUniforms));
+            SDL_DispatchGPUCompute(sortPass, sortGroups, 1, 1);
+            SDL_EndGPUComputePass(sortPass);
+            frameStats_.computeDispatchCount++;
+        }
     }
 
     CameraData cam = params.camera;
