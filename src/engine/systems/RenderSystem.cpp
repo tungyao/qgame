@@ -28,37 +28,46 @@ struct ViewRect {
     }
 };
 
-ViewRect computeCameraViewRect(const Transform& tf, const Camera& cam,
-                               int viewportW, int viewportH) {
+// 把解析后的相机视图转成一个 axis-aligned 世界包围盒。
+//
+// 注意这里故意不直接依赖 Camera::zoom / 窗口尺寸，而是依赖
+// ResolvedCameraView2D：
+//   - projectionMode 变化时，只有 resolveCameraView 需要改
+//   - CPU 裁剪、GPU-driven 裁剪、UI 世界锚点仍然继续对齐
+ViewRect computeCameraViewRect(const ResolvedCameraView2D& view, bool cullEnabled) {
     ViewRect vr{};
-    if (!cam.cullEnabled || cam.zoom <= 0.f) return vr;
+    if (!cullEnabled || view.zoom <= 0.f) return vr;
 
-    const float halfW = (viewportW * 0.5f) / cam.zoom;
-    const float halfH = (viewportH * 0.5f) / cam.zoom;
+    const float halfW = view.visibleWorldW * 0.5f;
+    const float halfH = view.visibleWorldH * 0.5f;
     float rx = halfW, ry = halfH;
-    if (cam.rotation != 0.f) {
-        const float c = std::abs(std::cos(cam.rotation));
-        const float s = std::abs(std::sin(cam.rotation));
+    if (view.rotation != 0.f) {
+        const float c = std::abs(std::cos(view.rotation));
+        const float s = std::abs(std::sin(view.rotation));
         rx = halfW * c + halfH * s;
         ry = halfW * s + halfH * c;
     }
-    vr.minX = tf.x - rx;
-    vr.maxX = tf.x + rx;
-    vr.minY = tf.y - ry;
-    vr.maxY = tf.y + ry;
+    vr.minX = view.x - rx;
+    vr.maxX = view.x + rx;
+    vr.minY = view.y - ry;
+    vr.maxY = view.y + ry;
     vr.enabled = true;
     return vr;
 }
 
-backend::CameraData toBackendCamera(const Transform& tf, const Camera& cam,
-                                    int viewportW, int viewportH) {
+// ResolvedCameraView2D -> backend::CameraData 的唯一转换入口。
+//
+// backend::CameraData 是后端真正拿来建 view/projection 矩阵的 POD。
+// 只要 RenderSystem 总是从 resolved view 转换，后端就不需要知道
+// FixedVertical / StretchWithWindow 等高层策略细节。
+backend::CameraData toBackendCamera(const ResolvedCameraView2D& view) {
     backend::CameraData out{};
-    out.x         = tf.x;
-    out.y         = tf.y;
-    out.zoom      = (cam.zoom > 0.f) ? cam.zoom : 1.f;
-    out.rotation  = cam.rotation;
-    out.viewportW = viewportW;
-    out.viewportH = viewportH;
+    out.x         = view.x;
+    out.y         = view.y;
+    out.zoom      = (view.zoom > 0.f) ? view.zoom : 1.f;
+    out.rotation  = view.rotation;
+    out.viewportW = view.viewportW;
+    out.viewportH = view.viewportH;
     return out;
 }
 
@@ -252,6 +261,77 @@ backend::IRenderDevice::Lighting2DParams buildLighting2DParams(EngineContext& ct
 
 }
 
+ResolvedCameraView2D RenderSystem::resolveCameraView(const Transform& tf, const Camera& cam,
+                                                     int viewportW, int viewportH) {
+    ResolvedCameraView2D out{};
+    out.valid = (viewportW > 0 && viewportH > 0);
+    out.x = tf.x;
+    out.y = tf.y;
+    out.rotation = cam.rotation;
+    out.authoredZoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
+    out.zoom = out.authoredZoom;
+    out.viewportW = std::max(0, viewportW);
+    out.viewportH = std::max(0, viewportH);
+    out.projectionMode = cam.projectionMode;
+    out.referenceViewportHeight =
+        (cam.referenceViewportHeight > 1.f) ? cam.referenceViewportHeight : 1.f;
+
+    // 第一阶段只引入两种策略：
+    //
+    // 1. StretchWithWindow
+    //    完全继承旧行为。camera.zoom 就是当前窗口下的实际 zoom。
+    //
+    // 2. FixedVertical
+    //    把 camera.zoom 解释为“referenceViewportHeight 下的 zoom”，再按当前窗口
+    //    高度做比例换算。这样纵向世界可见高度保持稳定，宽度随 aspect 变化。
+    if (out.projectionMode == CameraProjectionMode::FixedVertical && out.viewportH > 0) {
+        const float heightScale =
+            static_cast<float>(out.viewportH) / out.referenceViewportHeight;
+        out.zoom = out.authoredZoom * heightScale;
+    }
+
+    if (out.zoom <= 0.f) {
+        out.zoom = 1.f;
+    }
+
+    if (out.viewportW > 0 && out.viewportH > 0) {
+        out.visibleWorldW = static_cast<float>(out.viewportW) / out.zoom;
+        out.visibleWorldH = static_cast<float>(out.viewportH) / out.zoom;
+    }
+
+    return out;
+}
+
+ResolvedCameraView2D RenderSystem::resolveActiveWorldCamera(const EngineContext& ctx) {
+    ResolvedCameraView2D out{};
+    if (!ctx.window) return out;
+
+    const int viewportW = ctx.window->width();
+    const int viewportH = ctx.window->height();
+
+    struct CamEntry {
+        const Transform* tf = nullptr;
+        const Camera* cam = nullptr;
+    };
+
+    std::vector<CamEntry> cameras;
+    auto camView = ctx.world.view<Transform, Camera>();
+    for (auto [ent, tf, cam] : camView.each()) {
+        (void)ent;
+        if (!cam.primary) continue;
+        if ((cam.layerMask & renderPassBit(RenderPass::World)) == 0u) continue;
+        cameras.push_back({ &tf, &cam });
+    }
+
+    std::stable_sort(cameras.begin(), cameras.end(),
+                     [](const CamEntry& a, const CamEntry& b) {
+                         return a.cam->depth < b.cam->depth;
+                     });
+
+    if (cameras.empty()) return out;
+    return resolveCameraView(*cameras.front().tf, *cameras.front().cam, viewportW, viewportH);
+}
+
 RenderSystem::RenderSystem(EngineContext& ctx) 
     : ctx_(ctx) {
 }
@@ -375,15 +455,14 @@ void RenderSystem::syncParticleEmitters(float dt) {
 }
 
 std::vector<backend::IRenderDevice::GPUParticleParams>
-RenderSystem::collectParticleParams(const Transform& tf, const Camera& cam,
-                                    int viewportW, int viewportH, float dt) {
+RenderSystem::collectParticleParams(const Camera& cam,
+                                    const backend::CameraData& camera,
+                                    float dt) {
     std::vector<backend::IRenderDevice::GPUParticleParams> out;
     if (!particleRenderer_.isInitialized()) return out;
     if (!particleRenderer_.hasEmitPipeline()) return out;
     if (!ctx_.renderDevice().capabilities().supportsCompute) return out;
     if (particleRenderer_.emitterCount() == 0) return out;
-
-    backend::CameraData camera = toBackendCamera(tf, cam, viewportW, viewportH);
 
     // Single dispatch processes all emitters whose pass matches the camera.
     // Group emitters by whether they need sorting.
@@ -419,11 +498,11 @@ RenderSystem::collectParticleParams(const Transform& tf, const Camera& cam,
     return out;
 }
 
-void RenderSystem::submitParticlePass(const Transform& tf, const Camera& cam,
-                                      int viewportW, int viewportH, float dt) {
+void RenderSystem::submitParticlePass(const Camera& cam,
+                                      const backend::CameraData& camera,
+                                      float dt) {
     backend::IRenderDevice& dev = ctx_.renderDevice();
-    backend::CameraData camera = toBackendCamera(tf, cam, viewportW, viewportH);
-    auto particles = collectParticleParams(tf, cam, viewportW, viewportH, dt);
+    auto particles = collectParticleParams(cam, camera, dt);
     for (const auto& params : particles) {
         dev.submitGPUParticlePass({ camera, false, cam.clearColor }, params);
     }
@@ -960,7 +1039,16 @@ void RenderSystem::buildCommandBuffer() {
         const Transform& tf = *cameras[i].tf;
         const Camera&    cam = *cameras[i].cam;
 
-        const ViewRect vr = computeCameraViewRect(tf, cam, w, h);
+        // 先把“组件里的 camera”解析成“当前窗口下真正生效的视图”。
+        //
+        // 这是第一阶段最重要的约束：
+        //   同一台相机，本帧里所有子系统都只能吃这一份 resolved 数据。
+        // 否则一个系统按 authored zoom，另一个按 fixed-vertical zoom，最终就会
+        // 出现裁剪、粒子、光照、UI 锚点各自偏半拍的问题。
+        const ResolvedCameraView2D resolved = resolveCameraView(tf, cam, w, h);
+        const backend::CameraData backendCamera = toBackendCamera(resolved);
+
+        const ViewRect vr = computeCameraViewRect(resolved, cam.cullEnabled);
 
         filtered.clear();
         for (const backend::RenderCmd& cmd : cb.commands()) {
@@ -982,14 +1070,14 @@ void RenderSystem::buildCommandBuffer() {
         }
 
         backend::IRenderDevice::PassSubmitInfo info;
-        info.camera       = toBackendCamera(tf, cam, w, h);
+        info.camera       = backendCamera;
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
-        const auto particles = collectParticleParams(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
+        const auto particles = collectParticleParams(cam, backendCamera, (i == 0) ? lastDt_ : 0.f);
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
-                                                  static_cast<uint32_t>(w),
-                                                  static_cast<uint32_t>(h));
+                                                  static_cast<uint32_t>(resolved.viewportW),
+                                                  static_cast<uint32_t>(resolved.viewportH));
             if (ctx_.renderDevice().capabilities().supportsLighting2D &&
                 !lighting.lights.empty()) {
                 std::vector<const backend::RenderCmd*> worldCmdPtrs;
@@ -1157,20 +1245,16 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         const Transform& tf = *cameras[i].tf;
         const Camera&    cam = *cameras[i].cam;
 
-        const float zoom  = (cam.zoom > 0.f) ? cam.zoom : 1.f;
-        const float halfW = (w * 0.5f) / zoom;
-        const float halfH = (h * 0.5f) / zoom;
-        float rx = halfW, ry = halfH;
-        if (cam.rotation != 0.f) {
-            const float c = std::abs(std::cos(cam.rotation));
-            const float s = std::abs(std::sin(cam.rotation));
-            rx = halfW * c + halfH * s;
-            ry = halfW * s + halfH * c;
-        }
-        const float viewMinX = tf.x - rx;
-        const float viewMinY = tf.y - ry;
-        const float viewMaxX = tf.x + rx;
-        const float viewMaxY = tf.y + ry;
+        // GPU-driven 路径必须与 CPU 路径使用同一份 resolved camera。
+        // 这里若继续自己手写 halfW/halfH/zoom 公式，就等于把第一阶段的核心
+        // 逻辑又复制了一份，后续非常容易漂移。
+        const ResolvedCameraView2D resolved = resolveCameraView(tf, cam, w, h);
+        const backend::CameraData backendCamera = toBackendCamera(resolved);
+        const ViewRect viewRect = computeCameraViewRect(resolved, cam.cullEnabled);
+        const float viewMinX = viewRect.minX;
+        const float viewMinY = viewRect.minY;
+        const float viewMaxX = viewRect.maxX;
+        const float viewMaxY = viewRect.maxY;
 
         struct GPUVisible {
             TextureHandle texture;
@@ -1188,7 +1272,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
 
         for (const CachedGPUTile& tile : tileGpuItems_) {
             if ((cam.layerMask & renderPassBit(RenderPass::World)) == 0) continue;
-            if (cam.cullEnabled) {
+            if (viewRect.enabled) {
                 if (tile.centerX + tile.halfW < viewMinX || tile.centerX - tile.halfW > viewMaxX ||
                     tile.centerY + tile.halfH < viewMinY || tile.centerY - tile.halfH > viewMaxY) {
                     continue;
@@ -1218,7 +1302,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             const uint32_t passBits = (slot->flags >> 1) & 0x7;
             if ((cam.layerMask & (1u << passBits)) == 0) continue;
 
-            if (cam.cullEnabled) {
+            if (viewRect.enabled) {
                 const float tx = slot->transform[3];
                 const float ty = slot->transform[7];
                 const float hw = fabsf(slot->transform[0]) * 0.5f;
@@ -1279,7 +1363,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         }
 
         backend::IRenderDevice::PassSubmitInfo info;
-        info.camera       = toBackendCamera(tf, cam, w, h);
+        info.camera       = backendCamera;
         info.clearEnabled = cam.clear;
         info.clearColor   = cam.clearColor;
 
@@ -1304,7 +1388,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         // are collected. The graph path needs GPU sprites, tile/text commands,
         // and particles as inputs to one WorldColor pass before lighting
         // composite. Non-lighting scenes still use the old direct submission.
-        const auto particles = collectParticleParams(tf, cam, w, h, (i == 0) ? lastDt_ : 0.f);
+        const auto particles = collectParticleParams(cam, backendCamera, (i == 0) ? lastDt_ : 0.f);
 
         // ========== Step 2: CPU 渲染 Text / Tile / UI (叠加在 Sprite 之上) ==========
         static std::vector<backend::RenderCmd> overlayCommands;
@@ -1316,7 +1400,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 if ((cam.layerMask & renderPassBit(d.pass)) == 0) continue;
                 
                 // 视口裁剪 (仅 World pass)
-                if (cam.cullEnabled && d.pass == RenderPass::World) {
+                if (viewRect.enabled && d.pass == RenderPass::World) {
                     if (d.kind == DrawKind::Tile) {
                         float ts = static_cast<float>(d.tile.tileSize);
                         float cx = d.tile.x + ts * 0.5f;
@@ -1355,8 +1439,8 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         bool usesWorldLightingGraph = false;
         if ((cam.layerMask & renderPassBit(RenderPass::World)) != 0) {
             auto lighting = buildLighting2DParams(ctx_, info.camera,
-                                                  static_cast<uint32_t>(w),
-                                                  static_cast<uint32_t>(h));
+                                                  static_cast<uint32_t>(resolved.viewportW),
+                                                  static_cast<uint32_t>(resolved.viewportH));
             if (dev.capabilities().supportsLighting2D && !lighting.lights.empty()) {
                 backend::IRenderDevice::FrameGraphCameraPass node;
                 node.kind = backend::IRenderDevice::FrameGraphPassKind::WorldLighting;

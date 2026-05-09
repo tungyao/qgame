@@ -488,6 +488,26 @@ enum class CameraType : int {
     Screen = 2   // 屏幕摄像机
 };
 
+// CameraProjectionMode 定义“窗口尺寸变化时，相机怎样解释自己的 viewport”。
+//
+// StretchWithWindow:
+//   旧行为。camera.zoom 直接按“当前窗口像素 / 世界单位”解释。
+//   窗口越高，可见世界越高；窗口越宽，可见世界越宽。
+//
+// FixedVertical:
+//   第一阶段推荐行为。camera.zoom 先按 referenceViewportHeight 对齐到一个
+//   “参考高度”，再按当前窗口高度等比换算成实际 zoom。
+//   结果是：纵向可见世界高度保持稳定，横向只会因为 aspect ratio 变化而扩宽/缩窄。
+//
+// 这正是多数 2D tilemap 游戏的主视角策略：
+//   - 地图格子大小固定
+//   - 世界单位固定
+//   - 全屏 / 任意分辨率下，主要变化的是左右视野宽度
+enum class CameraProjectionMode : int {
+    StretchWithWindow = 0,
+    FixedVertical     = 1
+};
+
 // 默认 layer mask：覆盖所有 RenderPass 位（World/UI/Screen + 未来扩展）
 inline constexpr uint32_t kCameraLayerMaskAll = 0xFFFFFFFFu;
 
@@ -508,9 +528,80 @@ struct Camera {
     core::Color clearColor  = core::Color::Black;
     bool        cullEnabled = true;                    // 关掉则该相机跳过视锥剔除（UI/Screen 适用）
 
+    // 投影策略：
+    //   - StretchWithWindow: 完全跟着当前窗口尺寸拉伸
+    //   - FixedVertical    : 保持固定纵向视野，横向按 aspect 扩展
+    //
+    // 默认选 FixedVertical，是为了让 1280x720、1920x1080、21:9 等输出都保持
+    // 同样的“竖向世界高度”，从而获得稳定的 tile/gameplay 手感。
+    CameraProjectionMode projectionMode = CameraProjectionMode::FixedVertical;
+
+    // referenceViewportHeight 只在 FixedVertical 下生效。
+    //
+    // 含义不是“世界单位高度”，而是“设计时参考的屏幕高度（像素）”。
+    // camera.zoom 仍旧表示“参考高度下，每个世界单位对应多少像素”。
+    //
+    // 举例：
+    //   referenceViewportHeight = 720
+    //   zoom = 2
+    //
+    // 则 1280x720 下：
+    //   effectiveZoom = 2
+    //   visibleWorldHeight = 720 / 2 = 360 world units
+    //
+    // 到 1920x1080 下：
+    //   effectiveZoom = 2 * (1080 / 720) = 3
+    //   visibleWorldHeight = 1080 / 3 = 360 world units
+    //
+    // 这样纵向保持 360 world units 不变，只是横向可见范围变宽。
+    float       referenceViewportHeight = 720.f;
+
     // —— 兼容字段（暂保留，未来移除）——————————————————————————
     RenderPass  renderPass  = RenderPass::World;
     CameraType  type        = CameraType::World;
+};
+
+// ResolvedCameraView2D 是“某个 Camera 在某个输出尺寸下真正用于渲染/裁剪的结果”。
+//
+// 它把两类信息拆清楚了：
+//   1. Authored data
+//      即组件上保存的 camera.x/y/rotation/zoom/projectionMode
+//   2. Runtime-resolved data
+//      即结合当前窗口尺寸后，真正送给渲染器的 effective zoom 和可见世界范围
+//
+// RenderSystem、UISystem、粒子、光照、GPU-driven 裁剪必须共享同一份解析规则，
+// 否则最容易出现的问题是：
+//   - CPU culling 和 GPU draw 的视野不一致
+//   - UI 世界锚点与实际渲染位置不一致
+//   - 粒子/光照仍按旧 viewport 计算，边界抖动
+struct ResolvedCameraView2D {
+    bool  valid = false;
+
+    // 相机中心与旋转，直接来自 Transform/Camera。
+    float x = 0.f;
+    float y = 0.f;
+    float rotation = 0.f;
+
+    // authoredZoom 是组件里配置的原始 zoom；
+    // zoom 是结合 projectionMode + 当前 viewport 后的实际 zoom。
+    float authoredZoom = 1.f;
+    float zoom = 1.f;
+
+    // 当前相机用于数学换算的 viewport 尺寸。
+    // 第一阶段里它等于窗口尺寸；后续若接入 letterbox / 子 viewport / offscreen，
+    // 这里就是那块真正参与世界投影的矩形尺寸。
+    int viewportW = 0;
+    int viewportH = 0;
+
+    CameraProjectionMode projectionMode = CameraProjectionMode::FixedVertical;
+    float referenceViewportHeight = 720.f;
+
+    // 解析后的世界可见范围（单位：world units）。
+    // visibleWorldW/H 与 zoom 的关系：
+    //   visibleWorldW = viewportW / zoom
+    //   visibleWorldH = viewportH / zoom
+    float visibleWorldW = 0.f;
+    float visibleWorldH = 0.f;
 };
 
 struct Sprite {

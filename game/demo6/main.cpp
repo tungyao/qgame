@@ -8,12 +8,15 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
 
 #include <engine/api/GameAPI.h>
 #include <engine/components/PhysicsComponents.h>
 #include <engine/components/RenderComponents.h>
 #include <engine/runtime/EngineConfig.h>
 #include <engine/runtime/EngineContext.h>
+#include <engine/systems/ISystem.h>
+#include <engine/systems/RenderSystem.h>
 
 #include <stb_image.h>
 #include <nlohmann/json.hpp>
@@ -176,6 +179,162 @@ static std::vector<uint8_t> makeCheckerboard(int w, int h, int cellSize, core::C
     return px;
 }
 
+// Demo6CameraFollowSystem 把 demo 层“玩家输入 -> 物理速度”和“物理结果 -> 相机跟随”
+// 拆成一个真正参与引擎帧调度的 System。
+//
+// 这么做的原因是：
+// 1. 之前 demo6 把控制逻辑写在 scheduler.tick() 之后。
+//    但 tick() 内部已经执行了：
+//      Input -> Physics -> UISystem -> RenderSystem -> Present
+//    所以玩家速度和相机位置都会晚一帧生效。
+//
+// 2. 对 RigidBody 来说，“晚一帧写 velocity”最容易引出固定时间步下的偶发停顿：
+//    某些帧 PhysicsSystem 已经消费完旧速度了，本帧 render 却还在看旧相机，
+//    观感上就像角色平移时会轻微卡一下。
+//
+// 3. 通过 System 接入后：
+//    - preUpdate() 在 PhysicsSystem 之前，负责写玩家 velocity
+//    - update(dt) 在 PhysicsSystem 之后、RenderSystem 之前，负责相机跟随
+//    这样同一帧的输入、物理和渲染就重新对齐了。
+class Demo6CameraFollowSystem final : public engine::ISystem {
+public:
+    Demo6CameraFollowSystem(engine::EngineContext& ctx,
+                            entt::entity player,
+                            entt::entity camera,
+                            float mapPixelW,
+                            float mapPixelH,
+                            int tileSize,
+                            int fallbackViewportW,
+                            int fallbackViewportH)
+        : ctx_(ctx)
+        , player_(player)
+        , camera_(camera)
+        , mapPixelW_(mapPixelW)
+        , mapPixelH_(mapPixelH)
+        , tileSize_(tileSize)
+        , fallbackViewportW_(fallbackViewportW)
+        , fallbackViewportH_(fallbackViewportH) {}
+
+    void preUpdate() override {
+        if (!ctx_.world.valid(player_) || !ctx_.world.all_of<engine::RigidBody>(player_)) {
+            return;
+        }
+
+        float dx = 0.f;
+        float dy = 0.f;
+        if (ctx_.inputState.isKeyDown(SDLK_W) || ctx_.inputState.isKeyDown(SDLK_UP)) dy -= 1.f;
+        if (ctx_.inputState.isKeyDown(SDLK_S) || ctx_.inputState.isKeyDown(SDLK_DOWN)) dy += 1.f;
+        if (ctx_.inputState.isKeyDown(SDLK_A) || ctx_.inputState.isKeyDown(SDLK_LEFT)) dx -= 1.f;
+        if (ctx_.inputState.isKeyDown(SDLK_D) || ctx_.inputState.isKeyDown(SDLK_RIGHT)) dx += 1.f;
+
+        // 归一化对角线输入，避免斜向速度比水平/垂直快 sqrt(2)。
+        const float lenSq = dx * dx + dy * dy;
+        if (lenSq > 1.0f) {
+            const float invLen = 1.0f / std::sqrt(lenSq);
+            dx *= invLen;
+            dy *= invLen;
+        }
+
+        auto& rb = ctx_.world.get<engine::RigidBody>(player_);
+        rb.velocityX = dx * kPlayerSpeed;
+        rb.velocityY = dy * kPlayerSpeed;
+    }
+
+    void update(float dt) override {
+        if (!ctx_.world.valid(player_) || !ctx_.world.valid(camera_)) {
+            return;
+        }
+        if (!ctx_.world.all_of<engine::Transform>(player_) ||
+            !ctx_.world.all_of<engine::Transform, engine::Camera>(camera_)) {
+            return;
+        }
+
+        auto& camTf = ctx_.world.get<engine::Transform>(camera_);
+        auto& cam = ctx_.world.get<engine::Camera>(camera_);
+        const auto& playerTf = ctx_.world.get<engine::Transform>(player_);
+
+        const int viewportW = ctx_.window ? ctx_.window->width() : fallbackViewportW_;
+        const int viewportH = ctx_.window ? ctx_.window->height() : fallbackViewportH_;
+        const float effectiveZoom = applyAutoCameraZoom(cam, viewportW, viewportH);
+
+        const float alpha = 1.0f - std::exp(-kCameraFollowRate * std::max(0.0f, dt));
+        camTf.x += (playerTf.x - camTf.x) * alpha;
+        camTf.y += (playerTf.y - camTf.y) * alpha;
+
+        clampCameraToMap(camTf, effectiveZoom, viewportW, viewportH);
+
+        // Transform 被 PhysicsSystem/RenderSystem 订阅；跟随镜头自己改位置后需要 patch，
+        // 这样 GPU 路径和任何依赖 on_update<Transform> 的逻辑都能拿到最新结果。
+        ctx_.world.patch<engine::Transform>(camera_);
+    }
+
+private:
+    float computeAutoEffectiveZoom(int viewportW, int viewportH) const {
+        const float paddedMapW = mapPixelW_ + tileSize_ * kZoomPaddingTiles * 2.0f;
+        const float paddedMapH = mapPixelH_ + tileSize_ * kZoomPaddingTiles * 2.0f;
+        if (viewportW <= 0 || viewportH <= 0 || paddedMapW <= 0.0f || paddedMapH <= 0.0f) {
+            return 1.0f;
+        }
+
+        const float fitZoomX = static_cast<float>(viewportW) / paddedMapW;
+        const float fitZoomY = static_cast<float>(viewportH) / paddedMapH;
+        return std::max(0.05f, std::min(fitZoomX, fitZoomY));
+    }
+
+    float applyAutoCameraZoom(engine::Camera& cam, int viewportW, int viewportH) const {
+        const float desiredEffectiveZoom = computeAutoEffectiveZoom(viewportW, viewportH);
+        const float referenceH =
+            (cam.referenceViewportHeight > 1.0f) ? cam.referenceViewportHeight : 1.0f;
+
+        if (cam.projectionMode == engine::CameraProjectionMode::FixedVertical) {
+            const float viewportScale = (viewportH > 0)
+                ? static_cast<float>(viewportH) / referenceH
+                : 1.0f;
+            cam.zoom = (viewportScale > 0.0f)
+                ? (desiredEffectiveZoom / viewportScale)
+                : desiredEffectiveZoom;
+        } else {
+            cam.zoom = desiredEffectiveZoom;
+        }
+        return desiredEffectiveZoom;
+    }
+
+    void clampCameraToMap(engine::Transform& camTf, float effectiveZoom,
+                          int viewportW, int viewportH) const {
+        if (effectiveZoom <= 0.0f || viewportW <= 0 || viewportH <= 0) return;
+
+        const float visibleWorldW = static_cast<float>(viewportW) / effectiveZoom;
+        const float visibleWorldH = static_cast<float>(viewportH) / effectiveZoom;
+        const float halfViewW = visibleWorldW * 0.5f;
+        const float halfViewH = visibleWorldH * 0.5f;
+
+        if (mapPixelW_ > visibleWorldW) {
+            camTf.x = std::clamp(camTf.x, halfViewW, mapPixelW_ - halfViewW);
+        } else {
+            camTf.x = mapPixelW_ * 0.5f;
+        }
+
+        if (mapPixelH_ > visibleWorldH) {
+            camTf.y = std::clamp(camTf.y, halfViewH, mapPixelH_ - halfViewH);
+        } else {
+            camTf.y = mapPixelH_ * 0.5f;
+        }
+    }
+
+    static constexpr float kPlayerSpeed = 200.0f;
+    static constexpr float kZoomPaddingTiles = 1.5f;
+    static constexpr float kCameraFollowRate = 7.5f;
+
+    engine::EngineContext& ctx_;
+    entt::entity player_ = entt::null;
+    entt::entity camera_ = entt::null;
+    float mapPixelW_ = 0.0f;
+    float mapPixelH_ = 0.0f;
+    int tileSize_ = 0;
+    int fallbackViewportW_ = 1280;
+    int fallbackViewportH_ = 720;
+};
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -193,6 +352,12 @@ int main(int argc, char** argv) {
     engine::EngineContext ctx;
     ctx.init(cfg);
     engine::GameAPI api{ctx};
+
+    // 默认 RenderSystem 已在 EngineContext::init() 末尾注册。
+    // demo6 需要在 Physics 之后、Render 之前插入一层“玩法控制 + 相机跟随”，
+    // 所以先把现有 RenderSystem 卸载，等 demo system 注册完再加回去。
+    auto* oldRenderSystem = &ctx.systems.get<engine::RenderSystem>();
+    ctx.systems.unregisterSystem(oldRenderSystem, true);
 
     // ── load JSON ────────────────────────────────────────────────────────────
     std::string jsonStr = readFile(pkgPath);
@@ -214,11 +379,15 @@ int main(int argc, char** argv) {
     int mapW     = tileMap.value("w", 20);
     int mapH     = tileMap.value("h", 15);
     int tileSize = tileMap.value("ts", 32);
+    const float mapPixelW = static_cast<float>(mapW * tileSize);
+    const float mapPixelH = static_cast<float>(mapH * tileSize);
 
     // ── camera ───────────────────────────────────────────────────────────────
     auto camEnt = api.spawnEntity();
+    // 相机先放一个临时位置。真正的跟随逻辑会在 player 创建后，把它平滑拉向玩家。
     api.addComponent(camEnt, engine::Transform{640.f, 360.f});
     engine::Camera wcam{};
+    // zoom 不再写死；主循环里会按窗口尺寸和地图尺寸自动解算。
     wcam.zoom       = 1.f;
     wcam.primary    = true;
     wcam.depth      = 0;
@@ -358,26 +527,27 @@ int main(int argc, char** argv) {
     api.addComponent(player, collider);
     api.addComponent(player, engine::RigidBody{0.f, 0.f, 0.f, false});
 
+    // 让相机一开始就对准玩家，避免首帧先从窗口中心“飞”过去。
+    {
+        auto& camTf = api.getComponent<engine::Transform>(camEnt);
+        const auto& playerTf = api.getComponent<engine::Transform>(player);
+        camTf.x = playerTf.x;
+        camTf.y = playerTf.y;
+    }
 
-    std::fprintf(stdout, "\nControls: WASD/arrows=pan  Q/E=zoom  ESC=quit\n");
+    auto& followSystem = ctx.systems.registerSystem<Demo6CameraFollowSystem>(
+        ctx, player, camEnt, mapPixelW, mapPixelH, tileSize, cfg.windowWidth, cfg.windowHeight);
+    followSystem.init();
+
+    auto& renderSystem = ctx.systems.registerSystem<engine::RenderSystem>(ctx);
+    renderSystem.init();
+
+    std::fprintf(stdout, "\nControls: WASD/arrows=move player  ESC=quit\n");
 
     // ── main loop ────────────────────────────────────────────────────────────
     float t = 0.f;
-    constexpr float kSpeed = 200.f;
     while (ctx.scheduler.tick()) {
-        const float dt = ctx.scheduler.deltaTime();
-        t += dt;
-
-        float dx = 0.f, dy = 0.f;
-        if (api.isKeyDown(SDLK_W)) dy -= 1.f;
-        if (api.isKeyDown(SDLK_S)) dy += 1.f;
-        if (api.isKeyDown(SDLK_A)) dx -= 1.f;
-        if (api.isKeyDown(SDLK_D)) dx += 1.f;
-        const bool isMoving = (dx != 0.f || dy != 0.f);
-
-        auto& rb = api.getComponent<engine::RigidBody>(player);
-        rb.velocityX = isMoving ? dx * kSpeed : 0.f;
-        rb.velocityY = isMoving ? dy * kSpeed : 0.f;
+        t += ctx.scheduler.deltaTime();
 
         if (api.isKeyJustPressed(SDLK_ESCAPE)) {
             api.quit();

@@ -23,6 +23,30 @@ public:
     void update(float dt) override;
     void shutdown()       override;
 
+    // 把 Camera 组件在给定 viewport 下解析成真正参与渲染/裁剪的视图参数。
+    //
+    // 这是第一阶段的核心入口：
+    //   - CPU culling
+    //   - GPU-driven 可见区
+    //   - 粒子 camera
+    //   - 光照 viewport
+    //   - UI 世界锚点
+    //
+    // 都必须复用这份结果，避免“同一台相机，不同系统各算各的”。
+    static ResolvedCameraView2D resolveCameraView(const Transform& tf, const Camera& cam,
+                                                  int viewportW, int viewportH);
+
+    // 选出“当前帧用于渲染 World pass 的主相机”，并返回它在窗口尺寸下的解析结果。
+    //
+    // 选择规则与 RenderSystem 构建 camera pass 的规则保持一致：
+    //   1. 只看 primary=true 的相机
+    //   2. 只看 layerMask 覆盖 World 的相机
+    //   3. 按 depth 从小到大取第一台
+    //
+    // UISystem 的 UIWorldAnchor 需要这份结果，把世界坐标投到屏幕像素时才能与
+    // 本帧真正绘制出来的世界视图保持一致。
+    static ResolvedCameraView2D resolveActiveWorldCamera(const EngineContext& ctx);
+
     static void buildSceneCommands(EngineContext& ctx, backend::CommandBuffer& cb,
                                    int viewportW, int viewportH,
                                    float tileAnimationTimeSeconds = 0.0f);
@@ -47,10 +71,12 @@ private:
     void onTransformUpdate(entt::registry& reg, entt::entity e);
     void syncParticleEmitters(float dt);
     std::vector<backend::IRenderDevice::GPUParticleParams>
-    collectParticleParams(const Transform& tf, const Camera& cam,
-                          int viewportW, int viewportH, float dt);
-    void submitParticlePass(const Transform& tf, const Camera& cam,
-                            int viewportW, int viewportH, float dt);
+    collectParticleParams(const Camera& cam,
+                          const backend::CameraData& camera,
+                          float dt);
+    void submitParticlePass(const Camera& cam,
+                            const backend::CameraData& camera,
+                            float dt);
 
     EngineContext& ctx_;
     SpriteBuffer spriteBuffer_;

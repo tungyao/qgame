@@ -1,4 +1,5 @@
 #include "UISystem.h"
+#include "RenderSystem.h"
 
 #include "../runtime/EngineContext.h"
 #include "../input/InputState.h"
@@ -84,15 +85,23 @@ void UISystem::updateCanvases() {
 // ───────────────────────────────────────────────────────────────────────────────
 
 void UISystem::getWorldCamera(float& camX, float& camY, float& zoom) const {
-    camX = 0.f; camY = 0.f; zoom = 1.f;
-    auto view = ctx_.world.view<Transform, Camera>();
-    for (auto [e, tf, cam] : view.each()) {
-        if (!cam.primary) continue;
-        if ((cam.layerMask & renderPassBit(RenderPass::World)) == 0) continue;
-        camX = tf.x; camY = tf.y;
-        zoom = (cam.zoom > 0.f) ? cam.zoom : 1.f;
-        return;
-    }
+    camX = 0.f;
+    camY = 0.f;
+    zoom = 1.f;
+
+    // UIWorldAnchor 必须和 RenderSystem 使用同一套相机解析规则。
+    //
+    // 以前这里直接读 Camera::zoom，窗口一变大，UI 锚点与真实世界绘制结果就会
+    // 分叉：RenderSystem 若改成 FixedVertical，而 UISystem 还按旧 zoom 投影，
+    // 血条/名字牌会“漂”。
+    //
+    // 因此这里不再自己推导 world->screen，而是复用 RenderSystem 的公共解析入口。
+    const ResolvedCameraView2D view = RenderSystem::resolveActiveWorldCamera(ctx_);
+    if (!view.valid) return;
+
+    camX = view.x;
+    camY = view.y;
+    zoom = view.zoom;
 }
 
 void UISystem::screenToCamera(float sx, float sy, float& cx, float& cy) const {

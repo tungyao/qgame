@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bit>
 #include <cstdint>
 
 namespace engine {
@@ -56,10 +57,10 @@ static_assert(sizeof(GPUEmitter) == 128, "GPUEmitter must be 128 bytes");
 static_assert(sizeof(GPUEmitter) % 16 == 0, "GPUEmitter must be 16-byte aligned");
 
 // ── 辅助读写器 — 避免到处 reinterpret_cast ────────────────────────────────────
-inline uint32_t as_uint(float v) { uint32_t u; __builtin_memcpy(&u, &v, 4); return u; }
-inline int32_t  as_int(float v)  { int32_t i;  __builtin_memcpy(&i, &v, 4); return i;  }
-inline float    as_float(uint32_t u) { float f; __builtin_memcpy(&f, &u, 4); return f; }
-inline float    as_float(int32_t i)  { float f; __builtin_memcpy(&f, &i, 4); return f;  }
+inline uint32_t as_uint(float v) { return std::bit_cast<uint32_t>(v); }
+inline int32_t  as_int(float v)  { return std::bit_cast<int32_t>(v); }
+inline float    as_float(uint32_t u) { return std::bit_cast<float>(u); }
+inline float    as_float(int32_t i)  { return std::bit_cast<float>(i); }
 
 inline float    em_posX(const GPUEmitter& e)       { return e.pos_rot[0]; }
 inline float    em_posY(const GPUEmitter& e)       { return e.pos_rot[1]; }

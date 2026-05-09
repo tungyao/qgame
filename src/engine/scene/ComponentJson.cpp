@@ -316,7 +316,9 @@ static Json cameraToJson(const Camera& c) {
             {"layerMask", c.layerMask}, {"clear", c.clear},
             {"clearR", (int)c.clearColor.r}, {"clearG", (int)c.clearColor.g},
             {"clearB", (int)c.clearColor.b}, {"clearA", (int)c.clearColor.a},
-            {"cullEnabled", c.cullEnabled}};
+            {"cullEnabled", c.cullEnabled},
+            {"projectionMode", static_cast<int>(c.projectionMode)},
+            {"referenceViewportHeight", c.referenceViewportHeight}};
 }
 
 static Camera cameraFromJson(const Json& j) {
@@ -332,6 +334,9 @@ static Camera cameraFromJson(const Json& j) {
                                 (uint8_t)j.value("clearB", 0),
                                 (uint8_t)j.value("clearA", 255)};
     c.cullEnabled = j.value("cullEnabled", true);
+    c.projectionMode = static_cast<CameraProjectionMode>(
+        j.value("projectionMode", static_cast<int>(CameraProjectionMode::FixedVertical)));
+    c.referenceViewportHeight = j.value("referenceViewportHeight", 720.f);
     return c;
 }
 
