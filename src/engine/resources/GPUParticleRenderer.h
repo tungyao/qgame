@@ -14,7 +14,8 @@ class GPUParticleRenderer {
 public:
     static constexpr uint32_t MAX_PARTICLES = 65536;
     static constexpr uint32_t UPDATE_WORKGROUP_SIZE = 64;
-    static constexpr uint32_t SORT_WORKGROUP_SIZE = 128;
+    static constexpr uint32_t SORT_WORKGROUP_SIZE = 128;        // odd-even fallback
+    static constexpr uint32_t BITONIC_SORT_WORKGROUP_SIZE = 256; // single-pass bitonic
 
     void init(backend::IRenderDevice* device);
     void shutdown();
@@ -22,6 +23,7 @@ public:
     bool isInitialized() const { return initialized_; }
     bool hasUpdatePipeline() const { return updatePipeline_.valid(); }
     bool hasSortPipeline() const { return sortPipeline_.valid(); }
+    bool hasBitonicSortPipeline() const { return bitonicSortPipeline_.valid(); }
 
     void ensureEmitter(ParticleComponent& pc);
     void emit(ParticleComponent& pc, const Transform& tf, float dt,
@@ -32,6 +34,7 @@ public:
     BufferHandle indirectArgsBuffer() const { return indirectArgsBuffer_; }
     ComputePipelineHandle updatePipeline() const { return updatePipeline_; }
     ComputePipelineHandle sortPipeline() const { return sortPipeline_; }
+    ComputePipelineHandle bitonicSortPipeline() const { return bitonicSortPipeline_; }
 
 private:
     uint32_t allocateRange(uint32_t count);
@@ -47,6 +50,7 @@ private:
     BufferHandle indirectArgsBuffer_;
     ComputePipelineHandle updatePipeline_;
     ComputePipelineHandle sortPipeline_;
+    ComputePipelineHandle bitonicSortPipeline_;
 
     // 简单线性 allocator：第一版假设 emitter 数量稳定。组件销毁时不回收，
     // 避免为 MVP 引入额外 free-list 状态。

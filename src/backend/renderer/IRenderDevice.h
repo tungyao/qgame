@@ -232,7 +232,8 @@ public:
 
     struct GPUParticleParams {
         ComputePipelineHandle updatePipeline;
-        ComputePipelineHandle sortPipeline;
+        ComputePipelineHandle sortPipeline;          // odd-even fallback (>256)
+        ComputePipelineHandle bitonicSortPipeline;   // single-pass bitonic (≤256)
         BufferHandle particleBuffer;
         BufferHandle aliveIndexBuffer;
         BufferHandle indirectArgsBuffer;
@@ -243,6 +244,7 @@ public:
         CameraData camera;
         bool clearEnabled = false;
         core::Color clearColor = core::Color::Black;
+        bool sortEnabled = true;  // skip sort when emitter has ySort==false
     };
 
     virtual void submitGPUParticlePass(const PassSubmitInfo& info, const GPUParticleParams& params) = 0;

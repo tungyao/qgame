@@ -378,6 +378,7 @@ RenderSystem::collectParticleParams(const Transform& tf, const Camera& cam,
         backend::IRenderDevice::GPUParticleParams params;
         params.updatePipeline = particleRenderer_.updatePipeline();
         params.sortPipeline = particleRenderer_.sortPipeline();
+        params.bitonicSortPipeline = particleRenderer_.bitonicSortPipeline();
         params.particleBuffer = particleRenderer_.particleBuffer();
         params.aliveIndexBuffer = particleRenderer_.aliveIndexBuffer();
         params.indirectArgsBuffer = particleRenderer_.indirectArgsBuffer();
@@ -388,6 +389,7 @@ RenderSystem::collectParticleParams(const Transform& tf, const Camera& cam,
         params.camera = camera;
         params.clearEnabled = false;
         params.clearColor = cam.clearColor;
+        params.sortEnabled = pc.ySort;
         out.push_back(params);
     }
     return out;

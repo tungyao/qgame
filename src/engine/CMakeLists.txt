@@ -44,9 +44,14 @@ set(ENGINE_SHADER_DEPS
     "${CMAKE_BINARY_DIR}/generated/shaders/sprite_culling_spv.h"
     "${CMAKE_BINARY_DIR}/generated/shaders/particle_update_spv.h"
     "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_spv.h"
+    "${CMAKE_BINARY_DIR}/generated/shaders/particle_sort_bitonic_spv.h"
 )
 set_source_files_properties(
     resources/GPUDrivenRenderer.cpp PROPERTIES
+    OBJECT_DEPENDS "${ENGINE_SHADER_DEPS}"
+)
+set_source_files_properties(
+    resources/GPUParticleRenderer.cpp PROPERTIES
     OBJECT_DEPENDS "${ENGINE_SHADER_DEPS}"
 )
 

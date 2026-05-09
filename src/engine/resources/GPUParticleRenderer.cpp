@@ -4,6 +4,7 @@
 #include "../../core/Logger.h"
 #include "particle_update_spv.h"
 #include "particle_sort_spv.h"
+#include "particle_sort_bitonic_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -52,6 +53,21 @@ void GPUParticleRenderer::init(backend::IRenderDevice* device) {
     sortDesc.numUniformBuffers = 1;
     sortPipeline_ = device_->createComputePipeline(sortDesc);
 
+    // Bitonic sort pipeline: single-pass sort for maxParticleCount ≤ 256.
+    // Uses 256 threads × 1 workgroup with groupshared memory and
+    // GroupMemoryBarrierWithGroupSync barriers between merge stages.
+    backend::ComputePipelineDesc bitonicDesc{};
+    bitonicDesc.spirvCode = particle_sort_bitonic_spv;
+    bitonicDesc.spirvSize = particle_sort_bitonic_spv_size;
+    bitonicDesc.entryPoint = "main";
+    bitonicDesc.threadCountX = BITONIC_SORT_WORKGROUP_SIZE;
+    bitonicDesc.threadCountY = 1;
+    bitonicDesc.threadCountZ = 1;
+    bitonicDesc.numReadonlyStorageBuffers = 2;
+    bitonicDesc.numReadwriteStorageBuffers = 1;
+    bitonicDesc.numUniformBuffers = 1;
+    bitonicSortPipeline_ = device_->createComputePipeline(bitonicDesc);
+
     initialized_ = particleBuffer_.valid() &&
                    aliveIndexBuffer_.valid() &&
                    indirectArgsBuffer_.valid() &&
@@ -73,6 +89,9 @@ void GPUParticleRenderer::shutdown() {
     if (sortPipeline_.valid()) {
         device_->destroyComputePipeline(sortPipeline_);
     }
+    if (bitonicSortPipeline_.valid()) {
+        device_->destroyComputePipeline(bitonicSortPipeline_);
+    }
     if (particleBuffer_.valid()) {
         device_->destroyBuffer(particleBuffer_);
     }
@@ -85,6 +104,7 @@ void GPUParticleRenderer::shutdown() {
 
     updatePipeline_ = {};
     sortPipeline_ = {};
+    bitonicSortPipeline_ = {};
     particleBuffer_ = {};
     aliveIndexBuffer_ = {};
     indirectArgsBuffer_ = {};
@@ -121,17 +141,34 @@ void GPUParticleRenderer::emit(ParticleComponent& pc, const Transform& tf,
     if (spawnCount == 0) return;
     pc.accumulator -= static_cast<float>(spawnCount);
 
-    // 一次最多写满 emitter 自己的 range；再多的发射会自然覆盖较旧粒子。
     const uint32_t cappedSpawn = std::min(spawnCount, pc.gpuCount);
-    std::vector<GPUParticle> spawned;
-    spawned.reserve(cappedSpawn);
-
+    std::vector<GPUParticle> spawned(cappedSpawn);
     for (uint32_t i = 0; i < cappedSpawn; ++i) {
-        spawned.push_back(makeParticle(pc, tf, device));
-        const uint32_t local = pc.seed++ % pc.gpuCount;
-        const size_t offset = (pc.gpuOffset + local) * sizeof(GPUParticle);
-        device_->uploadToBuffer(particleBuffer_, &spawned.back(), sizeof(GPUParticle), offset);
+        spawned[i] = makeParticle(pc, tf, device);
     }
+
+    // Batch upload all spawned particles in at most two contiguous transfers.
+    // The emitter operates as a ring buffer: new particles are written
+    // sequentially starting at a write cursor; when the cursor reaches the
+    // end of the range it wraps. This avoids the per-particle
+    // SDL_AcquireGPUCommandBuffer / SDL_SubmitGPUCommandBuffer overhead that
+    // scattered round-robin writes would incur.
+    const size_t base = static_cast<size_t>(pc.gpuOffset) * sizeof(GPUParticle);
+    const size_t rangeBytes = static_cast<size_t>(pc.gpuCount) * sizeof(GPUParticle);
+    const size_t chunkBytes = static_cast<size_t>(cappedSpawn) * sizeof(GPUParticle);
+    const size_t writeStart = base + (static_cast<size_t>(pc.seed) * sizeof(GPUParticle)) % rangeBytes;
+    const size_t chunk1 = std::min(rangeBytes - (writeStart - base), chunkBytes);
+
+    device_->uploadToBuffer(particleBuffer_, spawned.data(), chunk1, writeStart);
+
+    if (chunk1 < chunkBytes) {
+        const size_t remaining = chunkBytes - chunk1;
+        device_->uploadToBuffer(particleBuffer_,
+                                spawned.data() + chunk1 / sizeof(GPUParticle),
+                                remaining, base);
+    }
+
+    pc.seed += cappedSpawn;
 }
 
 uint32_t GPUParticleRenderer::allocateRange(uint32_t count) {
