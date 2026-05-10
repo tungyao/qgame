@@ -2,6 +2,15 @@
 # 参数：SPV_FILE  OUTPUT  SYMBOL
 cmake_minimum_required(VERSION 3.20)
 
+string(REPLACE "\"" "" SPV_FILE "${SPV_FILE}")
+string(REPLACE "\"" "" OUTPUT "${OUTPUT}")
+string(REPLACE "\"" "" SYMBOL "${SYMBOL}")
+
+
+message(STATUS "[Embed] SPV_FILE: ${SPV_FILE}")
+message(STATUS "[Embed] OUTPUT: ${OUTPUT}")
+message(STATUS "[Embed] SYMBOL: ${SYMBOL}")
+
 file(READ "${SPV_FILE}" raw_content HEX)
 
 # 每两个 hex 字符插入 "0x" 前缀和 "," 后缀

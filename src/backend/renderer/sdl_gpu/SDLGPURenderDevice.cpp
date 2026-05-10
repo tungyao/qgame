@@ -66,17 +66,6 @@
 #include "lighting2d_cull_spv.h"      // L3 screen-tile light-list builder
 #include "lighting2d_blur_spv.h"      // L4 separable blur for soft lighting
 #include "lighting2d_composite_frag_spv.h" // WorldColor * Lighting composite
-#ifdef QGAME_HAS_DXIL_SHADERS
-#include "sprite_vert_dxil.h"         // DXIL 版本的着色器 (Windows D3D12 后端)
-#include "sprite_frag_dxil.h"
-#include "msdf_frag_dxil.h"
-#include "particle_gpu_vert_dxil.h"
-#include "particle_gpu_frag_dxil.h"
-#include "lighting2d_dxil.h"
-#include "lighting2d_cull_dxil.h"
-#include "lighting2d_blur_dxil.h"
-#include "lighting2d_composite_frag_dxil.h"
-#endif
 
 namespace backend {
 
@@ -119,10 +108,6 @@ SDLGPURenderDevice::~SDLGPURenderDevice() {
 void SDLGPURenderDevice::init() {
     // 1. 创建 GPU 设备 — 请求 Vulkan 后端，支持 SPIRV (+ DXIL)
     SDL_GPUShaderFormat formats = SDL_GPU_SHADERFORMAT_SPIRV;
-#ifdef QGAME_HAS_DXIL_SHADERS
-    formats |= SDL_GPU_SHADERFORMAT_DXIL;
-#endif
-
     // 第三个参数 "vulkan" 是 hint: 优先 Vulkan，不可用时自动 fallback
     device_ = SDL_CreateGPUDevice(formats,debug_ , "vulkan");
     if (!device_) {
@@ -145,10 +130,6 @@ void SDLGPURenderDevice::init() {
 
     if (supported & SDL_GPU_SHADERFORMAT_SPIRV) {
         shaderFormat_ = SDL_GPU_SHADERFORMAT_SPIRV;
-#ifdef QGAME_HAS_DXIL_SHADERS
-    } else if (supported & SDL_GPU_SHADERFORMAT_DXIL) {
-        shaderFormat_ = SDL_GPU_SHADERFORMAT_DXIL;
-#endif
     } else {
         core::logError("GPU backend '%s' requires unavailable shader formats", backend);
         SDL_ReleaseWindowFromGPUDevice(device_, window_);
@@ -1600,14 +1581,13 @@ void SDLGPURenderDevice::createPipeline() {
     ASSERT_MSG(msdfOffscreenPipeline_, "Failed to create MSDF offscreen pipeline");
 
     // GPU-driven 通路目前只在 SPIRV 后端有预编译 shader（DXIL 暂未提供）
-    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-        gpuDrivenPipeline_ = createGPUDrivenPipelineForFormat(swapchainFormat);
-        gpuDrivenOffscreenPipeline_ = createGPUDrivenPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
-        if (!gpuDrivenPipeline_) {
-            core::logError("createPipeline: failed to create GPU-driven pipeline");
-        } else {
-            createGPUDrivenIndexBuffer();
-        }
+    gpuDrivenPipeline_ = createGPUDrivenPipelineForFormat(swapchainFormat);
+    gpuDrivenOffscreenPipeline_ = createGPUDrivenPipelineForFormat(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+    if (!gpuDrivenPipeline_) {
+        core::logError("createPipeline: failed to create GPU-driven pipeline");
+    }
+    else {
+        createGPUDrivenIndexBuffer();
     }
 
     // 粒子渲染同样使用 HLSL 自动生成的 SPIRV/DXIL 产物。compute shader
@@ -1623,27 +1603,25 @@ void SDLGPURenderDevice::createPipeline() {
     // ── WBOIT particle pipeline (dual MRT: accum + reveal) ──
     {
         SDL_GPUShaderCreateInfo vsInfo{};
-        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-            vsInfo.code      = particle_wboit_vert_spv;
-            vsInfo.code_size = particle_wboit_vert_spv_size;
-        }
+        vsInfo.code      = particle_wboit_vert_spv;
+        vsInfo.code_size = particle_wboit_vert_spv_size;
         vsInfo.entrypoint = "main";
         vsInfo.format    = shaderFormat_;
         vsInfo.stage     = SDL_GPU_SHADERSTAGE_VERTEX;
         vsInfo.num_storage_buffers  = 2;
         vsInfo.num_uniform_buffers  = 1;
         SDL_GPUShader* vs = SDL_CreateGPUShader(device_, &vsInfo);
+        if (!vs) SDL_Log("WBOIT VS failed: %s", SDL_GetError());
 
         SDL_GPUShaderCreateInfo fsInfo{};
-        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-            fsInfo.code      = particle_wboit_frag_spv;
-            fsInfo.code_size = particle_wboit_frag_spv_size;
-        }
+        fsInfo.code      = particle_wboit_frag_spv;
+        fsInfo.code_size = particle_wboit_frag_spv_size;
         fsInfo.entrypoint = "main";
         fsInfo.format    = shaderFormat_;
         fsInfo.stage     = SDL_GPU_SHADERSTAGE_FRAGMENT;
         fsInfo.num_samplers = 1;
         SDL_GPUShader* fs = SDL_CreateGPUShader(device_, &fsInfo);
+        if (!fs) SDL_Log("WBOIT FS failed: %s", SDL_GetError());
 
         if (vs && fs) {
             // Two color targets with WBOIT blend states:
@@ -1691,26 +1669,25 @@ void SDLGPURenderDevice::createPipeline() {
     // ── WBOIT → scene composite fullscreen pass ──
     {
         SDL_GPUShaderCreateInfo vsInfo{};
-        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-            vsInfo.code      = wboit_composite_vert_spv;
-            vsInfo.code_size = wboit_composite_vert_spv_size;
-        }
+        vsInfo.code = wboit_composite_vert_spv;
+        vsInfo.code_size = wboit_composite_vert_spv_size;
         vsInfo.entrypoint = "main";
         vsInfo.format    = shaderFormat_;
         vsInfo.stage     = SDL_GPU_SHADERSTAGE_VERTEX;
         SDL_GPUShader* vs = SDL_CreateGPUShader(device_, &vsInfo);
 
         SDL_GPUShaderCreateInfo fsInfo{};
-        if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-            fsInfo.code      = wboit_composite_frag_spv;
-            fsInfo.code_size = wboit_composite_frag_spv_size;
-        }
+        fsInfo.code = wboit_composite_frag_spv;
+        fsInfo.code_size = wboit_composite_frag_spv_size;
         fsInfo.entrypoint = "main";
         fsInfo.format    = shaderFormat_;
         fsInfo.stage     = SDL_GPU_SHADERSTAGE_FRAGMENT;
         fsInfo.num_samplers = 2;
         fsInfo.num_uniform_buffers = 1;
         SDL_GPUShader* fs = SDL_CreateGPUShader(device_, &fsInfo);
+
+
+
 
         if (vs && fs) {
             SDL_GPUColorTargetDescription ct{};
@@ -1796,10 +1773,6 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         ComputePipelineDesc desc{};
         desc.spirvCode = lighting2d_spv;
         desc.spirvSize = lighting2d_spv_size;
-#ifdef QGAME_HAS_DXIL_SHADERS
-        desc.dxilCode = lighting2d_dxil;
-        desc.dxilSize = lighting2d_dxil_size;
-#endif
         desc.entryPoint = "main";
         desc.threadCountX = 8;
         desc.threadCountY = 8;
@@ -1822,10 +1795,6 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         ComputePipelineDesc desc{};
         desc.spirvCode = lighting2d_cull_spv;
         desc.spirvSize = lighting2d_cull_spv_size;
-#ifdef QGAME_HAS_DXIL_SHADERS
-        desc.dxilCode = lighting2d_cull_dxil;
-        desc.dxilSize = lighting2d_cull_dxil_size;
-#endif
         desc.entryPoint = "main";
         desc.threadCountX = 64;
         desc.threadCountY = 1;
@@ -1846,10 +1815,6 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
         ComputePipelineDesc desc{};
         desc.spirvCode = lighting2d_blur_spv;
         desc.spirvSize = lighting2d_blur_spv_size;
-#ifdef QGAME_HAS_DXIL_SHADERS
-        desc.dxilCode = lighting2d_blur_dxil;
-        desc.dxilSize = lighting2d_blur_dxil_size;
-#endif
         desc.entryPoint = "main";
         desc.threadCountX = 8;
         desc.threadCountY = 8;
@@ -1968,15 +1933,10 @@ bool SDLGPURenderDevice::ensureLighting2DResources(uint32_t viewportW, uint32_t 
 SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUTextureFormat format) {
     SDL_GPUShader* vs = nullptr;
     SDL_GPUShader* fs = nullptr;
-    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-        vs = loadShader(sprite_vert_spv, sprite_vert_spv_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
-        fs = loadShader(sprite_frag_spv, sprite_frag_spv_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_SPIRV);
-#ifdef QGAME_HAS_DXIL_SHADERS
-    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
-        vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
-        fs = loadShader(sprite_frag_dxil, sprite_frag_dxil_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_DXIL);
-#endif
-    }
+
+    vs = loadShader(sprite_vert_spv, sprite_vert_spv_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+    fs = loadShader(sprite_frag_spv, sprite_frag_spv_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+
     if (!vs || !fs) {
         if (vs) SDL_ReleaseGPUShader(device_, vs);
         if (fs) SDL_ReleaseGPUShader(device_, fs);
@@ -2032,15 +1992,10 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createPipelineForFormat(SDL_GPUText
 SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createMSDFPipelineForFormat(SDL_GPUTextureFormat format) {
     SDL_GPUShader* vs = nullptr;
     SDL_GPUShader* fs = nullptr;
-    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-        vs = loadShader(sprite_vert_spv, sprite_vert_spv_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
-        fs = loadShader(msdf_frag_spv, msdf_frag_spv_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1, SDL_GPU_SHADERFORMAT_SPIRV);
-#ifdef QGAME_HAS_DXIL_SHADERS
-    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
-        vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
-        fs = loadShader(msdf_frag_dxil, msdf_frag_dxil_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1, SDL_GPU_SHADERFORMAT_DXIL);
-#endif
-    }
+
+    vs = loadShader(sprite_vert_spv, sprite_vert_spv_size, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+    fs = loadShader(msdf_frag_spv, msdf_frag_spv_size, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1, SDL_GPU_SHADERFORMAT_SPIRV);
+
     if (!vs || !fs) {
         if (vs) SDL_ReleaseGPUShader(device_, vs);
         if (fs) SDL_ReleaseGPUShader(device_, fs);
@@ -2226,15 +2181,9 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createParticlePipelineForFormat(SDL
     // 粒子顶点没有传统 vertex buffer；每个 instance 直接从 storage buffer
     // 读取 GPUParticle，然后在 shader 中展开成 4 个 quad 顶点。
     SDL_GPUShaderCreateInfo vsInfo{};
-    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-        vsInfo.code      = particle_gpu_vert_spv;
-        vsInfo.code_size = particle_gpu_vert_spv_size;
-#ifdef QGAME_HAS_DXIL_SHADERS
-    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
-        vsInfo.code      = particle_gpu_vert_dxil;
-        vsInfo.code_size = particle_gpu_vert_dxil_size;
-#endif
-    }
+
+    vsInfo.code      = particle_gpu_vert_spv;
+    vsInfo.code_size = particle_gpu_vert_spv_size;
     vsInfo.entrypoint = "main";
     vsInfo.format    = shaderFormat_;
     vsInfo.stage     = SDL_GPU_SHADERSTAGE_VERTEX;
@@ -2245,15 +2194,9 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createParticlePipelineForFormat(SDL
     SDL_GPUShader* vs = SDL_CreateGPUShader(device_, &vsInfo);
 
     SDL_GPUShaderCreateInfo fsInfo{};
-    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-        fsInfo.code      = particle_gpu_frag_spv;
-        fsInfo.code_size = particle_gpu_frag_spv_size;
-#ifdef QGAME_HAS_DXIL_SHADERS
-    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
-        fsInfo.code      = particle_gpu_frag_dxil;
-        fsInfo.code_size = particle_gpu_frag_dxil_size;
-#endif
-    }
+    fsInfo.code      = particle_gpu_frag_spv;
+    fsInfo.code_size = particle_gpu_frag_spv_size;
+
     fsInfo.entrypoint = "main";
     fsInfo.format    = shaderFormat_;
     fsInfo.stage     = SDL_GPU_SHADERSTAGE_FRAGMENT;
@@ -2303,19 +2246,11 @@ SDL_GPUGraphicsPipeline* SDLGPURenderDevice::createLightingCompositePipelineForF
     // and produces final scene color, replacing the old swapchain overlay.
     SDL_GPUShader* vs = nullptr;
     SDL_GPUShader* fs = nullptr;
-    if (shaderFormat_ == SDL_GPU_SHADERFORMAT_SPIRV) {
-        vs = loadShader(sprite_vert_spv, sprite_vert_spv_size,
+    vs = loadShader(sprite_vert_spv, sprite_vert_spv_size,
                         SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_SPIRV);
-        fs = loadShader(lighting2d_composite_frag_spv, lighting2d_composite_frag_spv_size,
+    fs = loadShader(lighting2d_composite_frag_spv, lighting2d_composite_frag_spv_size,
                         SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_SPIRV);
-#ifdef QGAME_HAS_DXIL_SHADERS
-    } else if (shaderFormat_ == SDL_GPU_SHADERFORMAT_DXIL) {
-        vs = loadShader(sprite_vert_dxil, sprite_vert_dxil_size,
-                        SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, SDL_GPU_SHADERFORMAT_DXIL);
-        fs = loadShader(lighting2d_composite_frag_dxil, lighting2d_composite_frag_dxil_size,
-                        SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1, SDL_GPU_SHADERFORMAT_DXIL);
-#endif
-    }
+
     if (!vs || !fs) {
         if (vs) SDL_ReleaseGPUShader(device_, vs);
         if (fs) SDL_ReleaseGPUShader(device_, fs);

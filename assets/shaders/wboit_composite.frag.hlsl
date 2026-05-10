@@ -19,13 +19,14 @@
 
 Texture2D    accumTex   : register(t0, space2);
 SamplerState accumSamp  : register(s0, space2);
+
 Texture2D    revealTex  : register(t1, space2);
 SamplerState revealSamp : register(s1, space2);
 
-cbuffer CompositeParams : register(b0, space1)
+cbuffer CompositeParams : register(b0, space3)
 {
-    float4 backgroundColor;   // scene clear / fog colour
-    float  intensity;         // overall WBOIT intensity multiplier
+    float4 backgroundColor;
+    float  intensity;
     float  _pad0;
     float  _pad1;
     float  _pad2;

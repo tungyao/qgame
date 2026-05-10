@@ -22,6 +22,7 @@
 #include "../systems/AnimatorSystem.h"
 #include "../systems/TweenSystem.h"
 #include "../systems/UISystem.h"
+#include "../systems/DebugOverlaySystem.h"
 #include "../input/SDLInputProvider.h"
 #include "../../backend/audio/sdl_mixer/SDLMixerAudioDevice.h"
 
@@ -101,6 +102,7 @@ void EngineContext::init(const EngineConfig& cfg) {
     // UISystem 必须先于 RenderSystem 更新：UI 的本帧布局/命令在 RenderSystem
     // 构建场景命令时被读取。
     systems.registerSystem<UISystem>(*this);
+    systems.registerSystem<DebugOverlaySystem>(*this);
     systems.registerSystem<RenderSystem>(*this);
 
     systems.initAll();

@@ -393,6 +393,10 @@ public:
     // ── Engine control ────────────────────────────────────────────────────
     void quit();
 
+    // ── Debug ────────────────────────────────────────────────────────────────
+    // 在屏幕左上角创建一个显示 FPS 和渲染统计的性能浮层
+    entt::entity createDebugOverlay(FontHandle font);
+
 private:
     EngineContext& ctx_;
 };

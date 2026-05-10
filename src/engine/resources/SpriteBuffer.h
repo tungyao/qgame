@@ -103,6 +103,7 @@ public:
 
     uint32_t activeCount() const { return activeCount_; }
     uint32_t capacity() const { return capacity_; }
+    const GPUSprite* rawData() const { return slots_.data(); }
 
     void advanceFrame() {
         frameIndex_ = (frameIndex_ + 1) % FRAME_COUNT;

@@ -1,0 +1,90 @@
+{
+  "type": "qgame.tilemap.v2",
+  "version": 2,
+  "w": 12,
+  "h": 8,
+  "ts": 32,
+  "objectTemplates": [
+    {
+      "id": "tree.oak",
+      "name": "Oak Tree",
+      "width": 2,
+      "height": 3,
+      "baseGid": 4,
+      "collisionGid": 3,
+      "flags": 1,
+      "defaultCustomAttrs": [3],
+      "destructionAnimation": "demo7.tree.fall",
+      "replacementTemplateId": "tree.oak.stump",
+      "convertToSpriteOnDestroy": true,
+      "createRigidBodyOnDestroy": false
+    },
+    {
+      "id": "tree.oak.stump",
+      "name": "Oak Stump",
+      "width": 2,
+      "height": 1,
+      "baseGid": 12,
+      "collisionGid": 3,
+      "flags": 0,
+      "defaultCustomAttrs": [],
+      "convertToSpriteOnDestroy": false,
+      "createRigidBodyOnDestroy": false
+    }
+  ],
+  "tilesets": [
+    {
+      "id": "builtin",
+      "name": "Builtin Colors",
+      "firstGid": 0,
+      "count": 16,
+      "cols": 4,
+      "sourceKind": "builtin",
+      "collisions": [
+        {
+          "gid": 3,
+          "shape": "full"
+        }
+      ]
+    }
+  ],
+  "layers": [
+    {
+      "name": "Ground",
+      "type": "tile",
+      "visible": true,
+      "collidable": false,
+      "renderLayer": 0,
+      "tiles": [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+      ]
+    },
+    {
+      "name": "Objects",
+      "type": "object",
+      "visible": true,
+      "collidable": true,
+      "renderLayer": 10,
+      "objects": [
+        {
+          "cellIdx": 42,
+          "id": "oak_001",
+          "templateId": "tree.oak",
+          "width": 2,
+          "height": 3,
+          "baseGid": 4,
+          "collisionGid": 3,
+          "customAttrs": [3],
+          "flags": 1
+        }
+      ]
+    }
+  ]
+}

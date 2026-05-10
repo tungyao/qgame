@@ -77,6 +77,7 @@ private:
     void rebuildTileGPUCacheIfNeeded();
     uint64_t computeTileGPUCacheSignature() const;
     void onTransformUpdate(entt::registry& reg, entt::entity e);
+    void markMixedGPUSlotDirty(GPUHandle handle);
     void syncParticleEmitters(float dt);
     std::vector<backend::IRenderDevice::GPUParticleParams>
     collectParticleParams(const Camera& cam,
@@ -116,6 +117,7 @@ private:
     uint64_t tileGpuCacheSignature_ = 0; // TileMap 数据签名；变化时重建并重传静态 tile 实例
     std::vector<GPUSprite> tileGpuInstances_; // CPU 侧静态 tile 实例缓存，仅 dirty 时上传
     std::vector<CachedGPUTile> tileGpuItems_; // CPU 侧排序/裁剪元数据，指向 tileGpuInstances_ 的 GPU 索引
+    std::vector<uint8_t> mixedGpuDirty_; // mixed buffer 的 dirty 位，避免每帧全量重传 sprite 区域
     bool gpuDrivenEnabled_ = false;
     float lastDt_ = 0.f;
     float tileAnimationTimeSeconds_ = 0.f; // TileMap v2 视觉动画时间轴；只影响渲染，不影响碰撞

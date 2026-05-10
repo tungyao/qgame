@@ -924,7 +924,7 @@ int main(int argc, char* argv[]) {
 		ts.columns = 8;
 		// Demo map keeps every tile non-blocking; the v2 runtime stores explicit
 		// collision profiles, while legacyCollision remains available for old data.
-		ts.legacyCollision.resize(8, 0);
+	
 		tmap.tilesets.push_back(ts);
 		engine::TileMap::Layer ground{};
 		ground.name = "ground";
@@ -987,33 +987,33 @@ int main(int argc, char* argv[]) {
 	// ── GPU Sprite Particle Demo ──────────────────────────────────────────────
 	// CPU 只负责发射初始粒子；GPU compute 负责生命周期/位置推进、alive list、
 	// 排序和 indirect draw 参数。粒子纹理是程序化 soft sprite，所以不依赖额外资产。
-	entt::entity particleEmitter = entt::null;
-	{
-		particleEmitter = api.spawnEntity();
-		engine::Transform tf{};
-		tf.x = 520.f;
-		tf.y = 260.f;
-		tf.rotation = -1.35f;
-		api.addComponent(particleEmitter, tf);
+	//entt::entity particleEmitter = entt::null;
+	//{
+	//	particleEmitter = api.spawnEntity();
+	//	engine::Transform tf{};
+	//	tf.x = 520.f;
+	//	tf.y = 260.f;
+	//	tf.rotation = -1.35f;
+	//	api.addComponent(particleEmitter, tf);
 
-		engine::ParticleComponent particles{};
-		particles.texture = particleTex;
-		particles.srcRect = { 0.f, 0.f, 32.f, 32.f };
-		particles.maxParticles = 256;
-		particles.emissionRate = 180.f;
-		particles.lifetime = 1.25f;
-		particles.speedMin = 35.f;
-		particles.speedMax = 160.f;
-		particles.sizeStart = 18.f;
-		particles.sizeEnd = 2.f;
-		particles.spread = 1.15f;
-		particles.colorStart = { 255, 245, 140, 230 };
-		particles.colorEnd = { 255, 80, 40, 0 };
-		particles.layer = 8;
-		particles.sortMode = engine::ParticleSortMode::Y;
-		particles.pass = engine::RenderPass::World;
-		api.addComponent(particleEmitter, particles);
-	}
+	//	engine::ParticleComponent particles{};
+	//	particles.texture = particleTex;
+	//	particles.srcRect = { 0.f, 0.f, 32.f, 32.f };
+	//	particles.maxParticles = 256;
+	//	particles.emissionRate = 180.f;
+	//	particles.lifetime = 1.25f;
+	//	particles.speedMin = 35.f;
+	//	particles.speedMax = 160.f;
+	//	particles.sizeStart = 18.f;
+	//	particles.sizeEnd = 2.f;
+	//	particles.spread = 1.15f;
+	//	particles.colorStart = { 255, 245, 140, 230 };
+	//	particles.colorEnd = { 255, 80, 40, 0 };
+	//	particles.layer = 8;
+	//	particles.sortMode = engine::ParticleSortMode::Y;
+	//	particles.pass = engine::RenderPass::World;
+	//	api.addComponent(particleEmitter, particles);
+	//}
 
 	// ── S2 Scene/Prefab 数据化可视测试 ─────────────────────────────────────────
 	// prefab_demo.scene.json 里目前有两个 prefab instance。这里把它们实例化进
@@ -1076,38 +1076,38 @@ int main(int argc, char* argv[]) {
 		{ { 90, 70, 60,255}, { 30, 30, 40,255}, { 50, 50, 70,255}, { 20, 20, 30,255}, { 10, 10, 20,255} },
 	};
 	std::vector<entt::entity> tintDemoEntities;
-	{
-		TextureHandle charTex = api.assetManager().loadTexture("assets/sprites/char.png");
-		if (charTex.valid()) {
-			for (int i = 0; i < 10; ++i) {
-				auto e = api.spawnEntity();
-				engine::Transform tf{};
-				tf.x = 60.f + (i % 5) * 110.f;
-				tf.y = -150.f + (i / 5) * 200.f;
-				tf.scaleX = tf.scaleY = 2.5f;
-				api.addComponent(e, tf);
+	//{
+	//	TextureHandle charTex = api.assetManager().loadTexture("assets/sprites/char.png");
+	//	if (charTex.valid()) {
+	//		for (int i = 0; i < 10; ++i) {
+	//			auto e = api.spawnEntity();
+	//			engine::Transform tf{};
+	//			tf.x = 60.f + (i % 5) * 110.f;
+	//			tf.y = -150.f + (i / 5) * 200.f;
+	//			tf.scaleX = tf.scaleY = 2.5f;
+	//			api.addComponent(e, tf);
 
-				engine::Sprite sp{};
-				sp.texture = charTex;
-				sp.srcRect = { 0.f, 0.f, 32.f, 48.f };
-				sp.layer = 2;
-				sp.pass = engine::RenderPass::World;
-				api.addComponent(e, sp);
+	//			engine::Sprite sp{};
+	//			sp.texture = charTex;
+	//			sp.srcRect = { 0.f, 0.f, 32.f, 48.f };
+	//			sp.layer = 2;
+	//			sp.pass = engine::RenderPass::World;
+	//			api.addComponent(e, sp);
 
-				const TintPalette& p = kTintPalettes[i];
-				engine::Tinting tnt{};
-				tnt.slots[1] = { true, p.skin };
-				tnt.slots[2] = { true, p.hair };
-				tnt.slots[3] = { true, p.shirt };
-				tnt.slots[4] = { true, p.pants };
-				tnt.slots[5] = { true, p.shoes };
-				api.addComponent(e, tnt);
-				tintDemoEntities.push_back(e);
-			}
-		} else {
-			SDL_Log("[main] failed to load assets/sprites/char.png — Tinting demo skipped");
-		}
-	}
+	//			const TintPalette& p = kTintPalettes[i];
+	//			engine::Tinting tnt{};
+	//			tnt.slots[1] = { true, p.skin };
+	//			tnt.slots[2] = { true, p.hair };
+	//			tnt.slots[3] = { true, p.shirt };
+	//			tnt.slots[4] = { true, p.pants };
+	//			tnt.slots[5] = { true, p.shoes };
+	//			api.addComponent(e, tnt);
+	//			tintDemoEntities.push_back(e);
+	//		}
+	//	} else {
+	//		SDL_Log("[main] failed to load assets/sprites/char.png — Tinting demo skipped");
+	//	}
+	//}
 
 	// ── Player (带动画) ───────────────────────────────────────────────────────
 	entt::entity player;
@@ -1567,7 +1567,7 @@ int main(int argc, char* argv[]) {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	constexpr bool CREATE_MANY_SPRITES = true;
-	constexpr int SPRITE_GRID_SIZE = 30;  // 30x30 = 900 sprites (可调大到 50x50=2500 测试性能)
+	constexpr int SPRITE_GRID_SIZE = 50;  // 30x30 = 900 sprites (可调大到 50x50=2500 测试性能)
 
 	TextureHandle smallTex;  // 用于性能测试的纹理
 
@@ -2199,14 +2199,14 @@ int main(int argc, char* argv[]) {
 		(void)fw;
 		auto& playerAnimator = api.getComponent<engine::AnimatorComponent>(player);
 
-		if (particleEmitter != entt::null) {
-			particleDemoT += dt;
-			api.patchComponent<engine::Transform>(particleEmitter, [&](engine::Transform& tf) {
-				tf.rotation = -1.35f + std::sin(particleDemoT * 1.8f) * 0.65f;
-				tf.x = 520.f + std::cos(particleDemoT * 0.9f) * 42.f;
-				tf.y = 260.f + std::sin(particleDemoT * 1.1f) * 24.f;
-			});
-		}
+		//if (particleEmitter != entt::null) {
+		//	particleDemoT += dt;
+		//	api.patchComponent<engine::Transform>(particleEmitter, [&](engine::Transform& tf) {
+		//		tf.rotation = -1.35f + std::sin(particleDemoT * 1.8f) * 0.65f;
+		//		tf.x = 520.f + std::cos(particleDemoT * 0.9f) * 42.f;
+		//		tf.y = 260.f + std::sin(particleDemoT * 1.1f) * 24.f;
+		//	});
+		//}
 
 		// Region Tint demo：每个 entity 在调色板间循环平滑过渡。
 		// 每段 transition 持续 kCycleSec 秒；entity i 的相位偏移 i*0.6 错峰。

@@ -226,8 +226,14 @@ namespace {
 		}
 
 		void init() override {
-			camFollow.setCritical(120.f);
+			camFollow.setCritical(50.f);
 			snapCameraToPlayer();
+			// 让弹簧的初始 value 和 target 都对齐到首帧镜头位置，
+			// 避免 onCameraPhase 第一次 update 时从 (0,0) 开始收敛。
+			if (ctx_.world.valid(camera_) && ctx_.world.all_of<engine::Transform>(camera_)) {
+				const auto& camTf = ctx_.world.get<engine::Transform>(camera_);
+				camFollow.snap({ camTf.x, camTf.y });
+			}
 		}
 
 	private:
@@ -281,10 +287,7 @@ namespace {
 			const float effectiveZoom = applyAutoCameraZoom(cam, viewportW, viewportH);
 
 			const auto target = computeObservedPlayerPosition(playerTf);
-			const float alpha = 1.0f - std::exp(-kCameraFollowRate * std::max(0.0f, dt));
-			camTf.x += (target.x - camTf.x) * alpha;
-			//camTf.y += (target.y - camTf.y) * alpha;
-			camFollow.target({ playerTf.x,playerTf.y });
+			camFollow.target({ target.x, target.y });
 			core::Vec2 camPos = camFollow.update(dt);
 			camTf.x = camPos.x;
 			camTf.y = camPos.y;
@@ -419,6 +422,7 @@ int main(int argc, char** argv) {
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
 	cfg.vsync = true;
+	cfg.debug = true;
 	if (useOpenGL) cfg.renderBackend = engine::RenderBackend::OpenGL;
 
 	engine::EngineContext ctx;
@@ -462,6 +466,7 @@ int main(int argc, char** argv) {
 	wcam.clear = true;
 	wcam.clearColor = core::Color{ 8, 12, 22, 255 };
 	wcam.cullEnabled = false; // don't cull tiles
+	wcam.pixelSnap = true;
 	api.addComponent(camEnt, wcam);
 
 	// ── build TileMap component ──────────────────────────────────────────────

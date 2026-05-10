@@ -111,31 +111,6 @@ struct TileMap {
         float speed = 1.0f;
     };
 
-    enum class TileVisualKind : uint8_t {
-        Static = 0,
-        Flipbook,
-        Wind,
-        Water,
-        WaterFlipbook,
-        Emissive,
-        Autotile
-    };
-
-    /**
-     * TileVisual 只描述“如何渲染 gid”，不描述碰撞。
-     *
-     * animation 是 Tileset::animations 的下标。对于 Flipbook/WaterFlipbook，
-     * 渲染器会先用该动画表解析当前显示帧；其他 visual kind 则保留 gid 本身。
-     */
-    struct TileVisual {
-        int gid = EMPTY_GID;
-        TileVisualKind kind = TileVisualKind::Static;
-        int animation = -1;
-        float speed = 1.0f;
-        float strength = 0.0f;
-        float phase = 0.0f;
-        uint32_t flags = 0;
-    };
 
     enum class TileCollisionShape : uint8_t {
         None = 0,
@@ -192,9 +167,7 @@ struct TileMap {
         int count    = 0;                   // tile 数量；有效 gid 范围是 [firstGid, firstGid + count)
         int columns  = 1;                   // atlas 横向 tile 数；localId % columns 得到 atlas x
         std::vector<TileAnimation> animations;
-        std::vector<TileVisual> visuals;
         std::vector<TileCollision> collisions;
-        std::vector<uint8_t> legacyCollision; // 仅用于 v1 导入兼容；导出 v2 时不再写回
     };
 
     /**
@@ -272,18 +245,6 @@ struct TileMap {
     }
 
     /**
-     * 查找 gid 的显式 visual 定义。未声明时返回 nullptr，调用者应按 Static 处理。
-     */
-    const TileVisual* visualForGid(int gid) const {
-        const Tileset* ts = tilesetForGid(gid);
-        if (!ts) return nullptr;
-        for (const TileVisual& visual : ts->visuals) {
-            if (visual.gid == gid) return &visual;
-        }
-        return nullptr;
-    }
-
-    /**
      * 查找 gid 对应的动画定义。
      *
      * 优先级：
@@ -293,13 +254,6 @@ struct TileMap {
     const TileAnimation* animationForGid(int gid) const {
         const Tileset* ts = tilesetForGid(gid);
         if (!ts) return nullptr;
-
-        if (const TileVisual* visual = visualForGid(gid)) {
-            if (visual->animation >= 0 &&
-                visual->animation < static_cast<int>(ts->animations.size())) {
-                return &ts->animations[static_cast<size_t>(visual->animation)];
-            }
-        }
 
         for (const TileAnimation& animation : ts->animations) {
             if (animation.baseGid == gid) return &animation;
@@ -328,21 +282,6 @@ struct TileMap {
      * tile 不会完全同步闪烁，同时不会因为帧率变化而跳变。
      */
     int resolveVisualGid(int gid, float timeSeconds, int x = 0, int y = 0, int layer = 0) const {
-        const TileVisual* visual = visualForGid(gid);
-        if (!visual) return gid;
-
-        switch (visual->kind) {
-            case TileVisualKind::Flipbook:
-            case TileVisualKind::WaterFlipbook:
-                break;
-            case TileVisualKind::Static:
-            case TileVisualKind::Wind:
-            case TileVisualKind::Water:
-            case TileVisualKind::Emissive:
-            case TileVisualKind::Autotile:
-            default:
-                return gid;
-        }
 
         const TileAnimation* animation = animationForGid(gid);
         if (!animation || animation->frames.empty()) return gid;
@@ -352,10 +291,8 @@ struct TileMap {
             totalDuration += std::max(frame.duration, 0.0001f);
         }
         if (totalDuration <= 0.0f) return gid;
-
-        const float visualSpeed = (visual->speed > 0.0f) ? visual->speed : 1.0f;
+    
         const float animSpeed = (animation->speed > 0.0f) ? animation->speed : 1.0f;
-        float phaseSeconds = visual->phase;
         if (animation->randomStart) {
             auto mix = [](uint32_t h, uint32_t v) {
                 h ^= v + 0x9e3779b9u + (h << 6u) + (h >> 2u);
@@ -368,10 +305,10 @@ struct TileMap {
             h = mix(h, static_cast<uint32_t>(layer));
             const float normalized = static_cast<float>(h & 0x00FFFFFFu) /
                                      static_cast<float>(0x01000000u);
-            phaseSeconds += normalized * totalDuration;
+
         }
 
-        float localTime = std::fmod(timeSeconds * visualSpeed * animSpeed + phaseSeconds,
+        float localTime = std::fmod(timeSeconds * animSpeed ,
                                     totalDuration);
         if (localTime < 0.0f) localTime += totalDuration;
 
@@ -404,10 +341,6 @@ struct TileMap {
         const Tileset* ts = tilesetForGid(gid);
         if (!ts) return out;
         const int local = gid - ts->firstGid;
-        if (local < 0 || local >= static_cast<int>(ts->legacyCollision.size())) return out;
-        if (ts->legacyCollision[static_cast<size_t>(local)] != 0) {
-            out.shape = TileCollisionShape::Full;
-        }
         return out;
     }
 
@@ -527,6 +460,7 @@ struct Camera {
     bool        clear       = true;                    // 是否清屏（叠加相机置 false）
     core::Color clearColor  = core::Color::Black;
     bool        cullEnabled = true;                    // 关掉则该相机跳过视锥剔除（UI/Screen 适用）
+    bool        pixelSnap   = false;                   // 是否将相机坐标对齐到物理像素，防止次像素抖动
 
     // 投影策略：
     //   - StretchWithWindow: 完全跟着当前窗口尺寸拉伸

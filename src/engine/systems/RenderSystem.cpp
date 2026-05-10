@@ -309,6 +309,11 @@ ResolvedCameraView2D RenderSystem::resolveCameraView(const Transform& tf, const 
         out.zoom = 1.f;
     }
 
+    if (cam.pixelSnap && out.zoom > 0.f) {
+        out.x = std::round(out.x * out.zoom) / out.zoom;
+        out.y = std::round(out.y * out.zoom) / out.zoom;
+    }
+
     if (out.viewportW > 0 && out.viewportH > 0) {
         out.visibleWorldW = static_cast<float>(out.viewportW) / out.zoom;
         out.visibleWorldH = static_cast<float>(out.viewportH) / out.zoom;
@@ -619,6 +624,7 @@ void RenderSystem::updateGPUSlot(const Transform& tf, const Sprite& spr, const A
     slot->flags        = (spr.ySort ? 1u : 0u) | (static_cast<uint32_t>(spr.pass) << 1);
 
     spriteBuffer_.markDirty(spr.gpuHandle);
+    markMixedGPUSlotDirty(spr.gpuHandle);
 }
 
 void RenderSystem::ensureMixedGPUCapacity(uint32_t required) {
@@ -640,6 +646,7 @@ void RenderSystem::ensureMixedGPUCapacity(uint32_t required) {
     desc.usage = backend::BufferUsage::Storage | backend::BufferUsage::Vertex;
     mixedGpuSpriteBuffer_ = ctx_.renderDevice().createBuffer(desc);
     mixedGpuSpriteCapacity_ = mixedGpuSpriteBuffer_.valid() ? newCapacity : 0;
+    mixedGpuDirty_.assign(mixedGpuSpriteCapacity_, 1u);
 
     // Recreating the mixed buffer invalidates the static tile data that lived
     // in it. The CPU-side cache remains valid, but its GPU copy must be
@@ -647,27 +654,52 @@ void RenderSystem::ensureMixedGPUCapacity(uint32_t required) {
     tileGpuCacheSignature_ = 0;
 }
 
+void RenderSystem::markMixedGPUSlotDirty(GPUHandle handle) {
+    if (!handle.valid()) return;
+    if (handle.index >= mixedGpuDirty_.size()) return;
+    mixedGpuDirty_[handle.index] = 1u;
+}
+
 void RenderSystem::syncSpritesToMixedGPUBuffer() {
     if (!mixedGpuSpriteBuffer_.valid()) return;
+    const GPUSprite* raw = spriteBuffer_.rawData();
+    const uint32_t capacity = std::min<uint32_t>(spriteBuffer_.capacity(),
+                                                 static_cast<uint32_t>(mixedGpuDirty_.size()));
+    if (!raw || capacity == 0) return;
 
-    // The mixed GPU buffer is the single storage buffer consumed by the
-    // GPU-driven shader. SpriteBuffer still owns sprite lifetime and dirty
-    // bookkeeping for the legacy path, so this bridge mirrors active sprite
-    // slots into the same indices in the mixed buffer before sorting references
-    // those indices.
-    auto view = ctx_.world.view<Sprite>();
-    for (auto [ent, spr] : view.each()) {
-        (void)ent;
-        if (!spr.gpuHandle.valid()) continue;
+    uint32_t runStart = UINT32_MAX;
+    uint32_t runCount = 0;
 
-        const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
-        if (!slot) continue;
+    auto flushRun = [&]() {
+        if (runCount == 0) return;
+        ctx_.renderDevice().uploadToBuffer(
+            mixedGpuSpriteBuffer_,
+            raw + runStart,
+            static_cast<size_t>(runCount) * sizeof(GPUSprite),
+            static_cast<size_t>(runStart) * sizeof(GPUSprite));
+        runStart = UINT32_MAX;
+        runCount = 0;
+    };
 
-        ctx_.renderDevice().uploadToBuffer(mixedGpuSpriteBuffer_,
-                                           slot,
-                                           sizeof(GPUSprite),
-                                           spr.gpuHandle.index * sizeof(GPUSprite));
+    for (uint32_t i = 0; i < capacity; ++i) {
+        if (mixedGpuDirty_[i] == 0u) {
+            flushRun();
+            continue;
+        }
+
+        mixedGpuDirty_[i] = 0u;
+        if (runCount == 0) {
+            runStart = i;
+            runCount = 1;
+        } else if (runStart + runCount == i) {
+            ++runCount;
+        } else {
+            flushRun();
+            runStart = i;
+            runCount = 1;
+        }
     }
+    flushRun();
 }
 
 uint64_t RenderSystem::computeTileGPUCacheSignature() const {
@@ -717,16 +749,7 @@ uint64_t RenderSystem::computeTileGPUCacheSignature() const {
                     mixF32(frame.duration);
                 }
             }
-            mixU64(ts.visuals.size());
-            for (const auto& visual : ts.visuals) {
-                mixI32(visual.gid);
-                mixU64(static_cast<uint64_t>(visual.kind));
-                mixI32(visual.animation);
-                mixF32(visual.speed);
-                mixF32(visual.strength);
-                mixF32(visual.phase);
-                mixU64(visual.flags);
-            }
+
             mixU64(ts.collisions.size());
             for (const auto& collision : ts.collisions) {
                 mixI32(collision.gid);
@@ -736,10 +759,7 @@ uint64_t RenderSystem::computeTileGPUCacheSignature() const {
                     mixF32(point);
                 }
             }
-            mixU64(ts.legacyCollision.size());
-            for (uint8_t value : ts.legacyCollision) {
-                mixU64(value);
-            }
+
         }
         mixU64(tmap.layers.size());
         for (const auto& layer : tmap.layers) {
@@ -1212,12 +1232,6 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         }
 
         const TileMap& tmap = ctx_.world.get<TileMap>(item.mapEntity);
-        const TileMap::TileVisual* visual = tmap.visualForGid(item.baseGid);
-        if (!visual) continue;
-        if (visual->kind != TileMap::TileVisualKind::Flipbook &&
-            visual->kind != TileMap::TileVisualKind::WaterFlipbook) {
-            continue;
-        }
 
         const ResolvedTileFrame frame =
             resolveTileFrame(tmap, item.baseGid, tileAnimationTimeSeconds_,
@@ -1245,6 +1259,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         hasAnimatedTileFrames = true;
     }
     bool hasInterpolatedTileTransforms = false;
+
     for (CachedGPUTile& item : tileGpuItems_) {
         if (item.mapEntity == entt::null || !ctx_.world.valid(item.mapEntity) ||
             !ctx_.world.all_of<Transform, TileMap, TransformInterpolation>(item.mapEntity)) {

@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
     occA.shape = engine::LightOccluder2D::Shape::AABB;
     occA.width = 80.f;
     occA.height = 240.f;
-    occA.opacity = 1.f;
+    occA.opacity = 0.5f;
     api.addComponent(wallA, occA);
 
     auto wallB = makeSprite(api, whiteTex, 820.f, 330.f, 140.f, 110.f,
@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
     lampLight.type = engine::Light2DType::Point;
     lampLight.color = core::Color{255, 186, 92, 255};
     lampLight.radius = 310.f;
-    lampLight.intensity = 1.25f;
+    lampLight.intensity = 20.25f;
     lampLight.softness = 32.f;
     lampLight.castsShadow = true;
     api.addComponent(lamp, lampLight);
@@ -379,9 +379,9 @@ int main(int argc, char** argv) {
                 l.softness = 28.f;
             } else {
                 l.color = core::Color{130, 170, 255, 255};
-                l.radius = 340.f;
-                l.intensity = 0.22f;
-                l.softness = 130.f;
+                l.radius = 440.f;
+                l.intensity = 1.22f;
+                l.softness = 230.f;
             }
         });
 

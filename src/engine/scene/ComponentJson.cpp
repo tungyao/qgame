@@ -88,29 +88,6 @@ static Sprite spriteFromJson(const Json& j, AssetManager& mgr) {
     return s;
 }
 
-static const char* tileVisualKindToString(TileMap::TileVisualKind kind) {
-    switch (kind) {
-        case TileMap::TileVisualKind::Static: return "static";
-        case TileMap::TileVisualKind::Flipbook: return "flipbook";
-        case TileMap::TileVisualKind::Wind: return "wind";
-        case TileMap::TileVisualKind::Water: return "water";
-        case TileMap::TileVisualKind::WaterFlipbook: return "waterFlipbook";
-        case TileMap::TileVisualKind::Emissive: return "emissive";
-        case TileMap::TileVisualKind::Autotile: return "autotile";
-    }
-    return "static";
-}
-
-static TileMap::TileVisualKind tileVisualKindFromString(const Json& j, const char* key) {
-    const std::string value = j.value(key, "static");
-    if (value == "flipbook") return TileMap::TileVisualKind::Flipbook;
-    if (value == "wind") return TileMap::TileVisualKind::Wind;
-    if (value == "water") return TileMap::TileVisualKind::Water;
-    if (value == "waterFlipbook") return TileMap::TileVisualKind::WaterFlipbook;
-    if (value == "emissive") return TileMap::TileVisualKind::Emissive;
-    if (value == "autotile") return TileMap::TileVisualKind::Autotile;
-    return TileMap::TileVisualKind::Static;
-}
 
 static const char* tileCollisionShapeToString(TileMap::TileCollisionShape shape) {
     switch (shape) {
@@ -172,18 +149,6 @@ static Json tilemapToJson(const TileMap& tm, AssetManager& mgr) {
             tj["animations"].push_back(std::move(aj));
         }
 
-        tj["visuals"] = Json::array();
-        for (const auto& visual : ts.visuals) {
-            tj["visuals"].push_back({
-                {"gid", visual.gid},
-                {"kind", tileVisualKindToString(visual.kind)},
-                {"animation", visual.animation},
-                {"speed", visual.speed},
-                {"strength", visual.strength},
-                {"phase", visual.phase},
-                {"flags", visual.flags}
-            });
-        }
 
         tj["collisions"] = Json::array();
         for (const auto& collision : ts.collisions) {
@@ -217,7 +182,6 @@ static TileMap tilemapFromJson(const Json& j, AssetManager& mgr) {
     const std::string type = j.value("type", version >= TileMap::FORMAT_VERSION
                                                ? TileMap::FORMAT_TYPE
                                                : TileMap::LEGACY_FORMAT_TYPE);
-    const bool isLegacyV1 = (type == TileMap::LEGACY_FORMAT_TYPE) || version <= 1;
 
     if (j.contains("tilesets")) {
         for (const auto& tj : j["tilesets"]) {
@@ -250,19 +214,7 @@ static TileMap tilemapFromJson(const Json& j, AssetManager& mgr) {
                 }
             }
 
-            if (tj.contains("visuals")) {
-                for (const auto& vj : tj["visuals"]) {
-                    TileMap::TileVisual visual;
-                    visual.gid = vj.value("gid", TileMap::EMPTY_GID);
-                    visual.kind = tileVisualKindFromString(vj, "kind");
-                    visual.animation = vj.value("animation", -1);
-                    visual.speed = vj.value("speed", 1.0f);
-                    visual.strength = vj.value("strength", 0.0f);
-                    visual.phase = vj.value("phase", 0.0f);
-                    visual.flags = vj.value("flags", 0u);
-                    ts.visuals.push_back(std::move(visual));
-                }
-            }
+    
 
             if (tj.contains("collisions")) {
                 for (const auto& cj : tj["collisions"]) {
@@ -276,18 +228,6 @@ static TileMap tilemapFromJson(const Json& j, AssetManager& mgr) {
                 }
             }
 
-            if (tj.contains("collision")) {
-                ts.legacyCollision = tj["collision"].get<std::vector<uint8_t>>();
-                if (isLegacyV1 && ts.collisions.empty()) {
-                    for (size_t local = 0; local < ts.legacyCollision.size(); ++local) {
-                        if (ts.legacyCollision[local] == 0) continue;
-                        TileMap::TileCollision collision;
-                        collision.gid = ts.firstGid + static_cast<int>(local);
-                        collision.shape = TileMap::TileCollisionShape::Full;
-                        ts.collisions.push_back(std::move(collision));
-                    }
-                }
-            }
 
             if (!ts.assetId.empty()) ts.texture = mgr.loadTextureById(ts.assetId);
             if (!ts.texture.valid() && !ts.texturePath.empty()) ts.texture = mgr.loadTexture(ts.texturePath);

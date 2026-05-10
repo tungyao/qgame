@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include "../systems/DebugOverlaySystem.h"
 
 
 namespace engine {
@@ -241,6 +242,25 @@ void GameAPI::quit() {
     SDL_Event e{};
     e.type = SDL_EVENT_QUIT;
     SDL_PushEvent(&e);
+}
+
+// ── Debug ──────────────────────────────────────────────────────────────────
+
+entt::entity GameAPI::createDebugOverlay(FontHandle font) {
+    entt::entity e = spawnEntity();
+    addComponent(e, engine::Transform{ 10.f, 10.f });
+    
+    engine::TextComponent text{};
+    text.text = "FPS: ...";
+    text.font = font;
+    text.fontSize = 14.f;
+    text.color = core::Color{ 0, 255, 0, 255 };
+    text.pass = engine::RenderPass::UI;
+    text.layer = 999;
+    
+    addComponent(e, text);
+    addComponent(e, DebugOverlayComponent{});
+    return e;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
