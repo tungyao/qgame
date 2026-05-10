@@ -103,6 +103,8 @@ struct RenderFrameStats {
     uint32_t cullingCollectUs = 0;
     uint32_t cullingSortUs = 0;
     uint32_t cullingIndexUs = 0;
+    uint32_t cullingCoveredCellCount = 0;
+    uint32_t cullingCandidateSpriteCount = 0;
     uint32_t totalCpuUs = 0;
 };
 

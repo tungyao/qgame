@@ -376,6 +376,7 @@ void AnimatorSystem::update(float rawDt) {
 
         // ── 基础层写回 sprite (Override：srcRect + texture) ─────────────────
         Sprite* spr = ctx_.world.try_get<Sprite>(ent);
+        bool spriteChanged = false;
         if (spr && baseClip && !baseClip->frames.empty() && baseClip->duration > 0.f) {
             const size_t idx = resolveFrameIndex(*baseClip, anim.time);
             spr->srcRect = baseClip->frames[idx].srcRect;
@@ -383,6 +384,7 @@ void AnimatorSystem::update(float rawDt) {
                 spr->texture = baseClip->texture;
             }
             spr->gpuDirty = true;
+            spriteChanged = true;
         }
 
         // ── Phase 4/5: 额外层时间推进 + 写回合成 ────────────────────────────
@@ -437,11 +439,22 @@ void AnimatorSystem::update(float rawDt) {
                     if (wantSrcRect) spr->srcRect = lClip->frames[idx].srcRect;
                     if (wantTexture && lClip->texture.valid()) spr->texture = lClip->texture;
                     spr->gpuDirty = true;
+                    spriteChanged = true;
                 }
             }
 
             // AnimatorOutput 留给 RenderSystem 在 updateGPUSlot 时叠加 (offset/scale/tint)
-            if (outPtr && spr) spr->gpuDirty = true;
+            if (outPtr && spr) {
+                spr->gpuDirty = true;
+                spriteChanged = true;
+            }
+        }
+
+        // RenderSystem 的 sprite spatial hash / proxy 更新依赖 on_update<Sprite>。
+        // AnimatorSystem 这里是直接改字段，不走 patch/replace，所以需要手动发一次
+        // 空 patch，把“这只 sprite 的渲染数据变了”通知给渲染侧队列。
+        if (spriteChanged && spr) {
+            ctx_.world.patch<Sprite>(ent, [](Sprite&) {});
         }
     }
 }

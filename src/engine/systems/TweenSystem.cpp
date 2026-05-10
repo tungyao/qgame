@@ -29,13 +29,37 @@ namespace {
             case TweenChannel::ScaleY:
                 { if (auto* tf = w.try_get<Transform>(ent)) tf->scaleY = v; } break;
             case TweenChannel::SpriteTintR:
-                { if (auto* sp = w.try_get<Sprite>(ent)) { sp->tint.r = toByte(v); sp->gpuDirty = true; } } break;
+                {
+                    if (auto* sp = w.try_get<Sprite>(ent)) {
+                        sp->tint.r = toByte(v);
+                        sp->gpuDirty = true;
+                        w.patch<Sprite>(ent, [](Sprite&) {});
+                    }
+                } break;
             case TweenChannel::SpriteTintG:
-                { if (auto* sp = w.try_get<Sprite>(ent)) { sp->tint.g = toByte(v); sp->gpuDirty = true; } } break;
+                {
+                    if (auto* sp = w.try_get<Sprite>(ent)) {
+                        sp->tint.g = toByte(v);
+                        sp->gpuDirty = true;
+                        w.patch<Sprite>(ent, [](Sprite&) {});
+                    }
+                } break;
             case TweenChannel::SpriteTintB:
-                { if (auto* sp = w.try_get<Sprite>(ent)) { sp->tint.b = toByte(v); sp->gpuDirty = true; } } break;
+                {
+                    if (auto* sp = w.try_get<Sprite>(ent)) {
+                        sp->tint.b = toByte(v);
+                        sp->gpuDirty = true;
+                        w.patch<Sprite>(ent, [](Sprite&) {});
+                    }
+                } break;
             case TweenChannel::SpriteTintA:
-                { if (auto* sp = w.try_get<Sprite>(ent)) { sp->tint.a = toByte(v); sp->gpuDirty = true; } } break;
+                {
+                    if (auto* sp = w.try_get<Sprite>(ent)) {
+                        sp->tint.a = toByte(v);
+                        sp->gpuDirty = true;
+                        w.patch<Sprite>(ent, [](Sprite&) {});
+                    }
+                } break;
             case TweenChannel::CameraZoom:
                 { if (auto* cam = w.try_get<Camera>(ent)) cam->zoom = v; } break;
             case TweenChannel::Custom:

@@ -15,6 +15,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace engine {
@@ -366,17 +368,24 @@ void RenderSystem::init() {
     spriteBuffer_.init(&ctx_.renderDevice(), SpriteBuffer::INITIAL_CAPACITY);
     gpuRenderer_.init(&ctx_.renderDevice());
     ensureMixedGPUCapacity(SpriteBuffer::INITIAL_CAPACITY);
+    ensureSpriteCullCapacity(SpriteBuffer::INITIAL_CAPACITY);
     particleRenderer_.init(&ctx_.renderDevice());
 
     destroyConnection_ = ctx_.world.on_destroy<Sprite>().connect<&RenderSystem::freeGPUSlot>(this);
+    spriteConstructConnection_ = ctx_.world.on_construct<Sprite>().connect<&RenderSystem::onSpriteConstruct>(this);
+    spriteUpdateConnection_ = ctx_.world.on_update<Sprite>().connect<&RenderSystem::onSpriteUpdate>(this);
+    transformConstructConnection_ =
+        ctx_.world.on_construct<Transform>().connect<&RenderSystem::onTransformConstruct>(this);
     transformUpdateConnection_ = ctx_.world.on_update<Transform>().connect<&RenderSystem::onTransformUpdate>(this);
 
-    auto view = ctx_.world.view<Sprite>();
-    for (auto [e, spr] : view.each()) {
+    auto view = ctx_.world.view<Transform, Sprite>();
+    for (auto [e, tf, spr] : view.each()) {
+        (void)tf;
         if (!spr.gpuHandle.valid()) {
             allocateGPUSlot(e, spr);
-            spr.gpuDirty = true;
         }
+        spr.gpuDirty = true;
+        queueSpriteSync(e);
     }
 
     core::logInfo("RenderSystem initialized (S3: Persistent GPU Sprite Buffer + M1/M2 GPU-Driven)");
@@ -455,6 +464,9 @@ void RenderSystem::update(float dt) {
 
 void RenderSystem::shutdown() {
     destroyConnection_.release();
+    spriteConstructConnection_.release();
+    spriteUpdateConnection_.release();
+    transformConstructConnection_.release();
     transformUpdateConnection_.release();
     particleRenderer_.shutdown();
     gpuRenderer_.shutdown();
@@ -464,6 +476,11 @@ void RenderSystem::shutdown() {
         mixedGpuSpriteCapacity_ = 0;
     }
     spriteBuffer_.shutdown();
+    spriteCullProxies_.clear();
+    activeSpriteSlots_.clear();
+    visibleSpriteSlotsScratch_.clear();
+    queuedSpriteSync_.clear();
+    spriteSpatialHash_.cells.clear();
 }
 
 void RenderSystem::syncParticleEmitters(float dt) {
@@ -551,26 +568,95 @@ void RenderSystem::submitParticlePass(const Camera& cam,
     }
 }
 
-void RenderSystem::onTransformUpdate(entt::registry& reg, entt::entity e) {
-    if (reg.all_of<Sprite>(e)) {
-        dirtySprites_.push_back(e);
+void RenderSystem::onSpriteConstruct(entt::registry& reg, entt::entity e) {
+    if (!reg.all_of<Transform, Sprite>(e)) return;
+    auto& spr = reg.get<Sprite>(e);
+    if (!spr.gpuHandle.valid()) {
+        allocateGPUSlot(e, spr);
     }
+    spr.gpuDirty = true;
+    queueSpriteSync(e);
+}
+
+void RenderSystem::onSpriteUpdate(entt::registry& reg, entt::entity e) {
+    if (!reg.all_of<Transform, Sprite>(e)) return;
+    reg.get<Sprite>(e).gpuDirty = true;
+    queueSpriteSync(e);
+}
+
+void RenderSystem::onTransformConstruct(entt::registry& reg, entt::entity e) {
+    if (!reg.all_of<Sprite>(e)) return;
+    queueSpriteSync(e);
+}
+
+void RenderSystem::onTransformUpdate(entt::registry& reg, entt::entity e) {
+    if (!reg.all_of<Sprite>(e)) return;
+    queueSpriteSync(e);
+}
+
+void RenderSystem::queueSpriteSync(entt::entity e) {
+    if (e == entt::null) return;
+    queuedSpriteSync_.push_back(e);
+}
+
+void RenderSystem::ensureSpriteCullCapacity(uint32_t required) {
+    if (required <= spriteCullProxies_.size()) return;
+    spriteCullProxies_.resize(required);
 }
 
 void RenderSystem::syncEntitiesToGPU() {
-    // 新精灵的 GPU slot 分配由 culling 遍历兜底处理（检查 gpuHandle.valid()）。
-    // Transform 更新由 dirtySprites_ 批量处理。
-    // 这里不再做 O(N) 遍历。
+    if (queuedSpriteSync_.empty()) return;
+
+    // 同一实体在一帧内可能被 Transform 和 Sprite 多次回调。
+    // 这里先做一次稳定去重，避免反复写同一个 GPU slot 和 spatial hash。
+    std::sort(queuedSpriteSync_.begin(), queuedSpriteSync_.end(),
+              [](entt::entity a, entt::entity b) {
+                  using Raw = std::underlying_type_t<entt::entity>;
+                  return static_cast<Raw>(a) < static_cast<Raw>(b);
+              });
+    queuedSpriteSync_.erase(std::unique(queuedSpriteSync_.begin(), queuedSpriteSync_.end()),
+                            queuedSpriteSync_.end());
+
+    const float alpha = presentationAlpha(ctx_);
+    for (entt::entity e : queuedSpriteSync_) {
+        if (!ctx_.world.valid(e) || !ctx_.world.all_of<Transform, Sprite>(e)) continue;
+
+        auto& spr = ctx_.world.get<Sprite>(e);
+        if (!spr.gpuHandle.valid()) {
+            allocateGPUSlot(e, spr);
+        }
+
+        const Transform& tf = ctx_.world.get<Transform>(e);
+        const AnimatorOutput* aout = ctx_.world.try_get<AnimatorOutput>(e);
+        const Transform presentTf =
+            sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(e), alpha);
+        updateGPUSlot(presentTf, spr, aout);
+        spr.gpuDirty = false;
+    }
+
+    queuedSpriteSync_.clear();
+    ensureMixedGPUCapacity(spriteBuffer_.capacity());
+    ensureSpriteCullCapacity(spriteBuffer_.capacity());
 }
 
 void RenderSystem::allocateGPUSlot(entt::entity, Sprite& spr) {
     spr.gpuHandle = spriteBuffer_.allocate();
+    ensureSpriteCullCapacity(spriteBuffer_.capacity());
+
+    SpriteCullProxy& proxy = spriteCullProxies_[spr.gpuHandle.index];
+    proxy = SpriteCullProxy{};
+    proxy.slotActive = true;
+    proxy.gpuIndex = spr.gpuHandle.index;
+    proxy.seq = spriteCullSequenceCounter_++;
+    proxy.activeListIndex = static_cast<uint32_t>(activeSpriteSlots_.size());
+    activeSpriteSlots_.push_back(spr.gpuHandle.index);
 }
 
 void RenderSystem::freeGPUSlot(entt::registry& reg, entt::entity e) {
     if (reg.all_of<Sprite>(e)) {
         auto& spr = reg.get<Sprite>(e);
         if (spr.gpuHandle.valid()) {
+            deactivateSpriteCullProxy(spr.gpuHandle);
             spriteBuffer_.free(spr.gpuHandle);
             spr.gpuHandle = GPUHandle::invalid();
         }
@@ -621,8 +707,129 @@ void RenderSystem::updateGPUSlot(const Transform& tf, const Sprite& spr, const A
     slot->sortKey      = spr.sortOrder;
     slot->flags        = (spr.ySort ? 1u : 0u) | (static_cast<uint32_t>(spr.pass) << 1);
 
+    updateSpriteCullProxy(spr, *slot, py);
+
     spriteBuffer_.markDirty(spr.gpuHandle);
     markMixedGPUSlotDirty(spr.gpuHandle);
+}
+
+void RenderSystem::deactivateSpriteCullProxy(GPUHandle handle) {
+    if (!handle.valid()) return;
+    if (handle.index >= spriteCullProxies_.size()) return;
+
+    SpriteCullProxy& proxy = spriteCullProxies_[handle.index];
+    if (!proxy.slotActive) return;
+
+    auto removeFromGrid = [&](int minCellX, int maxCellX, int minCellY, int maxCellY) {
+        for (int cy = minCellY; cy <= maxCellY; ++cy) {
+            for (int cx = minCellX; cx <= maxCellX; ++cx) {
+                const int64_t key =
+                    (static_cast<int64_t>(cx) << 32) |
+                    (static_cast<uint32_t>(cy) & 0xFFFFFFFFLL);
+                auto it = spriteSpatialHash_.cells.find(key);
+                if (it == spriteSpatialHash_.cells.end()) continue;
+
+                auto& cell = it->second;
+                cell.erase(std::remove(cell.begin(), cell.end(), handle.index), cell.end());
+                if (cell.empty()) {
+                    spriteSpatialHash_.cells.erase(it);
+                }
+            }
+        }
+    };
+
+    if (proxy.indexedInGrid) {
+        removeFromGrid(proxy.minCellX, proxy.maxCellX, proxy.minCellY, proxy.maxCellY);
+    }
+
+    if (proxy.activeListIndex < activeSpriteSlots_.size()) {
+        const uint32_t removedListIndex = proxy.activeListIndex;
+        const uint32_t movedSlot = activeSpriteSlots_.back();
+        activeSpriteSlots_[removedListIndex] = movedSlot;
+        activeSpriteSlots_.pop_back();
+        if (movedSlot != handle.index && movedSlot < spriteCullProxies_.size()) {
+            spriteCullProxies_[movedSlot].activeListIndex = removedListIndex;
+        }
+    }
+
+    proxy = SpriteCullProxy{};
+}
+
+void RenderSystem::updateSpriteCullProxy(const Sprite& spr, const GPUSprite& slot, float sortY) {
+    if (!spr.gpuHandle.valid()) return;
+    if (spr.gpuHandle.index >= spriteCullProxies_.size()) return;
+
+    SpriteCullProxy& proxy = spriteCullProxies_[spr.gpuHandle.index];
+    proxy.slotActive = true;
+    proxy.visible = spr.visible;
+    proxy.texture = spr.texture;
+    proxy.gpuIndex = spr.gpuHandle.index;
+    proxy.pass = spr.pass;
+    proxy.layer = spr.layer;
+    proxy.ySort = spr.ySort;
+    proxy.sortKey = spr.sortOrder;
+    proxy.y = sortY;
+
+    // CPU 裁剪使用与 shader 一致的 AABB 公式：
+    //   halfW = (abs(m00) + abs(m01)) * 0.5
+    //   halfH = (abs(m10) + abs(m11)) * 0.5
+    //
+    // 这样旋转 sprite 的包围盒不会再退化成“只看主对角线缩放”的近似值。
+    proxy.centerX = slot.transform[3];
+    proxy.centerY = slot.transform[7];
+    proxy.halfW = (std::fabs(slot.transform[0]) + std::fabs(slot.transform[1])) * 0.5f;
+    proxy.halfH = (std::fabs(slot.transform[4]) + std::fabs(slot.transform[5])) * 0.5f;
+
+    auto removeFromGrid = [&](int minCellX, int maxCellX, int minCellY, int maxCellY) {
+        for (int cy = minCellY; cy <= maxCellY; ++cy) {
+            for (int cx = minCellX; cx <= maxCellX; ++cx) {
+                const int64_t key =
+                    (static_cast<int64_t>(cx) << 32) |
+                    (static_cast<uint32_t>(cy) & 0xFFFFFFFFLL);
+                auto it = spriteSpatialHash_.cells.find(key);
+                if (it == spriteSpatialHash_.cells.end()) continue;
+
+                auto& cell = it->second;
+                cell.erase(std::remove(cell.begin(), cell.end(), spr.gpuHandle.index), cell.end());
+                if (cell.empty()) {
+                    spriteSpatialHash_.cells.erase(it);
+                }
+            }
+        }
+    };
+
+    if (proxy.indexedInGrid) {
+        removeFromGrid(proxy.minCellX, proxy.maxCellX, proxy.minCellY, proxy.maxCellY);
+        proxy.indexedInGrid = false;
+    }
+
+    if (!spr.visible) {
+        proxy.minCellX = 0;
+        proxy.maxCellX = -1;
+        proxy.minCellY = 0;
+        proxy.maxCellY = -1;
+        return;
+    }
+
+    const float minX = proxy.centerX - proxy.halfW;
+    const float maxX = proxy.centerX + proxy.halfW;
+    const float minY = proxy.centerY - proxy.halfH;
+    const float maxY = proxy.centerY + proxy.halfH;
+
+    proxy.minCellX = static_cast<int>(std::floor(minX * spriteSpatialHash_.invCellSize));
+    proxy.maxCellX = static_cast<int>(std::floor(maxX * spriteSpatialHash_.invCellSize));
+    proxy.minCellY = static_cast<int>(std::floor(minY * spriteSpatialHash_.invCellSize));
+    proxy.maxCellY = static_cast<int>(std::floor(maxY * spriteSpatialHash_.invCellSize));
+
+    for (int cy = proxy.minCellY; cy <= proxy.maxCellY; ++cy) {
+        for (int cx = proxy.minCellX; cx <= proxy.maxCellX; ++cx) {
+            const int64_t key =
+                (static_cast<int64_t>(cx) << 32) |
+                (static_cast<uint32_t>(cy) & 0xFFFFFFFFLL);
+            spriteSpatialHash_.cells[key].push_back(spr.gpuHandle.index);
+        }
+    }
+    proxy.indexedInGrid = true;
 }
 
 void RenderSystem::ensureMixedGPUCapacity(uint32_t required) {
@@ -1304,8 +1511,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                                            tileGpuBaseIndex_ * sizeof(GPUSprite));
     }
 
-    uint32_t spriteCount = spriteBuffer_.activeCount();
-    auto spriteView = ctx_.world.view<Transform, Sprite>();
+    const uint32_t spriteCount = static_cast<uint32_t>(activeSpriteSlots_.size());
 
     static std::vector<Drawable> cpuDrawables;
     cpuDrawables.clear();
@@ -1339,43 +1545,6 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         cpuDrawables.push_back(d);
     }
 
-    // 批量更新本帧 dirty 精灵的 GPU transform，只在 per-camera 循环前做一次。
-    // 这样 culling 遍历就只做纯粹的视口裁剪，不再逐 entity 做 ECS 查询。
-    if (!dirtySprites_.empty()) {
-        for (entt::entity e : dirtySprites_) {
-            if (!ctx_.world.valid(e) || !ctx_.world.all_of<Transform, Sprite>(e)) continue;
-            auto& spr = ctx_.world.get<Sprite>(e);
-            if (!spr.gpuHandle.valid()) {
-                allocateGPUSlot(e, spr);
-            }
-            const Transform& tf = ctx_.world.get<Transform>(e);
-            const AnimatorOutput* aout = ctx_.world.try_get<AnimatorOutput>(e);
-            const Transform presentTf =
-                sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(e), alpha);
-            updateGPUSlot(presentTf, spr, aout);
-        }
-        dirtySprites_.clear();
-    }
-
-    // 首帧分配尚未有 gpuHandle 的精灵，在 sync 之前完成。
-    // 此后每帧只有新 spawn 的精灵会走这里，其余精灵 gpuHandle 都已有效。
-    {
-        bool hasNew = false;
-        for (auto [e, tf, spr] : spriteView.each()) {
-            if (spr.gpuHandle.valid()) continue;
-            allocateGPUSlot(e, spr);
-            const Transform presentTf =
-                sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(e), alpha);
-            updateGPUSlot(presentTf, spr);
-            hasNew = true;
-        }
-        if (hasNew) {
-            // 首帧有新的分配，重建 tile cache 以同步 mixed buffer 布局
-            tileGpuCacheSignature_ = 0;
-            rebuildTileGPUCacheIfNeeded();
-        }
-    }
-
     auto tPreSync = std::chrono::high_resolution_clock::now();
     syncSpritesToMixedGPUBuffer();
     auto tMixed = std::chrono::high_resolution_clock::now();
@@ -1396,6 +1565,8 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         const float viewMinY = viewRect.minY;
         const float viewMaxX = viewRect.maxX;
         const float viewMaxY = viewRect.maxY;
+        const bool cameraDrawsWorld =
+            (cam.layerMask & renderPassBit(RenderPass::World)) != 0u;
 
         struct GPUVisible {
             TextureHandle texture;
@@ -1412,6 +1583,60 @@ void RenderSystem::buildCommandBufferGPUDriven() {
 
         std::vector<GPUVisible> gpuDrawables;
         gpuDrawables.reserve(spriteCount + tileGpuItems_.size());
+
+        uint32_t coveredCellCount = 0;
+        auto collectCandidateSpriteSlots = [&](const ViewRect& rect) -> const std::vector<uint32_t>& {
+            visibleSpriteSlotsScratch_.clear();
+            visibleSpriteSlotsScratch_.reserve(activeSpriteSlots_.size());
+            coveredCellCount = 0;
+
+            if (!rect.enabled) {
+                for (uint32_t slotIndex : activeSpriteSlots_) {
+                    if (slotIndex >= spriteCullProxies_.size()) continue;
+                    const SpriteCullProxy& proxy = spriteCullProxies_[slotIndex];
+                    if (!proxy.slotActive || !proxy.visible) continue;
+                    visibleSpriteSlotsScratch_.push_back(slotIndex);
+                }
+                return visibleSpriteSlotsScratch_;
+            }
+
+            uint32_t queryStamp = spriteCullQueryStamp_++;
+            if (queryStamp == 0u) {
+                for (SpriteCullProxy& proxy : spriteCullProxies_) {
+                    proxy.queryStamp = 0u;
+                }
+                spriteCullQueryStamp_ = 2u;
+                queryStamp = 1u;
+            }
+
+            const int minCellX = static_cast<int>(std::floor(rect.minX * spriteSpatialHash_.invCellSize));
+            const int maxCellX = static_cast<int>(std::floor(rect.maxX * spriteSpatialHash_.invCellSize));
+            const int minCellY = static_cast<int>(std::floor(rect.minY * spriteSpatialHash_.invCellSize));
+            const int maxCellY = static_cast<int>(std::floor(rect.maxY * spriteSpatialHash_.invCellSize));
+            coveredCellCount = static_cast<uint32_t>(
+                std::max(0, maxCellX - minCellX + 1) * std::max(0, maxCellY - minCellY + 1));
+
+            for (int cy = minCellY; cy <= maxCellY; ++cy) {
+                for (int cx = minCellX; cx <= maxCellX; ++cx) {
+                    const int64_t key =
+                        (static_cast<int64_t>(cx) << 32) |
+                        (static_cast<uint32_t>(cy) & 0xFFFFFFFFLL);
+                    auto it = spriteSpatialHash_.cells.find(key);
+                    if (it == spriteSpatialHash_.cells.end()) continue;
+
+                    for (uint32_t slotIndex : it->second) {
+                        if (slotIndex >= spriteCullProxies_.size()) continue;
+                        SpriteCullProxy& proxy = spriteCullProxies_[slotIndex];
+                        if (!proxy.slotActive || !proxy.visible || !proxy.indexedInGrid) continue;
+                        if (proxy.queryStamp == queryStamp) continue;
+                        proxy.queryStamp = queryStamp;
+                        visibleSpriteSlotsScratch_.push_back(slotIndex);
+                    }
+                }
+            }
+
+            return visibleSpriteSlotsScratch_;
+        };
 
         for (const CachedGPUTile& tile : tileGpuItems_) {
             if ((cam.layerMask & renderPassBit(RenderPass::World)) == 0) continue;
@@ -1436,36 +1661,35 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         // Sprite and TileMap entries share one mixed GPU buffer. Sprite entries
         // keep their SpriteBuffer slot index; TileMap entries use the cached
         // range starting at tileGpuBaseIndex_.
-        for (auto [ent, eTf, spr] : spriteView.each()) {
-            if (!spr.visible) continue;
-            if (!spr.gpuHandle.valid()) continue;
-            const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
-            if (!slot) continue;
+        if (cameraDrawsWorld) {
+            const std::vector<uint32_t>& candidateSpriteSlots = collectCandidateSpriteSlots(viewRect);
+            stats.cullingCoveredCellCount = coveredCellCount;
+            stats.cullingCandidateSpriteCount =
+                static_cast<uint32_t>(candidateSpriteSlots.size());
+            for (uint32_t slotIndex : candidateSpriteSlots) {
+                if (slotIndex >= spriteCullProxies_.size()) continue;
+                const SpriteCullProxy& proxy = spriteCullProxies_[slotIndex];
+                if (!proxy.slotActive || !proxy.visible) continue;
+                if ((cam.layerMask & renderPassBit(proxy.pass)) == 0u) continue;
 
-            const uint32_t passBits = (slot->flags >> 1) & 0x7;
-            if ((cam.layerMask & (1u << passBits)) == 0) continue;
-
-            if (viewRect.enabled) {
-                const float tx = slot->transform[3];
-                const float ty = slot->transform[7];
-                const float hw = fabsf(slot->transform[0]) * 0.5f;
-                const float hh = fabsf(slot->transform[5]) * 0.5f;
-                if (tx + hw < viewMinX || tx - hw > viewMaxX ||
-                    ty + hh < viewMinY || ty - hh > viewMaxY) {
-                    continue;
+                if (viewRect.enabled) {
+                    if (proxy.centerX + proxy.halfW < viewMinX || proxy.centerX - proxy.halfW > viewMaxX ||
+                        proxy.centerY + proxy.halfH < viewMinY || proxy.centerY - proxy.halfH > viewMaxY) {
+                        continue;
+                    }
                 }
-            }
 
-            gpuDrawables.push_back(GPUVisible{
-                spr.texture,
-                spr.gpuHandle.index,
-                spr.pass,
-                spr.layer,
-                spr.ySort,
-                eTf.y,
-                spr.sortOrder,
-                seq++
-            });
+                gpuDrawables.push_back(GPUVisible{
+                    proxy.texture,
+                    proxy.gpuIndex,
+                    proxy.pass,
+                    proxy.layer,
+                    proxy.ySort,
+                    proxy.y,
+                    proxy.sortKey,
+                    static_cast<int>(proxy.seq)
+                });
+            }
         }
 
         auto tCull1 = std::chrono::high_resolution_clock::now();

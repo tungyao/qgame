@@ -8,6 +8,8 @@
 #include "../../backend/renderer/IRenderDevice.h"
 #include <entt/entt.hpp>
 #include <cstdint>
+#include <unordered_map>
+#include <vector>
 
 namespace backend { class CommandBuffer; }
 
@@ -76,7 +78,14 @@ private:
     void syncSpritesToMixedGPUBuffer();
     void rebuildTileGPUCacheIfNeeded();
     uint64_t computeTileGPUCacheSignature() const;
+    void onSpriteConstruct(entt::registry& reg, entt::entity e);
+    void onSpriteUpdate(entt::registry& reg, entt::entity e);
+    void onTransformConstruct(entt::registry& reg, entt::entity e);
     void onTransformUpdate(entt::registry& reg, entt::entity e);
+    void queueSpriteSync(entt::entity e);
+    void ensureSpriteCullCapacity(uint32_t required);
+    void deactivateSpriteCullProxy(GPUHandle handle);
+    void updateSpriteCullProxy(const Sprite& spr, const GPUSprite& slot, float sortY);
     void markMixedGPUSlotDirty(GPUHandle handle);
     void syncParticleEmitters(float dt);
     std::vector<backend::IRenderDevice::GPUParticleParams>
@@ -111,6 +120,59 @@ private:
         float halfH = 0.f;     // 相机裁剪用半高
     };
 
+    struct SpriteCullProxy {
+        // slotActive 表示这个 gpu slot 当前是否对应一只存活 sprite。
+        // 它与 Sprite::visible 不同：不可见 sprite 仍然可能占着 slot，
+        // 只是不会被插入 spatial hash，也不会进入可见列表。
+        bool slotActive = false;
+        bool visible = false;
+
+        TextureHandle texture;
+        uint32_t gpuIndex = 0;
+        RenderPass pass = RenderPass::World;
+        int layer = 0;
+        bool ySort = false;
+        float y = 0.f;
+        int sortKey = 0;
+        uint32_t seq = 0;
+
+        // 这是 CPU culling 直接读取的预计算 AABB。
+        // 每次 sprite dirty 时更新一次，避免每台相机都从 transform 现算。
+        float centerX = 0.f;
+        float centerY = 0.f;
+        float halfW = 0.f;
+        float halfH = 0.f;
+
+        // 记录当前 AABB 覆盖的格子范围，便于对象移动时做 remove+insert。
+        int minCellX = 0;
+        int maxCellX = -1;
+        int minCellY = 0;
+        int maxCellY = -1;
+        bool indexedInGrid = false;
+
+        // 查询阶段用 stamp 去重：大对象可能跨多个格子，但同一相机只应收集一次。
+        uint32_t queryStamp = 0;
+
+        // activeSpriteSlots_ 中的位置，用 swap-pop 在 O(1) 时间移除。
+        uint32_t activeListIndex = 0;
+    };
+
+    struct SpriteSpatialHash {
+        // 固定 cell size 的 spatial hash。
+        // 2D 渲染里它比四叉树更适合做热路径裁剪：
+        //   - 更新简单（remove+insert）
+        //   - query 只扫相机覆盖的 cell
+        //   - 稀疏世界下不需要预分配整张二维表
+        float cellSize = 128.f;
+        float invCellSize = 1.f / 128.f;
+        std::unordered_map<int64_t, std::vector<uint32_t>> cells;
+
+        void setCellSize(float newCellSize) {
+            cellSize = newCellSize;
+            invCellSize = 1.f / newCellSize;
+        }
+    };
+
     BufferHandle mixedGpuSpriteBuffer_; // GPU-driven shader 读取的统一 Sprite/Tile instance buffer
     uint32_t mixedGpuSpriteCapacity_ = 0; // mixedGpuSpriteBuffer_ 当前可容纳的 GPUSprite 数量
     uint32_t tileGpuBaseIndex_ = 0; // TileMap 缓存实例在 mixed buffer 中的起始索引
@@ -118,13 +180,20 @@ private:
     std::vector<GPUSprite> tileGpuInstances_; // CPU 侧静态 tile 实例缓存，仅 dirty 时上传
     std::vector<CachedGPUTile> tileGpuItems_; // CPU 侧排序/裁剪元数据，指向 tileGpuInstances_ 的 GPU 索引
     std::vector<uint8_t> mixedGpuDirty_; // mixed buffer 的 dirty 位，避免每帧全量重传 sprite 区域
+    std::vector<SpriteCullProxy> spriteCullProxies_; // 与 gpuHandle.index 对齐的 CPU 裁剪缓存
+    std::vector<uint32_t> activeSpriteSlots_; // 当前活跃 sprite 的 gpu slot 列表；cull 关闭时直接遍历它
+    std::vector<uint32_t> visibleSpriteSlotsScratch_; // 每相机复用的查询缓存，避免临时分配
+    std::vector<entt::entity> queuedSpriteSync_; // Transform/Sprite 变化后，等待同步到 GPU+proxy 的实体
+    SpriteSpatialHash spriteSpatialHash_; // 世界 sprite 的空间索引
+    uint32_t spriteCullQueryStamp_ = 1; // 每次 query 递增，用于跨 cell 去重
+    uint32_t spriteCullSequenceCounter_ = 1; // 稳定插入序，排序键完全相同的时候保持帧间稳定
     bool gpuDrivenEnabled_ = false;
     float lastDt_ = 0.f;
-    // 本帧需要更新 GPU transform 的精灵列表（由 on_update<Transform> 驱动），
-    // 在 culling 遍历前批量处理，避免在遍历中逐 entity 检查 dirty 状态。
-    std::vector<entt::entity> dirtySprites_;
     float tileAnimationTimeSeconds_ = 0.f; // TileMap v2 视觉动画时间轴；只影响渲染，不影响碰撞
     entt::connection destroyConnection_;
+    entt::connection spriteConstructConnection_;
+    entt::connection spriteUpdateConnection_;
+    entt::connection transformConstructConnection_;
     entt::connection transformUpdateConnection_;
 };
 

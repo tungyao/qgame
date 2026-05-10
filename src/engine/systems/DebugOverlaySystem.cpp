@@ -34,6 +34,7 @@ bool DebugOverlaySystem::runPhase(UpdatePhase phase, float dt) {
                 "FPS: %.1f\n"
                 "Render Path: %s\n"
                 "Sprites (Total/Vis): %u / %u\n"
+                "Cull Cells/Candidates: %u / %u\n"
                 "CPU syncEntities: %u us\n"
                 "CPU mixedGpuSync: %u us\n"
                 "CPU cullCollect:  %u us\n"
@@ -45,6 +46,7 @@ bool DebugOverlaySystem::runPhase(UpdatePhase phase, float dt) {
                 avgFps,
                 backend::renderPathName(stats.path),
                 stats.spriteCount, stats.visibleSpriteCount,
+                stats.cullingCoveredCellCount, stats.cullingCandidateSpriteCount,
                 stats.syncEntitiesUs,
                 stats.mixedGpuSyncUs,
                 stats.cullingCollectUs,
