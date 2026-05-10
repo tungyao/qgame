@@ -335,14 +335,14 @@ int main(int argc, char** argv) {
     ucam.cullEnabled = false;
     api.addComponent(uiCam, ucam);
 
-    makeText(api, font,
-             "Moving lantern casts tree shadows; water uses sceneColor SSR for trees and light.",
-             28.f, 68.f, 14.f, core::Color{176, 198, 220, 255});
+    //makeText(api, font,
+    //         "Moving lantern casts tree shadows; water uses sceneColor SSR for trees and light.",
+    //         28.f, 68.f, 14.f, core::Color{176, 198, 220, 255});
 
     api.createDebugOverlay(font);
 
 	constexpr bool CREATE_MANY_SPRITES = true;
-	constexpr int SPRITE_GRID_SIZE = 100;  // 30x30 = 900 sprites (可调大到 50x50=2500 测试性能)
+	constexpr int SPRITE_GRID_SIZE = 150;  // 30x30 = 900 sprites (可调大到 50x50=2500 测试性能)
 
 	TextureHandle smallTex;  // 用于性能测试的纹理
 

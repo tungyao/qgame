@@ -1,5 +1,4 @@
 #include "DebugOverlaySystem.h"
-#include "../runtime/EngineContext.h"
 #include "../components/TextComponent.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include <cstdio>
@@ -28,21 +27,31 @@ bool DebugOverlaySystem::runPhase(UpdatePhase phase, float dt) {
         
         if (overlay.updateTimer >= 0.25f) {
             float avgFps = overlay.fpsAccumulator / static_cast<float>(overlay.fpsFrames);
-            const auto& stats = ctx_.renderDevice().frameStats();
+            const auto& stats = ctx_.frameStats;
             
-            char buf[256];
-            std::snprintf(buf, sizeof(buf), 
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
                 "FPS: %.1f\n"
                 "Render Path: %s\n"
                 "Sprites (Total/Vis): %u / %u\n"
+                "CPU syncEntities: %u us\n"
+                "CPU mixedGpuSync: %u us\n"
+                "CPU cullCollect:  %u us\n"
+                "CPU cullSort:     %u us\n"
+                "CPU cullIndex:    %u us\n"
+                "CPU total:        %u us\n"
                 "Draw Calls: %u\n"
-                "GPU Batches: %u\n"
-                "Uploads: %u (%llu B)",
+                "GPU Batches: %u",
                 avgFps,
                 backend::renderPathName(stats.path),
                 stats.spriteCount, stats.visibleSpriteCount,
-                stats.drawCallCount, stats.gpuDrawBatchCount,
-                stats.uploadCallCount, static_cast<unsigned long long>(stats.uploadBytes));
+                stats.syncEntitiesUs,
+                stats.mixedGpuSyncUs,
+                stats.cullingCollectUs,
+                stats.cullingSortUs,
+                stats.cullingIndexUs,
+                stats.totalCpuUs,
+                stats.drawCallCount, stats.gpuDrawBatchCount);
                 
             label.text = buf;
             

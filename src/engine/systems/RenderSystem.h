@@ -120,6 +120,9 @@ private:
     std::vector<uint8_t> mixedGpuDirty_; // mixed buffer 的 dirty 位，避免每帧全量重传 sprite 区域
     bool gpuDrivenEnabled_ = false;
     float lastDt_ = 0.f;
+    // 本帧需要更新 GPU transform 的精灵列表（由 on_update<Transform> 驱动），
+    // 在 culling 遍历前批量处理，避免在遍历中逐 entity 检查 dirty 状态。
+    std::vector<entt::entity> dirtySprites_;
     float tileAnimationTimeSeconds_ = 0.f; // TileMap v2 视觉动画时间轴；只影响渲染，不影响碰撞
     entt::connection destroyConnection_;
     entt::connection transformUpdateConnection_;

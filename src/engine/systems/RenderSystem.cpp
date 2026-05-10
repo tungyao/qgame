@@ -12,6 +12,7 @@
 #include "../../backend/renderer/IRenderDevice.h"
 #include "../../core/Logger.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -385,10 +386,14 @@ void RenderSystem::update(float dt) {
     if (!ctx_.renderToSwapchain) {
         return;
     }
+    auto t0 = std::chrono::high_resolution_clock::now();
+
     lastDt_ = dt;
     tileAnimationTimeSeconds_ += dt;
     syncParticleEmitters(dt);
     syncEntitiesToGPU();
+    auto t1 = std::chrono::high_resolution_clock::now();
+
     spriteBuffer_.advanceFrame();
     spriteBuffer_.uploadDirty();
 
@@ -434,6 +439,18 @@ void RenderSystem::update(float dt) {
         }
         buildCommandBuffer();
     }
+
+    auto tEnd = std::chrono::high_resolution_clock::now();
+
+    stats.syncEntitiesUs = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+    stats.totalCpuUs = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(tEnd - t0).count());
+
+    // 把本帧 RenderSystem 产出的统计数据保存到 EngineContext，这样
+    // DebugOverlaySystem 在 UI phase 读到的就是上一帧的完整结果，
+    // 不会被 beginFrame() 里的 resetFrameStats() 清零。
+    ctx_.frameStats = dev.frameStats();
 }
 
 void RenderSystem::shutdown() {
@@ -536,33 +553,14 @@ void RenderSystem::submitParticlePass(const Camera& cam,
 
 void RenderSystem::onTransformUpdate(entt::registry& reg, entt::entity e) {
     if (reg.all_of<Sprite>(e)) {
-        auto& spr = reg.get<Sprite>(e);
-        spr.gpuDirty = true;
+        dirtySprites_.push_back(e);
     }
 }
 
 void RenderSystem::syncEntitiesToGPU() {
-    auto view = ctx_.world.view<Transform, Sprite>();
-    const float alpha = presentationAlpha(ctx_);
-    for (auto [e, tf, spr] : view.each()) {
-        if (!spr.gpuHandle.valid()) {
-            allocateGPUSlot(e, spr);
-            spr.gpuDirty = true;
-        }
-        // Phase 5.3: 程序化输出每帧重新合成
-        const AnimatorOutput* aout = ctx_.world.try_get<AnimatorOutput>(e);
-        // 带 TransformInterpolation 的实体，即使本帧没有新的 Transform patch，
-        // 只要 alpha 变化，真正应该显示的位置也在变化。因此这类 sprite 必须每帧
-        // 重建一次 GPU transform，而不能只依赖“组件是否 dirty”。
-        const bool presentsInterpolated = ctx_.world.all_of<TransformInterpolation>(e);
-        if (aout) spr.gpuDirty = true;
-        if (spr.gpuDirty || presentsInterpolated) {
-            const Transform presentTf =
-                sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(e), alpha);
-            updateGPUSlot(presentTf, spr, aout);
-            spr.gpuDirty = false;
-        }
-    }
+    // 新精灵的 GPU slot 分配由 culling 遍历兜底处理（检查 gpuHandle.valid()）。
+    // Transform 更新由 dirtySprites_ 批量处理。
+    // 这里不再做 O(N) 遍历。
 }
 
 void RenderSystem::allocateGPUSlot(entt::entity, Sprite& spr) {
@@ -1189,6 +1187,9 @@ void RenderSystem::buildCommandBufferGPUDriven() {
     const int w = (ctx_.windowWidth > 0) ? ctx_.windowWidth : ctx_.window->width();
     const int h = (ctx_.windowHeight > 0) ? ctx_.windowHeight : ctx_.window->height();
     const float alpha = presentationAlpha(ctx_);
+
+    backend::IRenderDevice& dev = ctx_.renderDevice();
+    backend::RenderFrameStats& stats = dev.mutableFrameStats();
     
     struct CamEntry {
         Transform tf;
@@ -1208,8 +1209,7 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                          return a.cam->depth < b.cam->depth;
                      });
 
-    backend::IRenderDevice& dev = ctx_.renderDevice();
-    
+    // dev already declared above at function start
     if (cameras.empty()) {
         backend::IRenderDevice::PassSubmitInfo info;
         info.camera.viewportW = w;
@@ -1303,7 +1303,6 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                                            tileGpuInstances_.size() * sizeof(GPUSprite),
                                            tileGpuBaseIndex_ * sizeof(GPUSprite));
     }
-    syncSpritesToMixedGPUBuffer();
 
     uint32_t spriteCount = spriteBuffer_.activeCount();
     auto spriteView = ctx_.world.view<Transform, Sprite>();
@@ -1340,6 +1339,49 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         cpuDrawables.push_back(d);
     }
 
+    // 批量更新本帧 dirty 精灵的 GPU transform，只在 per-camera 循环前做一次。
+    // 这样 culling 遍历就只做纯粹的视口裁剪，不再逐 entity 做 ECS 查询。
+    if (!dirtySprites_.empty()) {
+        for (entt::entity e : dirtySprites_) {
+            if (!ctx_.world.valid(e) || !ctx_.world.all_of<Transform, Sprite>(e)) continue;
+            auto& spr = ctx_.world.get<Sprite>(e);
+            if (!spr.gpuHandle.valid()) {
+                allocateGPUSlot(e, spr);
+            }
+            const Transform& tf = ctx_.world.get<Transform>(e);
+            const AnimatorOutput* aout = ctx_.world.try_get<AnimatorOutput>(e);
+            const Transform presentTf =
+                sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(e), alpha);
+            updateGPUSlot(presentTf, spr, aout);
+        }
+        dirtySprites_.clear();
+    }
+
+    // 首帧分配尚未有 gpuHandle 的精灵，在 sync 之前完成。
+    // 此后每帧只有新 spawn 的精灵会走这里，其余精灵 gpuHandle 都已有效。
+    {
+        bool hasNew = false;
+        for (auto [e, tf, spr] : spriteView.each()) {
+            if (spr.gpuHandle.valid()) continue;
+            allocateGPUSlot(e, spr);
+            const Transform presentTf =
+                sampleInterpolatedTransform(tf, ctx_.world.try_get<TransformInterpolation>(e), alpha);
+            updateGPUSlot(presentTf, spr);
+            hasNew = true;
+        }
+        if (hasNew) {
+            // 首帧有新的分配，重建 tile cache 以同步 mixed buffer 布局
+            tileGpuCacheSignature_ = 0;
+            rebuildTileGPUCacheIfNeeded();
+        }
+    }
+
+    auto tPreSync = std::chrono::high_resolution_clock::now();
+    syncSpritesToMixedGPUBuffer();
+    auto tMixed = std::chrono::high_resolution_clock::now();
+    stats.mixedGpuSyncUs += static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(tMixed - tPreSync).count());
+
     for (size_t i = 0; i < cameras.size(); ++i) {
         const Transform& tf = cameras[i].tf;
         const Camera&    cam = *cameras[i].cam;
@@ -1365,6 +1407,8 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             int sortKey = 0;
             int seq = 0;
         };
+
+        auto tCull0 = std::chrono::high_resolution_clock::now();
 
         std::vector<GPUVisible> gpuDrawables;
         gpuDrawables.reserve(spriteCount + tileGpuItems_.size());
@@ -1397,8 +1441,6 @@ void RenderSystem::buildCommandBufferGPUDriven() {
             if (!spr.gpuHandle.valid()) continue;
             const GPUSprite* slot = spriteBuffer_.getSlot(spr.gpuHandle);
             if (!slot) continue;
-            const Transform presentTf =
-                sampleInterpolatedTransform(eTf, ctx_.world.try_get<TransformInterpolation>(ent), alpha);
 
             const uint32_t passBits = (slot->flags >> 1) & 0x7;
             if ((cam.layerMask & (1u << passBits)) == 0) continue;
@@ -1420,11 +1462,13 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 spr.pass,
                 spr.layer,
                 spr.ySort,
-                presentTf.y,
+                eTf.y,
                 spr.sortOrder,
                 seq++
             });
         }
+
+        auto tCull1 = std::chrono::high_resolution_clock::now();
 
         std::sort(gpuDrawables.begin(), gpuDrawables.end(),
                   [](const GPUVisible& A, const GPUVisible& B) {
@@ -1442,6 +1486,8 @@ void RenderSystem::buildCommandBufferGPUDriven() {
         if (gpuDrawables.size() > GPUDrivenRenderer::MAX_VISIBLE_SPRITES) {
             gpuDrawables.resize(GPUDrivenRenderer::MAX_VISIBLE_SPRITES);
         }
+
+        auto tCull2 = std::chrono::high_resolution_clock::now();
 
         const uint32_t visibleCount = static_cast<uint32_t>(gpuDrawables.size());
         dev.mutableFrameStats().visibleSpriteCount += visibleCount;
@@ -1462,6 +1508,16 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 batches.back().instanceCount++;
             }
         }
+
+        auto tCull3 = std::chrono::high_resolution_clock::now();
+
+        // 累加耗时到 stats（单相机不走循环时直接赋值，多相机累加）
+        stats.cullingCollectUs += static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(tCull1 - tCull0).count());
+        stats.cullingSortUs += static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(tCull2 - tCull1).count());
+        stats.cullingIndexUs += static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(tCull3 - tCull2).count());
 
         backend::IRenderDevice::PassSubmitInfo info;
         info.camera       = backendCamera;

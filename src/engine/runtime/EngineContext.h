@@ -10,6 +10,7 @@
 #include "FrameScheduler.h"
 #include "../../platform/Window.h"
 #include "../../core/Handle.h"
+#include "../../backend/renderer/IRenderDevice.h"
 #include "../input/InputState.h"
 #include "../assets/AssetManager.h"
 
@@ -46,6 +47,11 @@ public:
     // 3. 后续若接入真正的 drawable/swapchain 像素尺寸，这里也可以成为统一出口。
     int windowWidth = 0;
     int windowHeight = 0;
+
+    // 本帧 RenderSystem 产出的统计数据。DebugOverlay / editor 从 EngineContext
+    // 读取它就一定能拿到“当前帧已经更新完”的值，不再受 resetFrameStats() 时
+    // 机或 phase 顺序的影响。
+    backend::RenderFrameStats frameStats;
 
     uint64_t frameCounter = 0;
     float deltaTime = 0.0f;

@@ -96,6 +96,14 @@ struct RenderFrameStats {
     // queue + staging/ring buffers should drive these numbers down.
     uint64_t uploadBytes = 0;
     uint32_t uploadCallCount = 0;
+
+    // RenderSystem CPU 分阶段耗时 (微秒)。DebugOverlay 用这些字段定位性能瓶颈。
+    uint32_t syncEntitiesUs = 0;
+    uint32_t mixedGpuSyncUs = 0;
+    uint32_t cullingCollectUs = 0;
+    uint32_t cullingSortUs = 0;
+    uint32_t cullingIndexUs = 0;
+    uint32_t totalCpuUs = 0;
 };
 
 enum class BufferUsage : uint32_t {

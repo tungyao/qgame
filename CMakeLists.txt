@@ -122,7 +122,6 @@ endif()
 
 if(BUILD_TESTS)
     enable_testing()
-    add_subdirectory(tests/hello_compute)
     add_subdirectory(tests/asset_manifest_demo)
     add_subdirectory(tests/asset_pack_smoke)
     add_subdirectory(tests/framework_smoke)

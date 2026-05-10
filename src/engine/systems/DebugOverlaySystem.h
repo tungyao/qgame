@@ -1,11 +1,12 @@
 #pragma once
 #include "ISystem.h"
+#include "../runtime/EngineContext.h"
 
 namespace engine {
 
-class EngineContext;
 
 struct DebugOverlayComponent {
+
     float updateTimer = 0.0f;
     float fpsAccumulator = 0.0f;
     int fpsFrames = 0;
