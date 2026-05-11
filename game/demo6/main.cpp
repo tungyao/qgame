@@ -216,10 +216,15 @@ namespace {
 			}
 
 			static constexpr float kPlayerSpeed = 300.0f;
-			ctx_.world.patch<engine::Transform>(player_, [&](engine::Transform& tf) {
-				tf.x += dx * kPlayerSpeed * dt;
-				tf.y += dy * kPlayerSpeed * dt;
+			ctx_.world.patch<engine::RigidBody>(player_, [&](engine::RigidBody& rd) {
+				rd.velocityX = dx * kPlayerSpeed;
+				rd.velocityY = dy * kPlayerSpeed;
 				});
+			//ctx_.world.patch<engine::Transform>(player_, [&](engine::Transform& tf) {
+			//
+			//	tf.x += dx * kPlayerSpeed * dt;
+			//	tf.y += dy * kPlayerSpeed * dt;
+			//	});
 		}
 
 	private:
@@ -238,7 +243,7 @@ int main(int argc, char** argv) {
 	cfg.windowTitle = "QGame Demo6 — TileMap Engine Package Loader";
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
-	cfg.vsync = true;
+	cfg.vsync = false;
 	cfg.debug = true;
 	if (useOpenGL) cfg.renderBackend = engine::RenderBackend::OpenGL;
 
@@ -285,7 +290,7 @@ int main(int argc, char** argv) {
 	wcam.layerMask = engine::renderPassBit(engine::RenderPass::World);
 	wcam.clear = true;
 	wcam.clearColor = core::Color{ 8, 12, 22, 255 };
-	wcam.cullEnabled = false; // don't cull tiles
+	wcam.cullEnabled = true; // don't cull tiles
 	// 关闭相机级 pixelSnap，避免平滑跟随时的顿挫感。
 	// 次像素抖动改在顶点着色器内做屏幕空间 round（方法1），
 	// 这样相机坐标保持浮点平滑，sprite 边缘仍对齐物理像素。
@@ -418,6 +423,7 @@ int main(int argc, char** argv) {
 	// player
 	auto checkerPx = makeCheckerboard(32, 32, 1, { 255,255,255,255 }, { 255,255,255,255 });
 	TextureHandle spriteTex = api.createTextureFromMemory(checkerPx.data(), 32, 32, backend::TextureFilter::Linear);
+	spriteTex = api.loadTexture("C:\\Users\\Administrator\\Downloads\\f0m.png");
 	auto player = api.spawnEntity();
 	engine::Sprite sprite{};
 	sprite.texture = spriteTex;
