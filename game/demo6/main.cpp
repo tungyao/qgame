@@ -181,69 +181,26 @@ namespace {
 		return px;
 	}
 
-	// Demo6CameraFollowSystem 把 demo 层“玩家输入 -> 物理速度”和“物理结果 -> 相机跟随”
-	// 拆成一个真正参与引擎帧调度的 System。
-	//
-	// 这么做的原因是：
-	// 1. 之前 demo6 把控制逻辑写在 scheduler.tick() 之后。
-	//    但 tick() 内部已经执行了：
-	//      Input -> Physics -> UISystem -> RenderSystem -> Present
-	//    所以玩家速度和相机位置都会晚一帧生效。
-	//
-	// 2. 对 RigidBody 来说，“晚一帧写 velocity”最容易引出固定时间步下的偶发停顿：
-	//    某些帧 PhysicsSystem 已经消费完旧速度了，本帧 render 却还在看旧相机，
-	//    观感上就像角色平移时会轻微卡一下。
-	//
-	// 3. 在显式 phase 驱动下，这个系统同时参与两个阶段：
-	//    - GameplayPrePhysics: 负责写玩家 velocity
-	//    - Camera:             负责在世界状态稳定后更新相机
-	//    这样不需要改系统注册顺序，也不会再依赖“谁的 update 恰好写得更早”。
-	class Demo6CameraFollowSystem final : public engine::ISystem {
+	/**
+	 * 玩家输入系统 - 在 GameplayPrePhysics 阶段读取输入并更新玩家 Transform。
+	 *
+	 * 为何不能放在主循环里做（在 ctx.scheduler.tick() 之后）：
+	 * 渲染发生在 Render phase（tick 内部），若位置更新在 tick 之后，则本帧渲染
+	 * 看到的是上一帧末尾的位置，形成一帧延迟。当帧时间抖动时（比如 SDL_GetTicks
+	 * 毫秒精度导致的 dt 跳变），这一帧延迟会把不均匀的帧时间压缩到单帧视觉里，
+	 * 表现为「卡一下然后瞬移」的断断续续。
+	 */
+	class PlayerInputSystem : public engine::ISystem {
 	public:
-		Demo6CameraFollowSystem(engine::EngineContext& ctx,
-			entt::entity player,
-			entt::entity camera,
-			float mapPixelW,
-			float mapPixelH,
-			int tileSize,
-			int fallbackViewportW,
-			int fallbackViewportH)
-			: ctx_(ctx)
-			, player_(player)
-			, camera_(camera)
-			, mapPixelW_(mapPixelW)
-			, mapPixelH_(mapPixelH)
-			, tileSize_(tileSize)
-			, fallbackViewportW_(fallbackViewportW)
-			, fallbackViewportH_(fallbackViewportH) {
-		}
+		PlayerInputSystem(engine::EngineContext& ctx, entt::entity player)
+			: ctx_(ctx), player_(player) {}
 
 		engine::UpdatePhaseMask phaseMask() const override {
-			return engine::updatePhaseBits({
-				engine::UpdatePhase::GameplayPrePhysics,
-				engine::UpdatePhase::Camera
-				});
+			return engine::updatePhaseBit(engine::UpdatePhase::GameplayPrePhysics);
 		}
 
-		void init() override {
-			camFollow.setCritical(50.f);
-			snapCameraToPlayer();
-			// 让弹簧的初始 value 和 target 都对齐到首帧镜头位置，
-			// 避免 onCameraPhase 第一次 update 时从 (0,0) 开始收敛。
-			if (ctx_.world.valid(camera_) && ctx_.world.all_of<engine::Transform>(camera_)) {
-				const auto& camTf = ctx_.world.get<engine::Transform>(camera_);
-				camFollow.snap({ camTf.x, camTf.y });
-			}
-		}
-
-	private:
-		engine::SpringValueVec2 camFollow{};
-
-		void onGameplayPrePhysicsPhase(float /*dt*/) override {
-			if (!ctx_.world.valid(player_) || !ctx_.world.all_of<engine::RigidBody>(player_)) {
-				return;
-			}
-
+	protected:
+		void onGameplayPrePhysicsPhase(float dt) override {
 			float dx = 0.f;
 			float dy = 0.f;
 			if (ctx_.inputState.isKeyDown(SDLK_W) || ctx_.inputState.isKeyDown(SDLK_UP)) dy -= 1.f;
@@ -251,7 +208,6 @@ namespace {
 			if (ctx_.inputState.isKeyDown(SDLK_A) || ctx_.inputState.isKeyDown(SDLK_LEFT)) dx -= 1.f;
 			if (ctx_.inputState.isKeyDown(SDLK_D) || ctx_.inputState.isKeyDown(SDLK_RIGHT)) dx += 1.f;
 
-			// 归一化对角线输入，避免斜向速度比水平/垂直快 sqrt(2)。
 			const float lenSq = dx * dx + dy * dy;
 			if (lenSq > 1.0f) {
 				const float invLen = 1.0f / std::sqrt(lenSq);
@@ -259,158 +215,19 @@ namespace {
 				dy *= invLen;
 			}
 
-			auto& rb = ctx_.world.get<engine::RigidBody>(player_);
-			rb.velocityX = dx * kPlayerSpeed;
-			rb.velocityY = dy * kPlayerSpeed;
+			static constexpr float kPlayerSpeed = 300.0f;
+			ctx_.world.patch<engine::Transform>(player_, [&](engine::Transform& tf) {
+				tf.x += dx * kPlayerSpeed * dt;
+				tf.y += dy * kPlayerSpeed * dt;
+				});
 		}
 
-		void onCameraPhase(float dt) override {
-			if (!ctx_.world.valid(player_) || !ctx_.world.valid(camera_)) {
-				return;
-			}
-
-			if (!ctx_.world.all_of<engine::Transform>(player_) ||
-				!ctx_.world.all_of<engine::Transform, engine::Camera>(camera_)) {
-				return;
-			}
-
-			auto& camTf = ctx_.world.get<engine::Transform>(camera_);
-			auto& cam = ctx_.world.get<engine::Camera>(camera_);
-			const auto& playerTf = ctx_.world.get<engine::Transform>(player_);
-
-			// 这里故意读取 EngineContext 缓存，而不是直接调用 platform::Window：
-			// - demo 目标只链接 engine，不应额外依赖 platform 符号；
-			// - FrameScheduler 会在 Input phase 后同步 resize 结果，因此 Camera phase
-			//   看到的是当前帧最新窗口尺寸。
-			const int viewportW = (ctx_.windowWidth > 0) ? ctx_.windowWidth : fallbackViewportW_;
-			const int viewportH = (ctx_.windowHeight > 0) ? ctx_.windowHeight : fallbackViewportH_;
-			const float effectiveZoom = applyAutoCameraZoom(cam, viewportW, viewportH);
-
-			const auto target = computeObservedPlayerPosition(playerTf);
-			camFollow.target({ target.x, target.y });
-			core::Vec2 camPos = camFollow.update(dt);
-			camTf.x = camPos.x;
-			camTf.y = camPos.y;
-
-			clampCameraToMap(camTf, effectiveZoom, viewportW, viewportH);
-
-			// Transform 被 PhysicsSystem/RenderSystem 订阅；跟随镜头自己改位置后需要 patch，
-			// 这样 GPU 路径和任何依赖 on_update<Transform> 的逻辑都能拿到最新结果。
-			ctx_.world.patch<engine::Transform>(camera_);
-		}
-
-		void snapCameraToPlayer() {
-			if (!ctx_.world.valid(player_) || !ctx_.world.valid(camera_)) {
-				return;
-			}
-			if (!ctx_.world.all_of<engine::Transform>(player_) ||
-				!ctx_.world.all_of<engine::Transform, engine::Camera>(camera_)) {
-				return;
-			}
-
-			auto& camTf = ctx_.world.get<engine::Transform>(camera_);
-			auto& cam = ctx_.world.get<engine::Camera>(camera_);
-			const auto& playerTf = ctx_.world.get<engine::Transform>(player_);
-
-			const int viewportW = (ctx_.windowWidth > 0) ? ctx_.windowWidth : fallbackViewportW_;
-			const int viewportH = (ctx_.windowHeight > 0) ? ctx_.windowHeight : fallbackViewportH_;
-			const float effectiveZoom = applyAutoCameraZoom(cam, viewportW, viewportH);
-
-			// 初始化阶段不做缓动，直接把镜头放到玩家上，再按地图边界夹紧。
-			// 这样首帧渲染和后续 Camera phase 的结果保持一致，不会先看到旧相机。
-			const auto target = computeObservedPlayerPosition(playerTf);
-			camTf.x = target.x;
-			camTf.y = target.y;
-			clampCameraToMap(camTf, effectiveZoom, viewportW, viewportH);
-
-			// 这里必须 patch。直接改引用不会触发 Transform 的 on_update 回调，
-			// RenderSystem 首帧可能仍使用旧相机缓存，视觉上就像“开场没对准”。
-			ctx_.world.patch<engine::Transform>(camera_);
-		}
-
-		engine::Transform computeObservedPlayerPosition(const engine::Transform& playerTf) const {
-			if (!ctx_.systems.has<engine::PhysicsSystem>()) {
-				return playerTf;
-			}
-
-			// demo6 的相机应当跟随“本帧真正会被渲染出来的玩家位置”，而不是固定步物理真值。
-			// 这样 Camera phase、RenderSystem、UIWorldAnchor 会共享同一个表现时刻，
-			// 不会再出现玩家和镜头各自平滑、但彼此相位不一致的顿挫感。
-			const float alpha = ctx_.systems.get<engine::PhysicsSystem>().interpolationAlpha();
-			return engine::sampleInterpolatedTransform(
-				playerTf,
-				ctx_.world.try_get<engine::TransformInterpolation>(player_),
-				alpha);
-		}
-
-		float computeAutoEffectiveZoom(int viewportW, int viewportH) const {
-			const float paddedMapW = mapPixelW_ + tileSize_ * kZoomPaddingTiles * 2.0f;
-			const float paddedMapH = mapPixelH_ + tileSize_ * kZoomPaddingTiles * 2.0f;
-			if (viewportW <= 0 || viewportH <= 0 || paddedMapW <= 0.0f || paddedMapH <= 0.0f) {
-				return 1.0f;
-			}
-
-			const float fitZoomX = static_cast<float>(viewportW) / paddedMapW;
-			const float fitZoomY = static_cast<float>(viewportH) / paddedMapH;
-			return std::max(0.05f, std::min(fitZoomX, fitZoomY));
-		}
-
-		float applyAutoCameraZoom(engine::Camera& cam, int viewportW, int viewportH) const {
-			const float desiredEffectiveZoom = computeAutoEffectiveZoom(viewportW, viewportH);
-			const float referenceH =
-				(cam.referenceViewportHeight > 1.0f) ? cam.referenceViewportHeight : 1.0f;
-
-			if (cam.projectionMode == engine::CameraProjectionMode::FixedVertical) {
-				const float viewportScale = (viewportH > 0)
-					? static_cast<float>(viewportH) / referenceH
-					: 1.0f;
-				cam.zoom = (viewportScale > 0.0f)
-					? (desiredEffectiveZoom / viewportScale)
-					: desiredEffectiveZoom;
-			}
-			else {
-				cam.zoom = desiredEffectiveZoom;
-			}
-			return desiredEffectiveZoom;
-		}
-
-		void clampCameraToMap(engine::Transform& camTf, float effectiveZoom,
-			int viewportW, int viewportH) const {
-			if (effectiveZoom <= 0.0f || viewportW <= 0 || viewportH <= 0) return;
-
-			const float visibleWorldW = static_cast<float>(viewportW) / effectiveZoom;
-			const float visibleWorldH = static_cast<float>(viewportH) / effectiveZoom;
-			const float halfViewW = visibleWorldW * 0.5f;
-			const float halfViewH = visibleWorldH * 0.5f;
-
-			if (mapPixelW_ > visibleWorldW) {
-				camTf.x = std::clamp(camTf.x, halfViewW, mapPixelW_ - halfViewW);
-			}
-
-			if (mapPixelH_ > visibleWorldH) {
-				camTf.y = std::clamp(camTf.y, halfViewH, mapPixelH_ - halfViewH);
-			}
-
-			// 当地图本身比当前视野还小时，不要再把镜头硬锁回地图中心。
-			// 否则玩家一旦离开中心点，跟随结果会立刻被“夹回中心”覆盖，看起来就像
-			// 镜头完全没有跟随。这里选择允许 overscan，优先保证跟随语义成立。
-		}
-
-		static constexpr float kPlayerSpeed = 200.0f;
-		static constexpr float kZoomPaddingTiles = 1.5f;
-		static constexpr float kCameraFollowRate = 7.5f;
-
+	private:
 		engine::EngineContext& ctx_;
-		entt::entity player_ = entt::null;
-		entt::entity camera_ = entt::null;
-		float mapPixelW_ = 0.0f;
-		float mapPixelH_ = 0.0f;
-		int tileSize_ = 0;
-		int fallbackViewportW_ = 1280;
-		int fallbackViewportH_ = 720;
+		entt::entity player_;
 	};
 
-} // namespace
+} // anonymous namespace
 
 int main(int argc, char** argv) {
 	const bool useOpenGL = hasArg(argc, argv, "--opengl");
@@ -428,6 +245,9 @@ int main(int argc, char** argv) {
 	engine::EngineContext ctx;
 	ctx.init(cfg);
 	engine::GameAPI api{ ctx };
+
+	api.loadAssetManifest(QGAME_BAKED_MANIFEST);
+	const engine::FontHandle font = api.loadFontById("font.demo.main");
 
 	// ── load JSON ────────────────────────────────────────────────────────────
 	std::string jsonStr = readFile(pkgPath);
@@ -469,8 +289,20 @@ int main(int argc, char** argv) {
 	// 关闭相机级 pixelSnap，避免平滑跟随时的顿挫感。
 	// 次像素抖动改在顶点着色器内做屏幕空间 round（方法1），
 	// 这样相机坐标保持浮点平滑，sprite 边缘仍对齐物理像素。
-	wcam.pixelSnap = false;
+	wcam.pixelSnap = true;
 	api.addComponent(camEnt, wcam);
+
+	const entt::entity uiCamera = api.spawnEntity();
+	api.addComponent(uiCamera, engine::Transform{ 640.0f, 360.0f });
+	engine::Camera overlayCam{};
+	overlayCam.zoom = 1.0f;
+	overlayCam.primary = true;
+	overlayCam.depth = 1;
+	overlayCam.layerMask = engine::renderPassBit(engine::RenderPass::UI);
+	overlayCam.clear = false;
+	overlayCam.cullEnabled = false;
+	api.addComponent(uiCamera, overlayCam);
+	api.createDebugOverlay(font);
 
 	// ── build TileMap component ──────────────────────────────────────────────
 	engine::TileMap tmap;
@@ -603,17 +435,17 @@ int main(int argc, char** argv) {
 	api.addComponent(player, collider);
 	api.addComponent(player, engine::RigidBody{ 0.f, 0.f, 0.f, false });
 
-	// 在 systems.initAll() 之后新增的 demo system 需要手动 init() 一次。
-	// phase 驱动已经保证它会在 GameplayPrePhysics + Camera 两个阶段被正确调用，
-	// 不再需要改 RenderSystem 的注册顺序。
-	auto& followSystem = ctx.systems.registerSystem<Demo6CameraFollowSystem>(
-		ctx, player, camEnt, mapPixelW, mapPixelH, tileSize, cfg.windowWidth, cfg.windowHeight);
-	followSystem.init();
+	// 注册玩家输入系统（在 systems.initAll() 之后新增的系统需要手动 init）。
+	// 它会在 GameplayPrePhysics 阶段（即 Physics 之前、Render 之前）读取输入
+	// 更新 Transform，从而消除「在主循环里改位置 → 渲染看到的总是上一帧位置」
+	// 导致的断续瞬移问题。
+	auto& playerInputSystem = ctx.systems.registerSystem<PlayerInputSystem>(ctx, player);
 
 	std::fprintf(stdout, "\nControls: WASD/arrows=move player  ESC=quit\n");
 
 	// ── main loop ────────────────────────────────────────────────────────────
 	float t = 0.f;
+
 	while (ctx.scheduler.tick()) {
 		t += ctx.scheduler.deltaTime();
 
