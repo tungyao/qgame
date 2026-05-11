@@ -162,7 +162,7 @@ namespace {
 			return {};
 		}
 
-		TextureHandle tex = api.createTextureFromMemory(pixels, w, h);
+		TextureHandle tex = api.createTextureFromMemory(pixels, w, h, backend::TextureFilter::Linear);
 		outW = w;
 		outH = h;
 		stbi_image_free(pixels);
@@ -466,7 +466,10 @@ int main(int argc, char** argv) {
 	wcam.clear = true;
 	wcam.clearColor = core::Color{ 8, 12, 22, 255 };
 	wcam.cullEnabled = false; // don't cull tiles
-	wcam.pixelSnap = true;
+	// 关闭相机级 pixelSnap，避免平滑跟随时的顿挫感。
+	// 次像素抖动改在顶点着色器内做屏幕空间 round（方法1），
+	// 这样相机坐标保持浮点平滑，sprite 边缘仍对齐物理像素。
+	wcam.pixelSnap = false;
 	api.addComponent(camEnt, wcam);
 
 	// ── build TileMap component ──────────────────────────────────────────────
@@ -502,10 +505,10 @@ int main(int argc, char** argv) {
 			}
 
 			if (tj.contains("collision") && tj["collision"].is_array()) {
-				ts.legacyCollision = tj["collision"].get<std::vector<uint8_t>>();
+				std::vector<uint8_t> legacyCollision = tj["collision"].get<std::vector<uint8_t>>();
 				if (ts.collisions.empty()) {
-					for (int local = 0; local < static_cast<int>(ts.legacyCollision.size()); ++local) {
-						if (ts.legacyCollision[local] == 0) continue;
+					for (int local = 0; local < static_cast<int>(legacyCollision.size()); ++local) {
+						if (legacyCollision[local] == 0) continue;
 						engine::TileMap::TileCollision collision;
 						collision.gid = ts.firstGid + local;
 						collision.shape = engine::TileMap::TileCollisionShape::Full;
@@ -522,7 +525,7 @@ int main(int argc, char** argv) {
 				auto atlas = makeBuiltinAtlas(tileSize, ts.columns, ts.count);
 				int atlasW = ts.columns * tileSize;
 				int atlasH = ((ts.count + ts.columns - 1) / ts.columns) * tileSize;
-				ts.texture = api.createTextureFromMemory(atlas.data(), atlasW, atlasH);
+				ts.texture = api.createTextureFromMemory(atlas.data(), atlasW, atlasH, backend::TextureFilter::Linear);
 				std::fprintf(stdout, "  tileset[%d] BUILTIN %s  gid=%d..%d  cols=%d  tex=%dx%d\n",
 					tsIdx, name.c_str(), ts.firstGid,
 					ts.firstGid + ts.count - 1, ts.columns, atlasW, atlasH);
@@ -582,7 +585,7 @@ int main(int argc, char** argv) {
 
 	// player
 	auto checkerPx = makeCheckerboard(32, 32, 1, { 255,255,255,255 }, { 255,255,255,255 });
-	TextureHandle spriteTex = api.createTextureFromMemory(checkerPx.data(), 32, 32);
+	TextureHandle spriteTex = api.createTextureFromMemory(checkerPx.data(), 32, 32, backend::TextureFilter::Linear);
 	auto player = api.spawnEntity();
 	engine::Sprite sprite{};
 	sprite.texture = spriteTex;

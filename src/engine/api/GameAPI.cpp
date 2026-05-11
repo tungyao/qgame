@@ -226,11 +226,13 @@ AssetManager& GameAPI::assetManager() {
     return ctx_.assetManager;
 }
 
-TextureHandle GameAPI::createTextureFromMemory(const void* rgbaPixels, int w, int h) {
+TextureHandle GameAPI::createTextureFromMemory(const void* rgbaPixels, int w, int h,
+                                                      backend::TextureFilter filter) {
     backend::TextureDesc desc{};
     desc.data   = rgbaPixels;
     desc.width  = w;
     desc.height = h;
+    desc.filter = filter;
     return ctx_.renderDevice().createTexture(desc);
 }
 
