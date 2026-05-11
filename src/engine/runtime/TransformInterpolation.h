@@ -23,6 +23,7 @@ namespace engine {
 struct TransformInterpolation {
     Transform previous;
     bool initialized = false;
+    bool disabled    = false;  // true = 禁用插值，渲染直接用 current
 };
 
 inline float normalizeRadians(float angle) {
@@ -53,7 +54,7 @@ inline Transform interpolateTransform(const Transform& previous,
 inline Transform sampleInterpolatedTransform(const Transform& current,
                                              const TransformInterpolation* interpolation,
                                              float alpha) {
-    if (!interpolation || !interpolation->initialized) {
+    if (!interpolation || !interpolation->initialized || interpolation->disabled) {
         return current;
     }
     return interpolateTransform(interpolation->previous, current, alpha);

@@ -190,6 +190,10 @@ void GameAPI::releaseTexture(TextureHandle h) {
     ctx_.assetManager.releaseTexture(h);
 }
 
+bool GameAPI::getTextureDimensions(TextureHandle h, int& outW, int& outH) const {
+    return ctx_.renderDevice().getTextureDimensions(h, outW, outH);
+}
+
 FontHandle GameAPI::loadFont(const char* path) {
     return ctx_.assetManager.loadFont(path);
 }

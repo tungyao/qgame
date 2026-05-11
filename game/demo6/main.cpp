@@ -216,15 +216,20 @@ namespace {
 			}
 
 			static constexpr float kPlayerSpeed = 300.0f;
+			ctx_.world.patch<engine::Transform>(player_, [&](engine::Transform& tf) {
+
+				tf.x += dx * kPlayerSpeed * dt;
+				tf.y += dy * kPlayerSpeed * dt;
+				});
 			ctx_.world.patch<engine::RigidBody>(player_, [&](engine::RigidBody& rd) {
 				rd.velocityX = dx * kPlayerSpeed;
 				rd.velocityY = dy * kPlayerSpeed;
 				});
-			//ctx_.world.patch<engine::Transform>(player_, [&](engine::Transform& tf) {
-			//
-			//	tf.x += dx * kPlayerSpeed * dt;
-			//	tf.y += dy * kPlayerSpeed * dt;
-			//	});
+				// 手动同步插值状态，消除本帧延迟
+			//if (auto* interp = ctx_.world.try_get<engine::TransformInterpolation>(player_)) {
+			//	interp->previous = ctx_.world.get<engine::Transform>(player_);
+			//}
+			
 		}
 
 	private:
@@ -243,13 +248,18 @@ int main(int argc, char** argv) {
 	cfg.windowTitle = "QGame Demo6 — TileMap Engine Package Loader";
 	cfg.windowWidth = 1280;
 	cfg.windowHeight = 720;
-	cfg.vsync = false;
+	cfg.vsync = true;
 	cfg.debug = true;
 	if (useOpenGL) cfg.renderBackend = engine::RenderBackend::OpenGL;
 
 	engine::EngineContext ctx;
 	ctx.init(cfg);
 	engine::GameAPI api{ ctx };
+
+	// 让物理更新匹配真实帧率，消除固定步长在高帧率下的跳动/拖影
+	if (ctx.systems.has<engine::PhysicsSystem>()) {
+		ctx.systems.get<engine::PhysicsSystem>().setVariableTimestep(true);
+	}
 
 	api.loadAssetManifest(QGAME_BAKED_MANIFEST);
 	const engine::FontHandle font = api.loadFontById("font.demo.main");
@@ -424,10 +434,15 @@ int main(int argc, char** argv) {
 	auto checkerPx = makeCheckerboard(32, 32, 1, { 255,255,255,255 }, { 255,255,255,255 });
 	TextureHandle spriteTex = api.createTextureFromMemory(checkerPx.data(), 32, 32, backend::TextureFilter::Linear);
 	spriteTex = api.loadTexture("C:\\Users\\Administrator\\Downloads\\f0m.png");
+	//ctx.renderDevice().getTextureDimensions(spriteTex, w, h);
+	int w = 0, h = 0;
+	if (api.getTextureDimensions(spriteTex, w, h)) {
+		printf("texture: %dx%d\n", w, h);
+	}
 	auto player = api.spawnEntity();
 	engine::Sprite sprite{};
 	sprite.texture = spriteTex;
-	sprite.srcRect = { 0, 0, 32, 32 };
+	sprite.srcRect = { 0, 0, w, h };
 	sprite.layer = 2;
 	sprite.pass = engine::RenderPass::World;
 	engine::Transform transform{};

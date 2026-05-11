@@ -140,6 +140,8 @@ public:
     // ── Asset ─────────────────────────────────────────────────────────────
     TextureHandle loadTexture(const char* assetPath);
     void          releaseTexture(TextureHandle h);
+    /** 查询已加载纹理的宽高。返回 false 表示 handle 无效。 */
+    bool          getTextureDimensions(TextureHandle h, int& outW, int& outH) const;
     FontHandle    loadFont(const char* assetPath);
     void          releaseFont(FontHandle h);
     bool          loadAssetManifest(const char* path);

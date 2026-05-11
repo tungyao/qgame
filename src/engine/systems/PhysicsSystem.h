@@ -75,6 +75,18 @@ public:
     float accumulatorSeconds() const { return accumulator_; }
 
     /**
+     * 设置是否使用可变时间步（匹配真实渲染帧率）。
+     * true  : 每帧直接用 dt 积分，位置更新频率与渲染帧率一致，无插值延迟。
+     * false : 默认固定时间步（60Hz），保证物理一致性。
+     *
+     * 建议：
+     * - 需要严格可重现的物理（平台跳跃精度、网络同步）→ false
+     * - 玩家直接控制的角色追求跟手、流畅 → true
+     */
+    void setVariableTimestep(bool enable) { variableTimestep_ = enable; }
+    bool variableTimestep() const { return variableTimestep_; }
+
+    /**
      * 返回“当前渲染时刻位于下一个物理步之前的比例”。
      *
      * 解释：
@@ -167,6 +179,7 @@ private:
     float fixedTimestep_ = 1.f / 60.f;  // 固定时间步（默认 60Hz）
     float accumulator_ = 0.f;    // 时间累积器
     bool steppingPhysics_ = false; // true 时 Transform 更新来自 fixed-step，不应触发 snap 逻辑
+    bool variableTimestep_ = false; // true = 每帧用真实 dt 积分
     entt::connection transformUpdateConnection_;
 
     void integrateVelocities(float dt);  // 速度积分

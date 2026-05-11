@@ -33,6 +33,26 @@ void PhysicsSystem::shutdown() {
  * - 剩余时间保留到下一帧
  */
 void PhysicsSystem::update(float dt) {
+    if (variableTimestep_) {
+        // 可变时间步：每帧直接用真实 dt 积分，匹配渲染帧率。
+        // 可变时间步下不保留插值历史，避免固定步插值带来的那帧延迟。
+        snapshotInterpolatedBodiesForStep();
+        steppingPhysics_ = true;
+        integrateVelocities(dt);
+        resolveCollisions();
+        steppingPhysics_ = false;
+        // 把 previous 追到 current，让渲染层直接显示最新位置
+        auto snapView = world_.view<Transform, RigidBody>();
+        for (auto [e, tf, rb] : snapView.each()) {
+            (void)rb;
+            if (auto* interpolation = world_.try_get<TransformInterpolation>(e)) {
+                interpolation->previous = tf;
+            }
+        }
+        accumulator_ = 0.f;
+        return;
+    }
+
     accumulator_ += dt;
     while (accumulator_ >= fixedTimestep_) {
         snapshotInterpolatedBodiesForStep();
@@ -47,10 +67,10 @@ void PhysicsSystem::update(float dt) {
 void PhysicsSystem::snapshotInterpolatedBodiesForStep() {
     auto view = world_.view<Transform, RigidBody>();
     for (auto [e, tf, rb] : view.each()) {
-        (void)rb;
         auto& interpolation = world_.get_or_emplace<TransformInterpolation>(e);
         interpolation.previous = tf;
         interpolation.initialized = true;
+        interpolation.disabled  = !rb.interpolate;
     }
 }
 
