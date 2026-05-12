@@ -3,483 +3,519 @@
 
 #include <cstdio>
 #include <cstring>
-#include <string>
+#include <cstdint>
 #include <vector>
-#include <fstream>
-#include <sstream>
-#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <ctime>
+#include <algorithm>
 
-#include <engine/anim/SpringValue.h>
 #include <engine/api/GameAPI.h>
-#include <engine/components/PhysicsComponents.h>
 #include <engine/components/RenderComponents.h>
 #include <engine/runtime/EngineConfig.h>
 #include <engine/runtime/EngineContext.h>
 #include <engine/systems/ISystem.h>
-#include <engine/systems/PhysicsSystem.h>
-#include <engine/runtime/TransformInterpolation.h>
 
-#include <stb_image.h>
-#include <nlohmann/json.hpp>
+// ═══════════════════════════════════════════════════════════════════════
+//  可配置参数
+// ═══════════════════════════════════════════════════════════════════════
+// 命令行: --speed <px/s>
 
-namespace {
+constexpr float kDefaultSpeed       = 220.0f;    // 蛇头移动速度 (像素/秒)
+constexpr float kSegmentSpacing     = 24.0f;     // 身体段中心间距 (像素)
+constexpr float kSegmentRadius      = 10.0f;     // 身体段视觉半径
+constexpr float kFoodRadius         = 8.0f;      // 食物半径
+constexpr float kPlayMinX           = 100.0f;    // 游戏区域边界
+constexpr float kPlayMaxX           = 1180.0f;
+constexpr float kPlayMinY           = 60.0f;
+constexpr float kPlayMaxY           = 660.0f;
+constexpr int   kInitialBody        = 5;         // 初始身体段数
+constexpr float kSpeedUpPerFive     = 15.0f;     // 每吃 5 个食物速度增量
 
-	constexpr const char* kBuiltinColors[] = {
-		"#5a9f4d", "#6fb85f", "#a47b48", "#7f5f3b",
-		"#4a8cbf", "#3d76a3", "#c9b36a", "#d9cf8f",
-		"#6d737a", "#89919a", "#9c5d4e", "#bd7a69",
-		"#2f6f43", "#255838", "#b7b7b7", "#e3e3e3"
-	};
+// ═══════════════════════════════════════════════════════════════════════
+//  方向辅助
+// ═══════════════════════════════════════════════════════════════════════
 
-	bool hasArg(int argc, char** argv, const char* name) {
-		for (int i = 1; i < argc; ++i) {
-			if (std::strcmp(argv[i], name) == 0) return true;
-		}
-		return false;
-	}
+enum class SnakeDir : uint8_t { Right = 0, Down, Left, Up };
 
-	const char* getArg(int argc, char** argv, const char* name, const char* defVal) {
-		for (int i = 1; i < argc - 1; ++i) {
-			if (std::strcmp(argv[i], name) == 0) return argv[i + 1];
-		}
-		return defVal;
-	}
+static void dirVector(SnakeDir d, float& dx, float& dy) {
+    static constexpr float kDirs[4][2] = {{1,0},{0,1},{-1,0},{0,-1}};
+    auto i = static_cast<int>(d) & 3;
+    dx = kDirs[i][0];
+    dy = kDirs[i][1];
+}
 
-	core::Color parseHexColor(const char* hex) {
-		if (!hex || hex[0] != '#') return core::Color::White;
-		unsigned int r = 0, g = 0, b = 0;
-		if (std::sscanf(hex + 1, "%02x%02x%02x", &r, &g, &b) == 3) {
-			return core::Color{ static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b), 255 };
-		}
-		return core::Color::White;
-	}
+static bool isOpposite(SnakeDir a, SnakeDir b) {
+    return (static_cast<int>(a) + 2) % 4 == static_cast<int>(b);
+}
 
-	/**
-	 * demo6 直接从 engine package JSON 构造 TileMap，因此这里需要和运行时
-	 * ComponentJson 的 v2 约定保持一致，显式解析字符串 shape。
-	 */
-	engine::TileMap::TileCollisionShape parseTileCollisionShape(const nlohmann::json& j, const char* key) {
-		const std::string value = j.value(key, "none");
-		if (value == "full") return engine::TileMap::TileCollisionShape::Full;
-		if (value == "rect") return engine::TileMap::TileCollisionShape::Rect;
-		if (value == "polygon") return engine::TileMap::TileCollisionShape::Polygon;
-		if (value == "oneWay") return engine::TileMap::TileCollisionShape::OneWay;
-		if (value == "trigger") return engine::TileMap::TileCollisionShape::Trigger;
-		return engine::TileMap::TileCollisionShape::None;
-	}
+// ═══════════════════════════════════════════════════════════════════════
+//  ECS 组件
+// ═══════════════════════════════════════════════════════════════════════
 
-	std::string readFile(const std::string& path) {
-		std::ifstream ifs(path, std::ios::binary);
-		if (!ifs.is_open()) return {};
-		std::ostringstream oss;
-		oss << ifs.rdbuf();
-		return oss.str();
-	}
+struct SnakeHead {
+    SnakeDir   direction      = SnakeDir::Right;
+    SnakeDir   nextDir        = SnakeDir::Right;
+    float      speed          = kDefaultSpeed;
+    bool       alive          = true;
+    int        score          = 0;
+    int        pendingGrow    = 0;
+    std::vector<entt::entity> body;
+    std::deque<std::pair<float, float>> trail; // 蛇头路径轨迹
+};
 
-	// ── base64 decode ────────────────────────────────────────────────────────────────
-	std::string base64Decode(const std::string& input) {
-		static const char kTable[] =
-			"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-		static int kDec[256];
-		static bool kInit = false;
-		if (!kInit) {
-			kInit = true;
-			for (int i = 0; i < 256; ++i) kDec[i] = -1;
-			for (int i = 0; i < 64; ++i) kDec[static_cast<unsigned char>(kTable[i])] = i;
-		}
+struct SnakeFood {};
 
-		std::string out;
-		out.reserve(input.size() * 3 / 4);
-		int val = 0, bits = 0;
-		for (char c : input) {
-			int idx = kDec[static_cast<unsigned char>(c)];
-			if (idx < 0) continue;
-			val = (val << 6) | idx;
-			bits += 6;
-			if (bits >= 8) {
-				bits -= 8;
-				out.push_back(static_cast<char>((val >> bits) & 0xFF));
-			}
-		}
-		return out;
-	}
+// ═══════════════════════════════════════════════════════════════════════
+//  SnakeSystem
+// ═══════════════════════════════════════════════════════════════════════
 
-	// ── procedural builtin tileset atlas ─────────────────────────────────────────────
-	std::vector<uint8_t> makeBuiltinAtlas(int tileSize, int cols, int count) {
-		int rows = (count + cols - 1) / cols;
-		int w = cols * tileSize;
-		int h = rows * tileSize;
-		std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4, 0);
+class SnakeSystem : public engine::ISystem {
+public:
+    TextureHandle headTex;
+    TextureHandle bodyTex;
+    TextureHandle foodTex;
 
-		for (int ti = 0; ti < count; ++ti) {
-			int cx = (ti % cols) * tileSize;
-			int cy = (ti / cols) * tileSize;
-			core::Color base = parseHexColor(kBuiltinColors[ti % 16]);
+    SnakeSystem(engine::EngineContext& ctx, entt::entity head)
+        : ctx_(ctx), head_(head) {}
 
-			for (int dy = 0; dy < tileSize; ++dy) {
-				for (int dx = 0; dx < tileSize; ++dx) {
-					size_t i = (static_cast<size_t>(cy + dy) * w + (cx + dx)) * 4;
-					px[i + 0] = base.r;
-					px[i + 1] = base.g;
-					px[i + 2] = base.b;
-					px[i + 3] = 255;
-				}
-			}
-			// lighter overlay stripe (matches editor appearance)
-			int overlayH = std::max(2, tileSize * 3 / 16);
-			for (int dy = 3; dy < 3 + overlayH && dy < tileSize; ++dy) {
-				for (int dx = 3; dx < tileSize - 6; ++dx) {
-					if (dx < 0 || dx >= tileSize) continue;
-					size_t i = (static_cast<size_t>(cy + dy) * w + (cx + dx)) * 4;
-					px[i + 0] = std::min(255, px[i + 0] + 40);
-					px[i + 1] = std::min(255, px[i + 1] + 40);
-					px[i + 2] = std::min(255, px[i + 2] + 40);
-				}
-			}
-		}
-		return px;
-	}
+    engine::UpdatePhaseMask phaseMask() const override {
+        return engine::updatePhaseBit(engine::UpdatePhase::GameplayPrePhysics);
+    }
 
-	// ── decode data:image/...;base64,... → RGBA pixels ──────────────────────────────
-	TextureHandle textureFromDataUrl(engine::GameAPI& api,
-		const std::string& dataUrl,
-		int& outW, int& outH) {
-		if (dataUrl.empty()) return {};
+    void spawnFood() {
+        auto& reg = ctx_.world;
+        auto food = reg.create();
+        float margin = kFoodRadius + 4.0f;
+        float fx = kPlayMinX + margin
+                 + static_cast<float>(std::rand()) / RAND_MAX
+                 * (kPlayMaxX - kPlayMinX - 2.0f * margin);
+        float fy = kPlayMinY + margin
+                 + static_cast<float>(std::rand()) / RAND_MAX
+                 * (kPlayMaxY - kPlayMinY - 2.0f * margin);
 
-		auto pos = dataUrl.find(";base64,");
-		if (pos == std::string::npos) return {};
+        reg.emplace<engine::Transform>(food, engine::Transform{ fx, fy });
+        engine::Sprite sp;
+        sp.texture = foodTex;
+        sp.srcRect = {0.f, 0.f, kFoodRadius * 2, kFoodRadius * 2};
+        sp.layer   = 2;
+        sp.visible = true;
+        sp.tint    = core::Color{220, 40, 40, 255};
+        sp.pivotX  = 0.5f;
+        sp.pivotY  = 0.5f;
+        sp.pass    = engine::RenderPass::World;
+        reg.emplace<engine::Sprite>(food, sp);
+        reg.emplace<SnakeFood>(food);
+    }
 
-		std::string raw = base64Decode(dataUrl.substr(pos + 8));
-		if (raw.empty()) return {};
+    void restart(entt::entity headEntity) {
+        head_ = headEntity;
+        auto* snake = ctx_.world.try_get<SnakeHead>(head_);
+        if (snake) {
+            for (auto seg : snake->body)
+                if (ctx_.world.valid(seg))
+                    ctx_.world.destroy(seg);
+            snake->body.clear();
+        }
 
-		int w = 0, h = 0, ch = 0;
-		unsigned char* pixels = stbi_load_from_memory(
-			reinterpret_cast<const stbi_uc*>(raw.data()),
-			static_cast<int>(raw.size()), &w, &h, &ch, 4);
-		if (!pixels) {
-			std::fprintf(stderr, "stbi failed: %s\n", stbi_failure_reason());
-			return {};
-		}
+        for (auto f : ctx_.world.view<SnakeFood>())
+            ctx_.world.destroy(f);
 
-		TextureHandle tex = api.createTextureFromMemory(pixels, w, h, backend::TextureFilter::Linear);
-		outW = w;
-		outH = h;
-		stbi_image_free(pixels);
-		return tex;
-	}
+        if (!snake) return;
 
-	static std::vector<uint8_t> makeCheckerboard(int w, int h, int cellSize, core::Color a, core::Color b) {
-		std::vector<uint8_t> px(w * h * 4);
-		for (int y = 0; y < h; ++y)
-			for (int x = 0; x < w; ++x) {
-				bool even = ((x / cellSize) + (y / cellSize)) % 2 == 0;
-				core::Color c = even ? a : b;
-				int i = (y * w + x) * 4;
-				px[i] = c.r; px[i + 1] = c.g; px[i + 2] = c.b; px[i + 3] = c.a;
-			}
-		return px;
-	}
+        auto* headTF = ctx_.world.try_get<engine::Transform>(head_);
+        if (headTF) { headTF->x = 640.f; headTF->y = 360.f; }
 
-	/**
-	 * 玩家输入系统 - 在 GameplayPrePhysics 阶段读取输入并更新玩家 Transform。
-	 *
-	 * 为何不能放在主循环里做（在 ctx.scheduler.tick() 之后）：
-	 * 渲染发生在 Render phase（tick 内部），若位置更新在 tick 之后，则本帧渲染
-	 * 看到的是上一帧末尾的位置，形成一帧延迟。当帧时间抖动时（比如 SDL_GetTicks
-	 * 毫秒精度导致的 dt 跳变），这一帧延迟会把不均匀的帧时间压缩到单帧视觉里，
-	 * 表现为「卡一下然后瞬移」的断断续续。
-	 */
-	class PlayerInputSystem : public engine::ISystem {
-	public:
-		PlayerInputSystem(engine::EngineContext& ctx, entt::entity player)
-			: ctx_(ctx), player_(player) {}
+        snake->direction   = SnakeDir::Right;
+        snake->nextDir     = SnakeDir::Right;
+        snake->alive       = true;
+        snake->score       = 0;
+        snake->pendingGrow = 0;
+        snake->speed       = kDefaultSpeed;
+        snake->trail.clear();
 
-		engine::UpdatePhaseMask phaseMask() const override {
-			return engine::updatePhaseBit(engine::UpdatePhase::GameplayPrePhysics);
-		}
+        if (headTF) {
+            // 预填充虚拟路径点，使身体段从第 1 帧就有足够路径历史
+            {
+                float step = kSegmentSpacing / 4.0f; // ~6px 精度
+                int vCount = (kInitialBody + 1) * static_cast<int>(kSegmentSpacing / step) + 6;
+                for (int i = vCount; i >= 0; --i)
+                    snake->trail.push_back({headTF->x - i * step, headTF->y});
+            }
+            engine::Sprite bodySp;
+            bodySp.texture = bodyTex;
+            bodySp.srcRect = {0.f, 0.f, kSegmentRadius * 2, kSegmentRadius * 2};
+            bodySp.layer   = 2;
+            bodySp.visible = true;
+            bodySp.tint    = core::Color{30, 150, 30, 255};
+            bodySp.pivotX  = 0.5f;
+            bodySp.pivotY  = 0.5f;
+            bodySp.pass    = engine::RenderPass::World;
 
-	protected:
-		void onGameplayPrePhysicsPhase(float dt) override {
-			float dx = 0.f;
-			float dy = 0.f;
-			if (ctx_.inputState.isKeyDown(SDLK_W) || ctx_.inputState.isKeyDown(SDLK_UP)) dy -= 1.f;
-			if (ctx_.inputState.isKeyDown(SDLK_S) || ctx_.inputState.isKeyDown(SDLK_DOWN)) dy += 1.f;
-			if (ctx_.inputState.isKeyDown(SDLK_A) || ctx_.inputState.isKeyDown(SDLK_LEFT)) dx -= 1.f;
-			if (ctx_.inputState.isKeyDown(SDLK_D) || ctx_.inputState.isKeyDown(SDLK_RIGHT)) dx += 1.f;
+            for (int i = 1; i <= kInitialBody; ++i) {
+                auto seg = ctx_.world.create();
+                ctx_.world.emplace<engine::Transform>(seg,
+                    engine::Transform{
+                        headTF->x - i * kSegmentSpacing,
+                        headTF->y
+                    });
+                ctx_.world.emplace<engine::Sprite>(seg, bodySp);
+                snake->body.push_back(seg);
+            }
+        }
 
-			const float lenSq = dx * dx + dy * dy;
-			if (lenSq > 1.0f) {
-				const float invLen = 1.0f / std::sqrt(lenSq);
-				dx *= invLen;
-				dy *= invLen;
-			}
+        spawnFood();
+    }
 
-			static constexpr float kPlayerSpeed = 300.0f;
-			ctx_.world.patch<engine::Transform>(player_, [&](engine::Transform& tf) {
+protected:
+    void onGameplayPrePhysicsPhase(float dt) override {
+        auto* snake = ctx_.world.try_get<SnakeHead>(head_);
+        if (!snake || !snake->alive) return;
 
-				tf.x += dx * kPlayerSpeed * dt;
-				tf.y += dy * kPlayerSpeed * dt;
-				});
-			ctx_.world.patch<engine::RigidBody>(player_, [&](engine::RigidBody& rd) {
-				rd.velocityX = dx * kPlayerSpeed;
-				rd.velocityY = dy * kPlayerSpeed;
-				});
-				// 手动同步插值状态，消除本帧延迟
-			//if (auto* interp = ctx_.world.try_get<engine::TransformInterpolation>(player_)) {
-			//	interp->previous = ctx_.world.get<engine::Transform>(player_);
-			//}
-			
-		}
+        // ── 1. WASD input ──
+        // 使用 isKeyJustPressed（按下即转），不依赖持续按键状态，
+        // 避免多键同时按下时 else-if 链产生竞争导致蛇卡顿。
+        {
+            auto& input = ctx_.inputState;
+            SnakeDir newDir = snake->direction;
+            bool changed = false;
+            if (input.isKeyJustPressed(SDLK_W) || input.isKeyJustPressed(SDLK_UP)) {
+                newDir = SnakeDir::Up;    changed = true;
+            }
+            if (input.isKeyJustPressed(SDLK_S) || input.isKeyJustPressed(SDLK_DOWN)) {
+                newDir = SnakeDir::Down;  changed = true;
+            }
+            if (input.isKeyJustPressed(SDLK_A) || input.isKeyJustPressed(SDLK_LEFT)) {
+                newDir = SnakeDir::Left;  changed = true;
+            }
+            if (input.isKeyJustPressed(SDLK_D) || input.isKeyJustPressed(SDLK_RIGHT)) {
+                newDir = SnakeDir::Right; changed = true;
+            }
+            if (changed && !isOpposite(newDir, snake->direction))
+                snake->nextDir = newDir;
+        }
 
-	private:
-		engine::EngineContext& ctx_;
-		entt::entity player_;
-	};
+        // ── 2. 立即转弯 ──
+        snake->direction = snake->nextDir;
 
-} // anonymous namespace
+        // ── 3. 蛇头连续移动 ──
+        auto* headTF = ctx_.world.try_get<engine::Transform>(head_);
+        if (!headTF) return;
+
+        float dx, dy;
+        dirVector(snake->direction, dx, dy);
+        float newX = headTF->x + dx * snake->speed * dt;
+        float newY = headTF->y + dy * snake->speed * dt;
+
+        // ── 4. 墙壁碰撞 ──
+        if (newX < kPlayMinX || newX > kPlayMaxX ||
+            newY < kPlayMinY || newY > kPlayMaxY) {
+            snake->alive = false;
+            return;
+        }
+        headTF->x = newX;
+        headTF->y = newY;
+
+        // ── 5. 记录轨迹 ──
+        snake->trail.push_back({headTF->x, headTF->y});
+
+        // ── 6. 身体沿轨迹定位 ──
+        // 从蛇头沿轨迹向后行走，每段距离 = kSegmentSpacing
+        {
+            size_t segIdx = 0;
+            float targetDist = kSegmentSpacing;
+            float accum = 0.f;
+            auto prev = snake->trail.rbegin();               // ← 最新的轨迹点（蛇头）
+            auto it   = prev; ++it;                           // ← 其前一个点
+
+            while (it != snake->trail.rend() && segIdx < snake->body.size()) {
+                float dx = prev->first  - it->first;
+                float dy = prev->second - it->second;
+                float segLen = std::sqrt(dx*dx + dy*dy);
+                accum += segLen;
+
+                while (accum >= targetDist && segIdx < snake->body.size()) {
+                    float overshoot = accum - targetDist;     // 越过目标多远
+                    float t = (segLen > 0.001f)
+                        ? std::clamp(1.f - overshoot / segLen, 0.f, 1.f)
+                        : 0.f;
+                    auto* tf = ctx_.world.try_get<engine::Transform>(snake->body[segIdx]);
+                    if (tf) {
+                        tf->x = prev->first + (it->first - prev->first) * t;
+                        tf->y = prev->second + (it->second - prev->second) * t;
+                    }
+                    targetDist += kSegmentSpacing;
+                    ++segIdx;
+                }
+
+                prev = it;
+                ++it;
+            }
+
+            // 轨迹不够长 → 剩余段塞到最旧点
+            while (segIdx < snake->body.size()) {
+                auto* tf = ctx_.world.try_get<engine::Transform>(snake->body[segIdx]);
+                if (tf) { tf->x = prev->first; tf->y = prev->second; }
+                ++segIdx;
+            }
+        }
+
+        // 修剪轨迹：只保留身体长度 + 50% 余量
+        while (snake->trail.size() > (snake->body.size() + 2) * 3)
+            snake->trail.pop_front();
+
+        // ── 6. 自碰撞 ──
+        {
+            float r2 = kSegmentRadius * kSegmentRadius * 4.0f;
+            for (size_t i = 3; i < snake->body.size(); ++i) {
+                auto* tf = ctx_.world.try_get<engine::Transform>(snake->body[i]);
+                if (!tf) continue;
+                float ddx = headTF->x - tf->x;
+                float ddy = headTF->y - tf->y;
+                if (ddx * ddx + ddy * ddy < r2) {
+                    snake->alive = false;
+                    return;
+                }
+            }
+        }
+
+        // ── 7. 生长 ──
+        while (snake->pendingGrow > 0) {
+            auto newSeg = ctx_.world.create();
+            float px = headTF->x, py = headTF->y;
+            if (!snake->body.empty()) {
+                auto* last = ctx_.world.try_get<engine::Transform>(snake->body.back());
+                if (last) { px = last->x; py = last->y; }
+            }
+            engine::Sprite bodySp;
+            bodySp.texture = bodyTex;
+            bodySp.srcRect = {0.f, 0.f, kSegmentRadius * 2, kSegmentRadius * 2};
+            bodySp.layer   = 2;
+            bodySp.visible = true;
+            bodySp.tint    = core::Color{30, 150, 30, 255};
+            bodySp.pivotX  = 0.5f;
+            bodySp.pivotY  = 0.5f;
+            bodySp.pass    = engine::RenderPass::World;
+            ctx_.world.emplace<engine::Transform>(newSeg,
+                engine::Transform{ px, py });
+            ctx_.world.emplace<engine::Sprite>(newSeg, bodySp);
+            snake->body.push_back(newSeg);
+            snake->pendingGrow--;
+        }
+
+        // ── 8. 食物碰撞 ──
+        {
+            auto foodView = ctx_.world.view<SnakeFood, engine::Transform>();
+            float eatR2 = (kSegmentRadius + kFoodRadius)
+                        * (kSegmentRadius + kFoodRadius);
+            for (auto foodEnt : foodView) {
+                auto* ftf = ctx_.world.try_get<engine::Transform>(foodEnt);
+                if (!ftf) continue;
+                float fdx = headTF->x - ftf->x;
+                float fdy = headTF->y - ftf->y;
+                if (fdx * fdx + fdy * fdy < eatR2) {
+                    ctx_.world.destroy(foodEnt);
+                    snake->score++;
+                    snake->pendingGrow++;
+                    spawnFood();
+                    break;
+                }
+            }
+        }
+
+        // ── 9. 加速 ──
+        snake->speed = kDefaultSpeed + (snake->score / 5) * kSpeedUpPerFive;
+    }
+
+private:
+    engine::EngineContext& ctx_;
+    entt::entity           head_;
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+//  程序化纹理
+// ═══════════════════════════════════════════════════════════════════════
+
+static TextureHandle makeCircleTex(engine::GameAPI& api,
+                                    int radius,
+                                    core::Color color) {
+    int d = radius * 2;
+    std::vector<uint8_t> px(static_cast<size_t>(d) * d * 4, 0);
+    int r2 = radius * radius;
+    for (int y = 0; y < d; ++y) {
+        for (int x = 0; x < d; ++x) {
+            int dx = x - radius;
+            int dy = y - radius;
+            if (dx * dx + dy * dy <= r2) {
+                size_t i = (static_cast<size_t>(y) * d + x) * 4;
+                px[i + 0] = color.r;
+                px[i + 1] = color.g;
+                px[i + 2] = color.b;
+                px[i + 3] = 255;
+            }
+        }
+    }
+    return api.createTextureFromMemory(
+        px.data(), d, d, backend::TextureFilter::Linear);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  CLI 辅助
+// ═══════════════════════════════════════════════════════════════════════
+
+static bool hasArg(int argc, char** argv, const char* name) {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], name) == 0) return true;
+    return false;
+}
+
+static const char* getArg(int argc, char** argv,
+                           const char* name, const char* def) {
+    for (int i = 1; i < argc - 1; ++i)
+        if (std::strcmp(argv[i], name) == 0) return argv[i + 1];
+    return def;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  main
+// ═══════════════════════════════════════════════════════════════════════
 
 int main(int argc, char** argv) {
-	const bool useOpenGL = hasArg(argc, argv, "--opengl");
-	const bool autoExit = hasArg(argc, argv, "--auto-exit");
-	const char* pkgPath = getArg(argc, argv, "--package", "tilemap_engine_package.json");
+    if (hasArg(argc, argv, "--help")) {
+        std::printf(
+            "Snake Game — QGame Demo6\n"
+            "  --speed <px/s>   蛇头速度 (default: %.0f)\n"
+            "  --opengl         使用 OpenGL 后端\n"
+            "  --help           此帮助\n"
+            "\n操作:\n"
+            "  WASD / 方向键    转弯\n"
+            "  R                重新开始\n"
+            "  ESC              退出\n",
+            kDefaultSpeed);
+        return 0;
+    }
 
-	engine::EngineConfig cfg;
-	cfg.windowTitle = "QGame Demo6 — TileMap Engine Package Loader";
-	cfg.windowWidth = 1280;
-	cfg.windowHeight = 720;
-	cfg.vsync = true;
-	cfg.debug = true;
-	if (useOpenGL) cfg.renderBackend = engine::RenderBackend::OpenGL;
+    float speed = kDefaultSpeed;
+    if (const char* s = getArg(argc, argv, "--speed", nullptr)) {
+        speed = std::max(10.0f, static_cast<float>(std::atof(s)));
+    }
 
-	engine::EngineContext ctx;
-	ctx.init(cfg);
-	engine::GameAPI api{ ctx };
+    const bool useOpenGL = hasArg(argc, argv, "--opengl");
 
-	// 让物理更新匹配真实帧率，消除固定步长在高帧率下的跳动/拖影
-	if (ctx.systems.has<engine::PhysicsSystem>()) {
-		ctx.systems.get<engine::PhysicsSystem>().setVariableTimestep(true);
-	}
+    // ── 引擎初始化 ──
+    engine::EngineConfig cfg;
+    cfg.windowTitle  = "Snake Game — QGame Demo6";
+    cfg.windowWidth  = 1280;
+    cfg.windowHeight = 720;
+    cfg.vsync        = true;
+    cfg.debug        = true;
+    if (useOpenGL)
+        cfg.renderBackend = engine::RenderBackend::OpenGL;
 
-	api.loadAssetManifest(QGAME_BAKED_MANIFEST);
-	const engine::FontHandle font = api.loadFontById("font.demo.main");
+    engine::EngineContext ctx;
+    ctx.init(cfg);
+    engine::GameAPI api{ ctx };
 
-	// ── load JSON ────────────────────────────────────────────────────────────
-	std::string jsonStr = readFile(pkgPath);
-	if (jsonStr.empty()) {
-		std::fprintf(stderr, "Cannot open: %s\n", pkgPath);
-		std::fprintf(stderr, "Usage: demo6 [--package path] [--opengl] [--auto-exit]\n");
-		return 1;
-	}
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-	nlohmann::json root;
-	try {
-		root = nlohmann::json::parse(jsonStr);
-	}
-	catch (const std::exception& e) {
-		std::fprintf(stderr, "JSON parse error: %s\n", e.what());
-		return 1;
-	}
+    // ── 程序化纹理 ──
+    int segDiam  = static_cast<int>(kSegmentRadius * 2);
+    int foodDiam = static_cast<int>(kFoodRadius * 2);
 
-	const auto& tileMap = root.value("tileMap", nlohmann::json::object());
-	int mapW = tileMap.value("w", 20);
-	int mapH = tileMap.value("h", 15);
-	int tileSize = tileMap.value("ts", 32);
-	const float mapPixelW = static_cast<float>(mapW * tileSize);
-	const float mapPixelH = static_cast<float>(mapH * tileSize);
+    TextureHandle headTex = makeCircleTex(api, segDiam / 2, core::Color::White);
+    TextureHandle bodyTex = makeCircleTex(api, segDiam / 2, core::Color::White);
+    TextureHandle foodTex = makeCircleTex(api, foodDiam / 2, core::Color::White);
 
-	// ── camera ───────────────────────────────────────────────────────────────
-	auto camEnt = api.spawnEntity();
-	// 相机先放一个临时位置。真正的跟随逻辑会在 player 创建后，把它平滑拉向玩家。
-	api.addComponent(camEnt, engine::Transform{ 640.f, 360.f });
-	engine::Camera wcam{};
-	// zoom 不再写死；主循环里会按窗口尺寸和地图尺寸自动解算。
-	wcam.zoom = 1.f;
-	wcam.primary = true;
-	wcam.depth = 0;
-	wcam.layerMask = engine::renderPassBit(engine::RenderPass::World);
-	wcam.clear = true;
-	wcam.clearColor = core::Color{ 8, 12, 22, 255 };
-	wcam.cullEnabled = true; // don't cull tiles
-	// 关闭相机级 pixelSnap，避免平滑跟随时的顿挫感。
-	// 次像素抖动改在顶点着色器内做屏幕空间 round（方法1），
-	// 这样相机坐标保持浮点平滑，sprite 边缘仍对齐物理像素。
-	wcam.pixelSnap = true;
-	api.addComponent(camEnt, wcam);
+    // ── 世界相机（固定视角，显示整个游戏区域）──
+    auto camEnt = api.spawnEntity();
+    api.addComponent(camEnt, engine::Transform{ 640.f, 360.f });
+    {
+        engine::Camera cam;
+        cam.zoom       = 1.f;
+        cam.primary    = true;
+        cam.depth      = 0;
+        cam.layerMask  = engine::renderPassBit(engine::RenderPass::World);
+        cam.clear      = true;
+        cam.clearColor = core::Color{ 8, 12, 22, 255 };
+        cam.cullEnabled = false;
+        cam.pixelSnap  = false;
+        api.addComponent(camEnt, cam);
+    }
 
-	const entt::entity uiCamera = api.spawnEntity();
-	api.addComponent(uiCamera, engine::Transform{ 640.0f, 360.0f });
-	engine::Camera overlayCam{};
-	overlayCam.zoom = 1.0f;
-	overlayCam.primary = true;
-	overlayCam.depth = 1;
-	overlayCam.layerMask = engine::renderPassBit(engine::RenderPass::UI);
-	overlayCam.clear = false;
-	overlayCam.cullEnabled = false;
-	api.addComponent(uiCamera, overlayCam);
-	api.createDebugOverlay(font);
+    // ── UI 相机 + 性能浮层 ──
+    api.loadAssetManifest(QGAME_BAKED_MANIFEST);
+    const engine::FontHandle font = api.loadFontById("font.demo.main");
+    api.createDebugOverlay(font);
 
-	// ── build TileMap component ──────────────────────────────────────────────
-	engine::TileMap tmap;
-	tmap.width = mapW;
-	tmap.height = mapH;
-	tmap.tileSize = tileSize;
+    // ── 蛇头实体 ──
+    auto head = api.spawnEntity();
+    api.addComponent(head, engine::Transform{ 640.f, 360.f });
+    {
+        engine::Sprite sp;
+        sp.texture = headTex;
+        sp.srcRect = {0.f, 0.f, static_cast<float>(segDiam), static_cast<float>(segDiam)};
+        sp.layer   = 3;
+        sp.visible = true;
+        sp.tint    = core::Color{ 50, 220, 50, 255 };
+        sp.pivotX  = 0.5f;
+        sp.pivotY  = 0.5f;
+        sp.pass    = engine::RenderPass::World;
+        api.addComponent(head, sp);
+    }
+    {
+        SnakeHead sh;
+        sh.speed = speed;
+        api.addComponent(head, sh);
+    }
 
-	std::fprintf(stdout, "=== Demo6: TileMap Engine Package Loader ===\n");
-	std::fprintf(stdout, "Package: %s\n", pkgPath);
-	std::fprintf(stdout, "Map: %dx%d tiles @ %dpx\n", mapW, mapH, tileSize);
+    // ── 系统注册 ──
+    auto& sys = ctx.systems.registerSystem<SnakeSystem>(ctx, head);
+    sys.headTex = headTex;
+    sys.bodyTex = bodyTex;
+    sys.foodTex = foodTex;
 
-	if (tileMap.contains("tilesets")) {
-		int tsIdx = 0;
-		for (const auto& tj : tileMap["tilesets"]) {
-			engine::TileMap::Tileset ts;
-			ts.firstGid = tj.value("firstGid", 0);
-			ts.count = tj.value("count", 0);
-			ts.columns = tj.value("cols", 1);
+    // ── 初始化身体与食物 ──
+    sys.restart(head);
 
-			// v2 collision profiles are the canonical runtime data. Keep reading
-			// legacy collision[] as a fallback so old sample packages still run.
-			if (tj.contains("collisions") && tj["collisions"].is_array()) {
-				for (const auto& cj : tj["collisions"]) {
-					engine::TileMap::TileCollision collision;
-					collision.gid = cj.value("gid", engine::TileMap::EMPTY_GID);
-					collision.shape = parseTileCollisionShape(cj, "shape");
-					if (cj.contains("points") && cj["points"].is_array()) {
-						collision.points = cj["points"].get<std::vector<float>>();
-					}
-					ts.collisions.push_back(std::move(collision));
-				}
-			}
+    std::printf(
+        "=== Snake Game ===\n"
+        "Speed: %.0f px/s\n"
+        "操作: WASD=转弯  R=重新开始  ESC=退出\n\n",
+        speed);
 
-			if (tj.contains("collision") && tj["collision"].is_array()) {
-				std::vector<uint8_t> legacyCollision = tj["collision"].get<std::vector<uint8_t>>();
-				if (ts.collisions.empty()) {
-					for (int local = 0; local < static_cast<int>(legacyCollision.size()); ++local) {
-						if (legacyCollision[local] == 0) continue;
-						engine::TileMap::TileCollision collision;
-						collision.gid = ts.firstGid + local;
-						collision.shape = engine::TileMap::TileCollisionShape::Full;
-						ts.collisions.push_back(std::move(collision));
-					}
-				}
-			}
+    // ── 主循环 ──
+    float t = 0.f;
+    bool  prevAlive = true;
+    int   prevScore = -1;
 
-			std::string kind = tj.value("sourceKind", "");
-			std::string dataUrl = tj.value("sourceDataUrl", "");
-			std::string name = tj.value("name", "?");
+    while (ctx.scheduler.tick()) {
+        t += ctx.scheduler.deltaTime();
 
-			if (kind == "builtin" || ts.firstGid == 0) {
-				auto atlas = makeBuiltinAtlas(tileSize, ts.columns, ts.count);
-				int atlasW = ts.columns * tileSize;
-				int atlasH = ((ts.count + ts.columns - 1) / ts.columns) * tileSize;
-				ts.texture = api.createTextureFromMemory(atlas.data(), atlasW, atlasH, backend::TextureFilter::Linear);
-				std::fprintf(stdout, "  tileset[%d] BUILTIN %s  gid=%d..%d  cols=%d  tex=%dx%d\n",
-					tsIdx, name.c_str(), ts.firstGid,
-					ts.firstGid + ts.count - 1, ts.columns, atlasW, atlasH);
-			}
-			else {
-				int texW = 0, texH = 0;
-				ts.texture = textureFromDataUrl(api, dataUrl, texW, texH);
-				std::fprintf(stdout, "  tileset[%d] IMAGE %s  gid=%d..%d  cols=%d  tex=%dx%d  %s\n",
-					tsIdx, name.c_str(), ts.firstGid,
-					ts.firstGid + ts.count - 1, ts.columns, texW, texH,
-					ts.texture.valid() ? "ok" : "FAILED");
-			}
+        if (api.isKeyJustPressed(SDLK_ESCAPE)) {
+            api.quit();
+            break;
+        }
 
-			if (!ts.texture.valid()) {
-				std::fprintf(stderr, "  WARNING: tileset %s has no valid texture\n", name.c_str());
-			}
+        auto* snake = ctx.world.try_get<SnakeHead>(head);
+        if (snake && !snake->alive && api.isKeyJustPressed(SDLK_R)) {
+            sys.restart(head);
+        }
 
-			tmap.tilesets.push_back(std::move(ts));
-			++tsIdx;
-		}
-	}
+        if (snake) {
+            if (snake->alive != prevAlive) {
+                if (!snake->alive)
+                    std::printf("游戏结束! 得分: %d  (按 R 重新开始)\n",
+                                snake->score);
+                prevAlive = snake->alive;
+            }
+            if (snake->score != prevScore) {
+                std::printf("得分: %d  速度: %.0f\n",
+                            snake->score, snake->speed);
+                prevScore = snake->score;
+            }
+        }
+    }
 
-	if (tileMap.contains("layers")) {
-		int li = 0;
-		for (const auto& lj : tileMap["layers"]) {
-			engine::TileMap::Layer layer;
-			layer.name = lj.value("name", "");
-			layer.visible = lj.value("visible", true);
-			layer.collidable = lj.value("collidable", true);
-			layer.renderLayer = lj.value("renderLayer", li);
-			if (lj.contains("tiles") && lj["tiles"].is_array()) {
-				layer.tiles = lj["tiles"].get<std::vector<int>>();
-			}
-			tmap.layers.push_back(std::move(layer));
-			++li;
-		}
-	}
-
-	std::fprintf(stdout, "Layers: %zu\n", tmap.layers.size());
-	std::fprintf(stdout, "Collision tiles: ");
-	bool first = true;
-	for (const auto& ts : tmap.tilesets) {
-		for (const auto& collision : ts.collisions) {
-			if (collision.shape == engine::TileMap::TileCollisionShape::None) continue;
-			if (!first) std::fprintf(stdout, ", ");
-			std::fprintf(stdout, "gid=%d", collision.gid);
-			first = false;
-		}
-	}
-	std::fprintf(stdout, "%s\n", first ? "(none)" : "");
-
-	// ── spawn tilemap entity ─────────────────────────────────────────────────
-	auto mapEnt = api.spawnEntity();
-	api.addComponent(mapEnt, engine::Transform{ 0.f, 0.f });
-	api.addComponent(mapEnt, std::move(tmap));
-
-
-	// player
-	auto checkerPx = makeCheckerboard(32, 32, 1, { 255,255,255,255 }, { 255,255,255,255 });
-	TextureHandle spriteTex = api.createTextureFromMemory(checkerPx.data(), 32, 32, backend::TextureFilter::Linear);
-	spriteTex = api.loadTexture("C:\\Users\\Administrator\\Downloads\\f0m.png");
-	//ctx.renderDevice().getTextureDimensions(spriteTex, w, h);
-	int w = 0, h = 0;
-	if (api.getTextureDimensions(spriteTex, w, h)) {
-		printf("texture: %dx%d\n", w, h);
-	}
-	auto player = api.spawnEntity();
-	engine::Sprite sprite{};
-	sprite.texture = spriteTex;
-	sprite.srcRect = { 0, 0, w, h };
-	sprite.layer = 2;
-	sprite.pass = engine::RenderPass::World;
-	engine::Transform transform{};
-	transform.x = 800.f;
-	transform.y = 100.f;
-	api.addComponent(player, transform);
-	api.addComponent(player, sprite);
-	engine::Collider collider{ 32.f, 32.f, 0.f, 0.f, false };
-	collider.layer = engine::COLLISION_LAYER_PLAYER;
-	collider.mask = engine::COLLISION_LAYER_STATIC;
-	api.addComponent(player, collider);
-	api.addComponent(player, engine::RigidBody{ 0.f, 0.f, 0.f, false });
-
-	// 注册玩家输入系统（在 systems.initAll() 之后新增的系统需要手动 init）。
-	// 它会在 GameplayPrePhysics 阶段（即 Physics 之前、Render 之前）读取输入
-	// 更新 Transform，从而消除「在主循环里改位置 → 渲染看到的总是上一帧位置」
-	// 导致的断续瞬移问题。
-	auto& playerInputSystem = ctx.systems.registerSystem<PlayerInputSystem>(ctx, player);
-
-	std::fprintf(stdout, "\nControls: WASD/arrows=move player  ESC=quit\n");
-
-	// ── main loop ────────────────────────────────────────────────────────────
-	float t = 0.f;
-
-	while (ctx.scheduler.tick()) {
-		t += ctx.scheduler.deltaTime();
-
-		if (api.isKeyJustPressed(SDLK_ESCAPE)) {
-			api.quit();
-			break;
-		}
-		if (autoExit && t >= 2.0f) {
-			api.quit();
-			break;
-		}
-	}
-
-	ctx.shutdown();
-	return 0;
+    ctx.shutdown();
+    return 0;
 }
