@@ -400,6 +400,17 @@ public:
     // 在屏幕左上角创建一个显示 FPS 和渲染统计的性能浮层
     entt::entity createDebugOverlay(FontHandle font);
 
+    // 一键启用调试覆盖层（自动加载内置字体，无需手动准备 FontHandle）
+    // 等效于 loadAssetManifest + loadFontById("font.demo.main") + createDebugOverlay
+    void enableDebugOverlay();
+
+    // 启用/禁用调试绘制（碰撞盒线框、精灵参数等）
+    void setDebugEnabled(bool enabled);
+    bool isDebugEnabled() const;
+
+    // 设置自定义调试信息（游戏层性能参数），显示在 FPS 覆盖层下方
+    void setDebugInfo(const std::string& info);
+
 private:
     EngineContext& ctx_;
 };

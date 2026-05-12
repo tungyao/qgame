@@ -902,6 +902,12 @@ void GLRenderDevice::renderCmdsToTarget(const std::vector<const RenderCmd*>& cmd
             const std::string& s = text->text;
 
             for (size_t i = 0; i < s.size();) {
+                if (s[i] == '\n') {
+                    cursorX = text->x;
+                    cursorY += font->fontSize * 1.2f * scale;
+                    ++i;
+                    continue;
+                }
                 uint32_t cp = 0;
                 unsigned char c0 = static_cast<unsigned char>(s[i]);
                 size_t adv = 1;

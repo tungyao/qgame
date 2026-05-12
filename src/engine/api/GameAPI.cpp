@@ -269,6 +269,31 @@ entt::entity GameAPI::createDebugOverlay(FontHandle font) {
     return e;
 }
 
+void GameAPI::enableDebugOverlay() {
+    FontHandle font = loadFontById("font.demo.main");
+    if (font.valid()) {
+        createDebugOverlay(font);
+    }
+    setDebugEnabled(true);
+}
+
+void GameAPI::setDebugEnabled(bool enabled) {
+    ctx_.debug = enabled;
+    if (ctx_.systems.has<DebugOverlaySystem>()) {
+        ctx_.systems.get<DebugOverlaySystem>().setDebugEnabled(enabled);
+    }
+}
+
+bool GameAPI::isDebugEnabled() const {
+    return ctx_.debug;
+}
+
+void GameAPI::setDebugInfo(const std::string& info) {
+    if (ctx_.systems.has<DebugOverlaySystem>()) {
+        ctx_.systems.get<DebugOverlaySystem>().setCustomInfo(info);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Time API
 // ═══════════════════════════════════════════════════════════════════════════════

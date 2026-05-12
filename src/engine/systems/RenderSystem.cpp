@@ -1,5 +1,6 @@
 #include "RenderSystem.h"
 #include "UISystem.h"
+#include "DebugOverlaySystem.h"
 #include "PhysicsSystem.h"
 #include "../runtime/EngineContext.h"
 #include "../runtime/TransformInterpolation.h"
@@ -1254,6 +1255,11 @@ void RenderSystem::buildSceneCommands(EngineContext& ctx, backend::CommandBuffer
         ctx.systems.get<UISystem>().emitDrawCommands(cb);
     }
 
+    // Debug overlay commands (wireframe collision boxes, etc.)
+    if (ctx.systems.has<DebugOverlaySystem>()) {
+        ctx.systems.get<DebugOverlaySystem>().emitDebugDrawCommands(cb);
+    }
+
     cb.end();
 }
 
@@ -1814,6 +1820,19 @@ void RenderSystem::buildCommandBufferGPUDriven() {
                 const RenderPass pp = cmdPass(*p);
                 if ((cam.layerMask & renderPassBit(pp)) == 0) continue;
                 overlayCommands.push_back(*p);
+            }
+        }
+
+        // Debug overlay commands (wireframe collision boxes, etc.)
+        if (ctx_.systems.has<DebugOverlaySystem>()) {
+            backend::CommandBuffer debugCb;
+            debugCb.begin();
+            ctx_.systems.get<DebugOverlaySystem>().emitDebugDrawCommands(debugCb);
+            debugCb.end();
+            for (const auto& cmd : debugCb.commands()) {
+                const RenderPass pp = cmdPass(cmd);
+                if ((cam.layerMask & renderPassBit(pp)) == 0) continue;
+                overlayCommands.push_back(cmd);
             }
         }
 

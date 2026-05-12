@@ -77,6 +77,8 @@ private:
     std::unique_ptr<backend::AudioCommandQueue> audioCmdQueue_;
 
     bool running_ = false;
+
+public:
     bool debug = false;
 };
 

@@ -107,6 +107,7 @@ void EngineContext::init(const EngineConfig& cfg) {
 
     systems.initAll();
 
+    debug = cfg.debug;
     running_ = true;
     core::logInfo("EngineContext ready");
 }
