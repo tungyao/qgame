@@ -654,7 +654,7 @@ namespace engine {
 					}
 				}
 
-				if (valid && tMin <= tMaxLocal && tMin >= 0.f && tMin < result.distance) {
+				if (valid && tMin <= tMaxLocal && tMin > 0.0001f && tMin < result.distance) {
 					result.hit = true;
 					result.entity = e;
 					result.distance = tMin;

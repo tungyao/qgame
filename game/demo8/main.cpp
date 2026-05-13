@@ -199,9 +199,7 @@ protected:
 				std::printf("[J-Shot] HIT pickup at dist=%.0f  score=%d\n",
 					jShotDist, score);
 			} else {
-				std::printf("[J-Shot] MISS  dist=%.0f  entity=%s\n",
-					hit.distance,
-					hit.hit ? "other" : "none");
+				std::printf("[J-Shot] MISS  dist=%.0f\n", hit.distance);
 			}
 		}
 
