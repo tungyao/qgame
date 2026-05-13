@@ -114,77 +114,38 @@ for (auto [e, tf, col] : view.each()) {
 
 **改动**：
 - `PhysicsSystem.h`：新增 `staticGrid_`、`dynamicGrid_` 替换原有 `entityGrid_`；新增 hook 方法
-- `PhysicsSystem.cpp`：`resolveCollisions()` 重写为三路分离；`init()` 注册 ECS hook
+- `PhysicsSystem.cpp`：`resolveCollisions()` 重写为两路分离（D-D + D-S）；`init()` 注册 ECS hook
+- `game/demo6/main.cpp`：蛇头添加 `RigidBody{isKinematic: true}`（移动实体必须挂 RigidBody）
 
 **实现细节**：
-
-```
-三个子循环：
-  A) 动态-动态：外循环遍历有 RigidBody 实体，查 dynamicGrid_，entity ID 去重
-  B) 动态-静态：同一外循环实体查 staticGrid_，无需 pair 去重
-  C) 静态-静态（仅事件）：外循环遍历无 RigidBody 实体，查 staticGrid_，entity ID 去重
-     仅派发碰撞事件，不做物理分离。保障 Trigger-only 实体（如 Snake 头与食物）能正常产生事件
-```
+- 外循环只遍历有 RigidBody 的动态体
+  - A) 动态-动态：查 dynamicGrid_，entity ID 去重，含分离
+  - B) 动态-静态：查 staticGrid_，无需去重，只推开动态体
+- 静态-静态对完全跳过（移动实体必须挂 RigidBody）
+- 提取 `rebuildGrids()` 公共方法，供 resolveCollisions + 查询 API 复用
 
 **设计决策**：
-- 静态-静态对完全跳过。Snake 等 Trigger-only 场景通过给移动实体添加 `RigidBody{isKinematic: true}` 解决，这样实体进入 dynamicGrid_，触发碰撞事件。
-- staticGrid_ 当前每帧全量重建（`clear()` + 全量 insert），hook 仅作预留。后续可通过 SpatialHashGrid 增加 `remove()` 实现增量更新。
+- 静态-静态对完全跳过。Trigger-only 实体通过挂载 `RigidBody{isKinematic: true}` 进入 dynamicGrid_。
+- staticGrid_ 当前每帧全量重建（`clear()` + 全量 insert），hook 仅作预留。
 
-### Step 2: 查询 API 接入 grid
+### Step 2: 查询 API 接入 grid ✅
 
-**文件**: PhysicsSystem.cpp
+**提交**: PhysicsSystem.cpp:561-637, 656-730
 
-**overlapBox()** — 从 O(n) 到 O(cells_covered_by_box)：
-- 用 box AABB 算覆盖的 cell 范围
-- 只查这些 cell 内的实体
-- 去重：使用 `entt::sparse_set seen{};` 标记已访问实体（O(1)，复用性好）
+**改动**：
+- `raycast()`：从 O(n) 全量扫描 → DDA grid traversal，只遍历射线穿过的 cell
+- `overlapBox()`：从 O(n) 全量扫描 → 只查 query AABB 覆盖的 cell
+- `overlapCircle()`：同上
 
-**overlapCircle()** — 同上，但按圆覆盖的 AABB 查 cell。去重方式同上。
-
-**raycast()** — DDA 遍历 cell：
-- 从起点到终点，沿射线遍历穿过的 cell
-- 只检测这些 cell 内的实体做 slab 相交测试
-- DDA (Digital Differential Analyzer) 算法 —— 参考 "A Fast Voxel Traversal Algorithm for Ray Tracing" (Amanatides & Woo, 1987)
-- 注意处理方向分量为 0 的边沿情况（避免除零）
-- START 参数初始化：
-  - `tMaxX/Y` = 从射线起点到下一个 cell 边界的距离
-  - `tDeltaX/Y` = 沿射线穿过一个 cell 所需的距离
-- 去重同 overlapBox
-
-### Step 3: 静态/动态分离
-
-**文件**: PhysicsSystem.h, PhysicsSystem.cpp
-
-**定义**：
-- **静态体** = 有 Collider 且无 RigidBody（完全不动的地形、装饰物）
-- **isKinematic** = 有 Collider + RigidBody.isKinematic（脚本驱动移动，放入 dynamicGrid_ 但不积分）
-
-- 新增 `staticGrid_` (SpatialHashGrid) 只存静态体
-- 静态体插入后不 clear，只在实体 add/remove 时更新
-- 每帧只重建 `dynamicGrid_`（动态体 + isKinematic）
-- `resolveCollisions()` 循环：
-  - 动态 vs 动态：dynamicGrid_ 内查
-  - 动态 vs 静态：dynamicGrid_ 的每个实体查 staticGrid_
-  - 静态 vs 静态：跳过
-
-**收益**：星露谷场景（400 静态 + 10 动态）碰撞对从 C(410,2)=83,945 降到 C(10,2)+10×400=4,045，降 95%。
-
-**新增 hook（PhysicsSystem.cpp）**：
-```cpp
-// init() 中注册——四个方向都要覆盖
-world_.on_construct<Collider>().connect<&PhysicsSystem::onColliderAdded>(this);
-world_.on_destroy<Collider>().connect<&PhysicsSystem::onColliderRemoved>(this);
-world_.on_construct<RigidBody>().connect<&PhysicsSystem::onRigidBodyAdded>(this);
-world_.on_destroy<RigidBody>().connect<&PhysicsSystem::onRigidBodyRemoved>(this);
-```
-
-`onRigidBodyAdded`：如果实体已在 staticGrid_ 中，迁移到 dynamicGrid_
-`onRigidBodyRemoved`：如果实体在 dynamicGrid_ 中，迁移到 staticGrid_
-
-**isKinematic 归属**：
-- 插入 **dynamicGrid_** 而非 staticGrid_
-- `integrateVelocities()` 中跳过（速度不由物理驱动）
-- 碰撞检测正常参与（可以被其他物体推开，触发射击判定等）
+**实现细节**：
+- 每个查询函数开头调用 `rebuildGrids()` 保证网格数据新鲜
+- 查询 `dynamicGrid_` + `staticGrid_` 合并候选集，sort + unique 去重
+- raycast 使用标准 DDA 算法 (Amanatides & Woo, 1987)：
+  - `tMaxX/Y` = 射线到下一个 cell 边界的距离
+  - `tDeltaX/Y` = 穿过一个 cell 所需的距离
+  - `entt::sparse_set` 去重（跨 cell 实体）
+  - Slab 窄相位测试不变
+- overlapBox / overlapCircle 的窄相位逻辑与优化前一致
 
 ### Step 4: Tile 碰撞缓存
 
@@ -290,7 +251,7 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 |----------------------------------|-------------------------------------------------------------------|------|
 | src/engine/systems/PhysicsSystem.h        | 新增 dynamicGrid_, staticGrid_, hook 方法 | Step 1+3 ✅ |
 | src/engine/systems/PhysicsSystem.cpp      | 重写 resolveCollisions() 为 grid + 静动分离 | Step 1+3 ✅ |
-| src/engine/systems/PhysicsSystem.cpp      | 查询 API 接入 grid | Step 2 ⏳ |
+| src/engine/systems/PhysicsSystem.cpp      | 查询 API 接入 grid | Step 2 ✅ |
 | src/engine/systems/PhysicsSystem.cpp      | 新增 DDA raycast 辅助函数 | Step 2 ⏳ |
 | src/engine/components/PhysicsComponents.h | 新增 SleepState 组件；RigidBody 加 ccdEnabled | Step 5+6 ⏳ |
 
@@ -305,7 +266,7 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 - Step 3: 静动分离 — **已完成** ✅
 
 **Phase B（查询 + Tile）**：
-- Step 2: 查询 API 接入 grid
+- Step 2: 查询 API 接入 grid — **已完成** ✅
 - Step 4: Tile 碰撞缓存
 
 **Phase C（休眠）**：

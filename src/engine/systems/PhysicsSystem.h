@@ -27,7 +27,7 @@ namespace engine {
  * 
  * 性能特征：
  * - 碰撞检测：SpatialHashGrid 宽相位 + 静动分离，平均 O(dyn·cells + pairs)
- * - 查询功能：O(n) 线性扫描（后续优化为 grid 查询）
+ * - 查询功能：SpatialHashGrid 宽相位，平均 O(n + cells * candidates)
  * - 固定时间步：默认 60Hz，可调整
  */
 class PhysicsSystem : public ISystem {
@@ -186,6 +186,7 @@ private:
     SpatialHashGrid<entt::entity> dynamicGrid_{64.f};  // 动态体网格（每帧重建）
     SpatialHashGrid<entt::entity> staticGrid_{64.f};   // 静态体网格（持久化，通过 hook 更新）
 
+    void rebuildGrids();                 // 重建 dynamicGrid_ + staticGrid_
     void integrateVelocities(float dt);  // 速度积分
     void resolveCollisions();            // 碰撞解决
     void resolveTileCollisions();        // TileMap 静态碰撞解决

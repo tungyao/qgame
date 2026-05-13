@@ -313,8 +313,7 @@ namespace engine {
 	 *   B) 动态-静态：查 staticGrid_，无需 pair 去重，只推开动态体
 	 *   静态-静态对：完全跳过（移动实体必须有 RigidBody）
 	 */
-	void PhysicsSystem::resolveCollisions() {
-		// ── 1. 构建网格 ──
+	void PhysicsSystem::rebuildGrids() {
 		dynamicGrid_.clear();
 		staticGrid_.clear();
 		auto allView = world_.view<Transform, Collider>();
@@ -326,8 +325,12 @@ namespace engine {
 			grid.insert(e, aabb.minX, aabb.minY,
 			            aabb.maxX - aabb.minX, aabb.maxY - aabb.minY);
 		}
+	}
 
-		// ── 2. 碰撞检测（只遍历动态体）──
+	void PhysicsSystem::resolveCollisions() {
+		rebuildGrids();
+
+		// 碰撞检测（只遍历动态体）
 		auto dynView = world_.view<Transform, Collider, RigidBody>();
 		for (auto [e, tf, col, rb] : dynView.each()) {
 			(void)tf;
@@ -536,27 +539,10 @@ namespace engine {
 	}
 
 	/**
-	 * 射线检测 - 从起点沿方向发射射线，返回第一个碰撞体
+	 * 射线检测 — DDA grid traversal + Slab 窄相位
 	 *
-	 * 使用 Slab 算法（Ray-AABB 交叉检测）
-	 *
-	 * 参数：
-	 * - startX, startY: 射线起点
-	 * - dirX, dirY: 射线方向（会自动归一化）
-	 * - maxDist: 最大检测距离
-	 * - layerMask: 只检测指定层的物体
-	 *
-	 * 返回：
-	 * - RaycastHit.hit: 是否命中
-	 * - RaycastHit.entity: 命中的实体
-	 * - RaycastHit.hitX, hitY: 命中点坐标
-	 * - RaycastHit.normalX, normalY: 命中点法线（指向碰撞体中心）
-	 * - RaycastHit.distance: 起点到命中点的距离
-	 *
-	 * 用途：
-	 * - 子弹/激光检测
-	 * - 视线检测（AI 能否看到玩家）
-	 * - 地面检测（角色是否站在地面上）
+	 * 从射线起点沿方向遍历穿过的 grid cell，只检测这些 cell 内的实体。
+	 * 结合 dynamicGrid_ 和 staticGrid_ 覆盖所有碰撞体（含无 RigidBody 的 Trigger）。
 	 */
 	RaycastHit PhysicsSystem::raycast(float startX, float startY, float dirX, float dirY,
 		float maxDist, CollisionLayer layerMask) {
@@ -564,72 +550,107 @@ namespace engine {
 		result.hit = false;
 		result.distance = maxDist;
 
-		// 归一化方向向量
 		float len = std::sqrt(dirX * dirX + dirY * dirY);
-		if (len < 0.0001f) return result;  // 零方向，无效射线
+		if (len < 0.0001f) return result;
 		dirX /= len; dirY /= len;
 
-		// 遍历所有碰撞体
-		auto view = world_.view<Transform, Collider>();
-		for (auto [e, tf, col] : view.each()) {
-			// 层过滤
-			if ((col.layer & layerMask) == 0) continue;
+		rebuildGrids();
 
-			(void)tf;
-			(void)col;
-			// [优化] 每个实体只计算一次 AABB，同时复用于命中判断和法线计算
-			const AABB box = makeEntityAABB(world_, e);
+		const float cellSize = dynamicGrid_.cellSize();
+		const float invCellSize = 1.0f / cellSize;
 
-			// Slab 算法：计算射线与 AABB 的交点
-			// tMin: 射线进入 AABB 的时间
-			// tMax: 射线离开 AABB 的时间
-			float tMin = 0.f;
-			float tMax = maxDist;
+		// 起始 cell（与 SpatialHashGrid 坐标约定一致）
+		int cx = static_cast<int>(startX * invCellSize);
+		int cy = static_cast<int>(startY * invCellSize);
 
-			// 对每个轴分别计算
-			for (int axis = 0; axis < 2; ++axis) {
-				float p = (axis == 0) ? startX : startY;
-				float d = (axis == 0) ? dirX : dirY;
-				float minB = (axis == 0) ? box.minX : box.minY;
-				float maxB = (axis == 0) ? box.maxX : box.maxY;
+		int stepX = (dirX > 0) ? 1 : -1;
+		int stepY = (dirY > 0) ? 1 : -1;
 
-				if (std::abs(d) < 0.0001f) {
-					// 射线与该轴平行，检查起点是否在 slab 内
-					if (p < minB || p > maxB) {
-						tMin = maxDist + 1.f;  // 标记为不相交
-						break;
+		// tDelta = 沿射线穿过一个 cell 所需的距离
+		float tDeltaX = (std::abs(dirX) > 0.0001f) ? cellSize / std::abs(dirX) : 1e10f;
+		float tDeltaY = (std::abs(dirY) > 0.0001f) ? cellSize / std::abs(dirY) : 1e10f;
+
+		// tMax = 沿射线到下一个 cell 边界的距离
+		auto calcTMax = [&](float origin, int cell, float dir, float cellSize) -> float {
+			if (std::abs(dir) < 0.0001f) return 1e10f;
+			if (dir > 0) return ((cell + 1) * cellSize - origin) / std::abs(dir);
+			return (origin - cell * cellSize) / std::abs(dir);
+		};
+		float tMaxX = calcTMax(startX, cx, dirX, cellSize);
+		float tMaxY = calcTMax(startY, cy, dirY, cellSize);
+
+		// 确保不超出 maxDist
+		if (tMaxX > maxDist) tMaxX = maxDist + 1.f;
+		if (tMaxY > maxDist) tMaxY = maxDist + 1.f;
+
+		entt::sparse_set visited;
+		float t = 0.f;
+
+		auto checkCellEntities = [&](const SpatialHashGrid<entt::entity>& grid) {
+			auto* cell = grid.queryCell(cx, cy);
+			if (!cell) return;
+			for (auto e : *cell) {
+				if (visited.contains(e)) continue;
+				visited.push(e);
+
+				const Collider& col = world_.get<Collider>(e);
+				if ((col.layer & layerMask) == 0) continue;
+
+				const AABB box = makeEntityAABB(world_, e);
+
+				float tMin = 0.f;
+				float tMaxLocal = maxDist;
+				bool valid = true;
+
+				for (int axis = 0; axis < 2; ++axis) {
+					float p = (axis == 0) ? startX : startY;
+					float d = (axis == 0) ? dirX : dirY;
+					float minB = (axis == 0) ? box.minX : box.minY;
+					float maxB = (axis == 0) ? box.maxX : box.maxY;
+
+					if (std::abs(d) < 0.0001f) {
+						if (p < minB || p > maxB) { valid = false; break; }
+					} else {
+						float t1 = (minB - p) / d;
+						float t2 = (maxB - p) / d;
+						if (t1 > t2) std::swap(t1, t2);
+						tMin = std::max(tMin, t1);
+						tMaxLocal = std::min(tMaxLocal, t2);
 					}
 				}
-				else {
-					// 计算射线与 slab 两个平面的交点
-					float t1 = (minB - p) / d;
-					float t2 = (maxB - p) / d;
-					if (t1 > t2) std::swap(t1, t2);  // 确保 t1 <= t2
 
-					// 更新相交区间
-					tMin = std::max(tMin, t1);
-					tMax = std::min(tMax, t2);
+				if (valid && tMin <= tMaxLocal && tMin >= 0.f && tMin < result.distance) {
+					result.hit = true;
+					result.entity = e;
+					result.distance = tMin;
+					result.hitX = startX + dirX * tMin;
+					result.hitY = startY + dirY * tMin;
+
+					float boxCx = (box.minX + box.maxX) * 0.5f;
+					float boxCy = (box.minY + box.maxY) * 0.5f;
+					result.normalX = boxCx - result.hitX;
+					result.normalY = boxCy - result.hitY;
+					float nLen = std::sqrt(result.normalX * result.normalX + result.normalY * result.normalY);
+					if (nLen > 0.0001f) {
+						result.normalX /= nLen;
+						result.normalY /= nLen;
+					}
 				}
 			}
+		};
 
-			// 检查是否相交且在有效范围内
-			if (tMin <= tMax && tMin >= 0.f && tMin < result.distance) {
-				result.hit = true;
-				result.entity = e;
-				result.distance = tMin;
-				result.hitX = startX + dirX * tMin;
-				result.hitY = startY + dirY * tMin;
+		while (t < maxDist) {
+			checkCellEntities(dynamicGrid_);
+			checkCellEntities(staticGrid_);
 
-				// [优化] 直接复用上方已算好的 box，原代码此处重复调用了 makeEntityAABB
-				float cx = (box.minX + box.maxX) * 0.5f;
-				float cy = (box.minY + box.maxY) * 0.5f;
-				result.normalX = cx - result.hitX;
-				result.normalY = cy - result.hitY;
-				float nLen = std::sqrt(result.normalX * result.normalX + result.normalY * result.normalY);
-				if (nLen > 0.0001f) {
-					result.normalX /= nLen;
-					result.normalY /= nLen;
-				}
+			if (tMaxX < tMaxY) {
+				t = tMaxX;
+				tMaxX += tDeltaX;
+				cx += stepX;
+			} else {
+				t = tMaxY;
+				tMaxY += tDeltaY;
+				cy += stepY;
 			}
 		}
 
@@ -637,41 +658,35 @@ namespace engine {
 	}
 
 	/**
-	 * 盒形区域查询 - 检测指定矩形区域内所有碰撞体
-	 *
-	 * 参数：
-	 * - centerX, centerY: 查询区域中心
-	 * - halfW, halfH: 查询区域半宽/半高
-	 * - layerMask: 只查询指定层的物体
-	 *
-	 * 返回：
-	 * - OverlapResult.entity: 碰撞的实体
-	 * - OverlapResult.overlapX, overlapY: 重叠区域尺寸
-	 *
-	 * 用途：
-	 * - 技能范围检测（横扫攻击）
-	 * - 触发区域检测
-	 * - AI 感知范围
+	 * 盒形区域查询 — 通过 grid 只查覆盖 cell 内的实体
 	 */
 	std::vector<OverlapResult> PhysicsSystem::overlapBox(float centerX, float centerY,
 		float halfW, float halfH,
 		CollisionLayer layerMask) {
 		std::vector<OverlapResult> results;
-		// 构造查询区域的 AABB
-		AABB query{ centerX - halfW, centerY - halfH, centerX + halfW, centerY + halfH };
+		rebuildGrids();
 
-		auto view = world_.view<Transform, Collider>();
-		for (auto [e, tf, col] : view.each()) {
-			// 层过滤
+		AABB query{ centerX - halfW, centerY - halfH, centerX + halfW, centerY + halfH };
+		float qw = query.maxX - query.minX;
+		float qh = query.maxY - query.minY;
+
+		// 合并两个网格的候选集
+		auto candidates = dynamicGrid_.query(query.minX, query.minY, qw, qh);
+		auto staticCandidates = staticGrid_.query(query.minX, query.minY, qw, qh);
+		candidates.insert(candidates.end(), staticCandidates.begin(), staticCandidates.end());
+
+		std::sort(candidates.begin(), candidates.end());
+		auto last = std::unique(candidates.begin(), candidates.end());
+
+		for (auto it = candidates.begin(); it != last; ++it) {
+			auto e = *it;
+			const Collider& col = world_.get<Collider>(e);
 			if ((col.layer & layerMask) == 0) continue;
 
-			(void)tf;
-			(void)col;
 			AABB box = makeEntityAABB(world_, e);
 			if (overlaps(query, box)) {
 				OverlapResult r;
 				r.entity = e;
-				// 计算重叠区域尺寸
 				r.overlapX = std::min(query.maxX, box.maxX) - std::max(query.minX, box.minX);
 				r.overlapY = std::min(query.maxY, box.maxY) - std::max(query.minY, box.minY);
 				results.push_back(r);
@@ -682,47 +697,37 @@ namespace engine {
 	}
 
 	/**
-	 * 圆形区域查询 - 检测指定圆形区域内所有碰撞体
-	 *
-	 * 参数：
-	 * - centerX, centerY: 圆心
-	 * - radius: 半径
-	 * - layerMask: 只查询指定层的物体
-	 *
-	 * 算法：
-	 * 1. 先用 AABB 快速排除明显不相交的碰撞体
-	 * 2. 计算 AABB 上离圆心最近的点
-	 * 3. 检查该点到圆心的距离是否小于半径
-	 *
-	 * 用途：
-	 * - 爆炸伤害范围
-	 * - 吸引/排斥效果范围
-	 * - NPC 交互范围
+	 * 圆形区域查询 — 通过 grid 只查覆盖 cell 内的实体
 	 */
 	std::vector<entt::entity> PhysicsSystem::overlapCircle(float centerX, float centerY, float radius,
 		CollisionLayer layerMask) {
 		std::vector<entt::entity> results;
-		float r2 = radius * radius;  // 使用距离平方避免开方
+		rebuildGrids();
 
-		auto view = world_.view<Transform, Collider>();
-		for (auto [e, tf, col] : view.each()) {
-			// 层过滤
+		float r2 = radius * radius;
+		AABB queryBox{ centerX - radius, centerY - radius, centerX + radius, centerY + radius };
+		float qw = queryBox.maxX - queryBox.minX;
+		float qh = queryBox.maxY - queryBox.minY;
+
+		auto candidates = dynamicGrid_.query(queryBox.minX, queryBox.minY, qw, qh);
+		auto staticCandidates = staticGrid_.query(queryBox.minX, queryBox.minY, qw, qh);
+		candidates.insert(candidates.end(), staticCandidates.begin(), staticCandidates.end());
+
+		std::sort(candidates.begin(), candidates.end());
+		auto last = std::unique(candidates.begin(), candidates.end());
+
+		for (auto it = candidates.begin(); it != last; ++it) {
+			auto e = *it;
+			const Collider& col = world_.get<Collider>(e);
 			if ((col.layer & layerMask) == 0) continue;
 
-			(void)tf;
-			(void)col;
 			AABB box = makeEntityAABB(world_, e);
 
-			// 找到 AABB 上离圆心最近的点
-			// 将圆心 clamp 到 AABB 内部
 			float closestX = std::max(box.minX, std::min(centerX, box.maxX));
 			float closestY = std::max(box.minY, std::min(centerY, box.maxY));
-
-			// 计算距离平方
 			float dx = closestX - centerX;
 			float dy = closestY - centerY;
 
-			// 如果最近点在圆内，则 AABB 与圆相交
 			if (dx * dx + dy * dy <= r2) {
 				results.push_back(e);
 			}
