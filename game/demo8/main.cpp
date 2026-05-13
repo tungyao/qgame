@@ -462,14 +462,18 @@ int main(int argc, char** argv) {
 		// ── 调试 HUD ──
 		char buf[512];
 		auto& ts = testSys;
+		float mx = ctx.inputState.pointerX(0);
+		float my = ctx.inputState.pointerY(0);
 		std::snprintf(buf, sizeof(buf),
 			"FPS: %d  |  Score: %d  |  Collisions/frame: %d\n"
+			"Mouse: (%.0f, %.0f)\n"
 			"[T] Raycast: %s  dist=%.0f  hit=%s\n"
 			"[B] OverlapBox(160x120): %d entities\n"
 			"[C] OverlapCircle(r=100): %d entities\n"
 			"[J] Shot pickup: %s  dist=%.0f\n"
 			"WASD=Move  J=ShootRay  T=Raycast  B=Box  C=Circle  ESC=Exit",
 			fps, ts.score, ts.collisionCount,
+			mx, my,
 			(ts.showRaycast_ ? "ON" : "OFF"), ts.queryRayDist,
 			(ts.queryRayHit ? "YES" : "no"),
 			ts.queryBoxCount, ts.queryCircleCount,
