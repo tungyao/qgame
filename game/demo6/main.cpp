@@ -548,8 +548,7 @@ int main(int argc, char** argv) {
 	sys.foodTex = foodTex;
 
 	// 注册物理碰撞监听（蛇头与食物的 trigger 碰撞）
-	// 注意：绕过 GameAPI::onCollision 的模板限制，直接使用 entt dispatcher
-	ctx.dispatcher.sink<engine::CollisionInfo>().connect<&SnakeSystem::onCollision>(sys);
+	api.onCollision<SnakeSystem, &SnakeSystem::onCollision>(sys);
 
 	// ── 初始化身体与食物 ──
 	sys.restart(head);

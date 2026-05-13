@@ -129,8 +129,8 @@ public:
      * };
      * api.onCollision(myGame, &MyGame::onCollision);
      */
-    template<typename Listener>
-    void onCollision(Listener& listener, void(Listener::*fn)(const CollisionInfo&));
+    template<typename Listener, auto Fn>
+    void onCollision(Listener& listener);
 
     // ── Scene（Month 8 实现）─────────────────────────────────────────────
     bool loadScene(const char* path);
@@ -440,9 +440,9 @@ void GameAPI::patchComponent(entt::entity e, Fn&& fn) {
     ctx_.world.template patch<T>(e, std::forward<Fn>(fn));
 }
 
-template<typename Listener>
-void GameAPI::onCollision(Listener& listener, void(Listener::*fn)(const CollisionInfo&)) {
-    ctx_.dispatcher.template sink<CollisionInfo>().template connect<fn>(listener);
+template<typename Listener, auto Fn>
+void GameAPI::onCollision(Listener& listener) {
+    ctx_.dispatcher.template sink<CollisionInfo>().template connect<Fn>(listener);
 }
 
 } // namespace engine

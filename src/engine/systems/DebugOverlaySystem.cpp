@@ -55,7 +55,8 @@ namespace engine {
 				const float spriteH = sprite->srcRect.h * std::abs(tf.scaleY);
 				rx = tf.x - sprite->pivotX * spriteW + collider.offsetX;
 				ry = tf.y - sprite->pivotY * spriteH + collider.offsetY;
-			} else {
+			}
+			else {
 				rx = tf.x + collider.offsetX;
 				ry = tf.y + collider.offsetY;
 			}
@@ -149,18 +150,18 @@ namespace engine {
 
 		// Bottom edge
 		edge.y = rect.y + rect.h - lineThickness;
-		//cb.drawSprite(edge);
+		cb.drawSprite(edge);
 
 		// Left edge
 		edge.scaleX = lineThickness;
 		edge.scaleY = rect.h;
 		edge.x = rect.x;
 		edge.y = rect.y;
-		//cb.drawSprite(edge);
+		cb.drawSprite(edge);
 
 		// Right edge
 		edge.x = rect.x + rect.w - lineThickness;
-		//cb.drawSprite(edge);
+		cb.drawSprite(edge);
 	}
 
 	void DebugOverlaySystem::emitDebugDrawCommands(backend::CommandBuffer& cb) {
