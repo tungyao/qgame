@@ -208,6 +208,13 @@ private:
     SpatialHashGrid<entt::entity> staticGrid_{64.f};   // 静态体网格（持久化，通过 hook 更新）
     std::unordered_map<entt::entity, TileCollisionCache> tileCollisionCaches_;
 
+    struct CcdEntry {
+        entt::entity e;
+        float oldMinX, oldMinY, oldMaxX, oldMaxY;
+        float oldX, oldY;
+    };
+    std::vector<CcdEntry> ccdBuffer_;  // CCD 预碰撞状态（每帧重填）
+
     void rebuildGrids();                 // 重建 dynamicGrid_ + staticGrid_
     void integrateVelocities(float dt);  // 速度积分
     void resolveCollisions();            // 碰撞解决

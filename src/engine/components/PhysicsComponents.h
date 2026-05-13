@@ -42,6 +42,7 @@ struct RigidBody {
     float gravityScale = 0.f;  // 重力缩放：0=不受重力, 1=正常, 2=双倍
     bool  isKinematic  = false; // 是否为运动学刚体
     bool  interpolate  = true;  // 是否参与渲染插值（玩家控制角色建议设为 false）
+    bool  ccdEnabled   = false; // 启用连续碰撞检测（防止穿透）
     // kinematic=true: 受速度影响但不受碰撞影响（如移动平台）
     // kinematic=false: 完全参与物理模拟（受重力和碰撞影响）
 };

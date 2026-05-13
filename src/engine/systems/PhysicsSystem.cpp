@@ -266,6 +266,40 @@ namespace engine {
 	 * 多次迭代（默认 3 次）：每次迭代后重建 grid 获取更新后的位置，
 	 * 解决多体堆叠/角落穿透问题（如 player 把球推入墙角）。
 	 */
+	/**
+	 * Swept AABB vs AABB — 用 Minkowski sum 将扫掠问题转化为 ray-slab 测试。
+	 * 判断将 start 沿 (dx,dy) 移动时是否与 target 相交。
+	 * outTime: 首次接触时间 [0,1]，1 表示无碰撞。
+	 */
+	static bool sweptAABBvsAABB(const AABB& start, float dx, float dy,
+	                            const AABB& target, float& outTime) {
+		float mw = (start.maxX - start.minX) * 0.5f;
+		float mh = (start.maxY - start.minY) * 0.5f;
+		float cx = (start.minX + start.maxX) * 0.5f;
+		float cy = (start.minY + start.maxY) * 0.5f;
+
+		// 用 start 的半宽/半高膨胀 target（Minkowski sum）
+		float eMinX = target.minX - mw, eMaxX = target.maxX + mw;
+		float eMinY = target.minY - mh, eMaxY = target.maxY + mh;
+
+		float tMin = 0.f, tMax = 1.f;
+
+		auto slab = [&](float p, float d, float lo, float hi) -> bool {
+			if (std::abs(d) < 0.0001f) return (p >= lo && p <= hi);
+			float t1 = (lo - p) / d, t2 = (hi - p) / d;
+			if (t1 > t2) std::swap(t1, t2);
+			tMin = std::max(tMin, t1);
+			tMax = std::min(tMax, t2);
+			return tMin <= tMax;
+		};
+
+		if (!slab(cx, dx, eMinX, eMaxX)) return false;
+		if (!slab(cy, dy, eMinY, eMaxY)) return false;
+
+		outTime = tMin;
+		return (tMin >= 0.f && tMin <= 1.f);
+	}
+
 	void PhysicsSystem::rebuildGrids() {
 		dynamicGrid_.clear();
 		staticGrid_.clear();
@@ -281,6 +315,20 @@ namespace engine {
 	}
 
 	void PhysicsSystem::resolveCollisions() {
+		// ── 保存 CCD 实体的预碰撞状态 ──
+		ccdBuffer_.clear();
+		{
+			auto ccdView = world_.view<Transform, Collider, RigidBody>();
+			for (auto [e, tf, col, rb] : ccdView.each()) {
+				(void)col;
+				if (rb.ccdEnabled) {
+					AABB box = makeEntityAABB(world_, e);
+					ccdBuffer_.push_back({e, box.minX, box.minY, box.maxX, box.maxY,
+					                      tf.x, tf.y});
+				}
+			}
+		}
+
 		const int kMaxIter = 3;
 
 		for (int iter = 0; iter < kMaxIter; ++iter) {
@@ -378,6 +426,63 @@ namespace engine {
 							world_.patch<Transform>(other);
 						}
 					}
+				}
+			}
+		}
+
+		// ── CCD 后处理 ────────────────────────────────────────────────
+		// 对启用了 ccdEnabled 的动态体，从预碰撞位置到当前位置做 swept AABB 检测。
+		// 如果扫掠路径穿透了静态体，把位置 clamp 到首次接触点。
+		if (!ccdBuffer_.empty()) {
+			rebuildGrids();
+			for (auto& entry : ccdBuffer_) {
+				Transform* tf = world_.try_get<Transform>(entry.e);
+				Collider* col = world_.try_get<Collider>(entry.e);
+				if (!tf || !col) continue;
+
+				float dx = tf->x - entry.oldX;
+				float dy = tf->y - entry.oldY;
+				float minSize = std::min(col->width, col->height);
+				if (dx * dx + dy * dy < minSize * minSize * 0.25f) continue;
+
+				// 重建旧 AABB
+				AABB oldBox{entry.oldMinX, entry.oldMinY, entry.oldMaxX, entry.oldMaxY};
+
+				// 扫掠路径的包围盒
+				AABB sweepBox = oldBox;
+				sweepBox.minX = std::min(sweepBox.minX, oldBox.minX + dx);
+				sweepBox.maxX = std::max(sweepBox.maxX, oldBox.maxX + dx);
+				sweepBox.minY = std::min(sweepBox.minY, oldBox.minY + dy);
+				sweepBox.maxY = std::max(sweepBox.maxY, oldBox.maxY + dy);
+
+				float bestT = 1.f;
+				auto staticCandidates = staticGrid_.query(
+					sweepBox.minX, sweepBox.minY,
+					sweepBox.maxX - sweepBox.minX,
+					sweepBox.maxY - sweepBox.minY
+				);
+				std::sort(staticCandidates.begin(), staticCandidates.end());
+				staticCandidates.erase(
+					std::unique(staticCandidates.begin(), staticCandidates.end()),
+					staticCandidates.end());
+
+				for (auto se : staticCandidates) {
+					if (!world_.all_of<Collider>(se)) continue;
+					const Collider& scol = world_.get<Collider>(se);
+					if (!canCollide(*col, scol)) continue;
+
+					AABB targetBox = makeEntityAABB(world_, se);
+					float t = 1.f;
+					if (sweptAABBvsAABB(oldBox, dx, dy, targetBox, t) && t < bestT) {
+						bestT = t;
+					}
+				}
+
+				if (bestT < 1.f) {
+					float contact = std::max(0.f, bestT - 0.001f);
+					tf->x = entry.oldX + dx * contact;
+					tf->y = entry.oldY + dy * contact;
+					world_.patch<Transform>(entry.e);
 				}
 			}
 		}

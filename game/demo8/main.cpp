@@ -377,6 +377,7 @@ int main(int argc, char** argv) {
 		engine::RigidBody rb;
 		rb.velocityX = vx; rb.velocityY = vy;
 		rb.gravityScale = 0.f;
+		rb.ccdEnabled = true;
 		api.addComponent(e, rb);
 		return e;
 	};
