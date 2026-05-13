@@ -290,6 +290,7 @@ namespace engine {
 	bool PhysicsSystem::canCollide(const Collider& a, const Collider& b) const {
 		// 两个都是 Trigger 则不产生物理碰撞
 		//if (a.isTrigger && b.isTrigger) return false;
+
 		// 双向检测：A 能碰 B，且 B 能碰 A
 		return (a.layer & b.mask) != 0 && (b.layer & a.mask) != 0;
 	}
@@ -297,22 +298,32 @@ namespace engine {
 	/**
 	 * 碰撞解决 - 检测并处理所有碰撞对
 	 *
-	 * 当前实现：O(n²) 暴力遍历
-	 * 后续优化：四叉树 / Sweep and Prune
+	 * 优化后实现：Sweep and Prune 宽相位
+	 *
+	 * 相比 O(n²) 暴力遍历的改进：
+	 * 1. 按 AABB minX 升序排列所有实体
+	 * 2. 外层循环遍历每个实体 i
+	 * 3. 内层从 i+1 开始，当 ej.aabb.minX > ei.aabb.maxX 时提前 break
+	 *    — X 轴已无重叠，后续所有 j 也不可能与 i 重叠（已排序）
+	 * 4. 通过 X 轴快速剔除后，再做完整 AABB 重叠测试
+	 *
+	 * 同时将 RigidBody 信息缓存进 ColEntry，避免 n² 次 ECS 组件查找。
 	 *
 	 * 流程：
-	 * 1. 收集所有碰撞体到数组
-	 * 2. 两两检测重叠
-	 * 3. 触发碰撞事件（无论是否 Trigger）
-	 * 4. 非Trigger碰撞体进行位置分离
-	 * 5. 更新 AABB 避免同帧重复碰撞
+	 * 1. 收集所有碰撞体，计算 AABB，缓存 RigidBody 信息
+	 * 2. 按 minX 排序（SAP 核心）
+	 * 3. 两两检测重叠，X 轴无重叠时提前退出
+	 * 4. 触发碰撞事件（无论是否 Trigger）
+	 * 5. 非 Trigger 碰撞体进行位置分离
+	 * 6. 更新 AABB 避免同帧重复碰撞
 	 */
 	void PhysicsSystem::resolveCollisions() {
-		// 收集所有有 Transform + Collider 的实体及其 AABB
-		// 使用数组而非直接遍历 view，因为需要多次访问和更新 AABB
+		// [优化] ColEntry 缓存 RigidBody 状态，避免 n² 次 ECS 查找
 		struct ColEntry {
 			entt::entity e;
 			AABB aabb;
+			bool hasRb;
+			bool isKinematic;
 		};
 		std::vector<ColEntry> entries;
 		entries.reserve(64);
@@ -321,21 +332,32 @@ namespace engine {
 		for (auto [e, tf, col] : view.each()) {
 			(void)tf;
 			(void)col;
-			entries.push_back({ e, makeEntityAABB(world_, e) });
+			bool hasRb = world_.all_of<RigidBody>(e);
+			bool isKin = hasRb && world_.get<RigidBody>(e).isKinematic;
+			entries.push_back({ e, makeEntityAABB(world_, e), hasRb, isKin });
 		}
 
-		// O(n²) 碰撞检测
+		// [优化] Sweep and Prune：按 AABB minX 升序排列
+		// 排序后内层循环可在 X 轴不相交时提前 break，大幅减少配对数
+		std::sort(entries.begin(), entries.end(), [](const ColEntry& a, const ColEntry& b) {
+			return a.aabb.minX < b.aabb.minX;
+			});
+
 		for (int i = 0; i < (int)entries.size(); ++i) {
 			for (int j = i + 1; j < (int)entries.size(); ++j) {
 				auto& ei = entries[i];
 				auto& ej = entries[j];
+
+				// [优化] SAP 提前退出：j 的左边界已超过 i 的右边界，
+				// 由于数组按 minX 排序，后续所有 j 也不可能与 i 重叠
+				if (ej.aabb.minX >= ei.aabb.maxX) break;
 
 				const Collider& ci = world_.get<Collider>(ei.e);
 				const Collider& cj = world_.get<Collider>(ej.e);
 
 				// 层过滤
 				if (!canCollide(ci, cj)) continue;
-				// AABB 重叠检测
+				// 完整 AABB 重叠检测（含 Y 轴）
 				if (!overlaps(ei.aabb, ej.aabb)) continue;
 
 				// 计算分离向量
@@ -349,28 +371,23 @@ namespace engine {
 				// Trigger 只触发事件，不做物理分离
 				if (ci.isTrigger || cj.isTrigger) continue;
 
-				// 根据刚体类型决定分离方式
-				bool iHasRb = world_.all_of<RigidBody>(ei.e);
-				bool jHasRb = world_.all_of<RigidBody>(ej.e);
-				bool iKin = iHasRb && world_.get<RigidBody>(ei.e).isKinematic;
-				bool jKin = jHasRb && world_.get<RigidBody>(ej.e).isKinematic;
-
+				// [优化] 直接使用缓存的 hasRb / isKinematic，无需再查 ECS
 				Transform& tfi = world_.get<Transform>(ei.e);
 				Transform& tfj = world_.get<Transform>(ej.e);
 
-				if (iHasRb && !iKin && jHasRb && !jKin) {
+				if (ei.hasRb && !ei.isKinematic && ej.hasRb && !ej.isKinematic) {
 					// 双方都是动态物体：各承担一半位移
 					tfi.x += sepX * 0.5f; tfi.y += sepY * 0.5f;
 					tfj.x -= sepX * 0.5f; tfj.y -= sepY * 0.5f;
 					world_.patch<Transform>(ei.e);
 					world_.patch<Transform>(ej.e);
 				}
-				else if (iHasRb && !iKin) {
+				else if (ei.hasRb && !ei.isKinematic) {
 					// 只有 i 是动态物体：i 完全承担位移
 					tfi.x += sepX; tfi.y += sepY;
 					world_.patch<Transform>(ei.e);
 				}
-				else if (jHasRb && !jKin) {
+				else if (ej.hasRb && !ej.isKinematic) {
 					// 只有 j 是动态物体：j 完全承担位移
 					tfj.x -= sepX; tfj.y -= sepY;
 					world_.patch<Transform>(ej.e);
@@ -457,7 +474,10 @@ namespace engine {
 							if (sepX != 0.f && rb.velocityX * sepX < 0.f) rb.velocityX = 0.f;
 							if (sepY != 0.f && rb.velocityY * sepY < 0.f) rb.velocityY = 0.f;
 
-							actorBox = makeEntityAABB(world_, actor);
+							// [优化] 分离后直接偏移 AABB，避免重新查询 ECS 和 Sprite 组件。
+							// actorBox 是栈上的本地副本，直接加减 sep 等价于重建。
+							actorBox.minX += sepX; actorBox.maxX += sepX;
+							actorBox.minY += sepY; actorBox.maxY += sepY;
 						}
 					}
 				}
@@ -507,7 +527,8 @@ namespace engine {
 
 			(void)tf;
 			(void)col;
-			AABB box = makeEntityAABB(world_, e);
+			// [优化] 每个实体只计算一次 AABB，同时复用于命中判断和法线计算
+			const AABB box = makeEntityAABB(world_, e);
 
 			// Slab 算法：计算射线与 AABB 的交点
 			// tMin: 射线进入 AABB 的时间
@@ -549,10 +570,7 @@ namespace engine {
 				result.hitX = startX + dirX * tMin;
 				result.hitY = startY + dirY * tMin;
 
-				// 计算法线（简化：指向碰撞体中心）
-				(void)tf;
-				(void)col;
-				AABB box = makeEntityAABB(world_, e);
+				// [优化] 直接复用上方已算好的 box，原代码此处重复调用了 makeEntityAABB
 				float cx = (box.minX + box.maxX) * 0.5f;
 				float cy = (box.minY + box.maxY) * 0.5f;
 				result.normalX = cx - result.hitX;
