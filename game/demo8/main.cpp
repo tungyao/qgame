@@ -102,6 +102,8 @@ public:
 	bool queryRayHit = false;
 	int  queryBoxCount = 0;
 	int  queryCircleCount = 0;
+	bool jShotHit = false;
+	float jShotDist = 0.f;
 
 	CollisionTestSystem(engine::EngineContext& ctx, engine::GameAPI* api)
 		: ctx_(ctx), api_(api) {}
@@ -174,6 +176,27 @@ protected:
 		}
 		if (ctx_.inputState.isKeyJustPressed(SDLK_C)) {
 			showCircle_ = !showCircle_;
+		}
+
+		// ── 3. J 键发射射线，检测是否击中 pickup（红球）──
+		if (ctx_.inputState.isKeyJustPressed(SDLK_J)) {
+			auto hit = api_->raycast(
+				pTf->x, pTf->y,
+				playerDirX_, playerDirY_,
+				500.f,
+				engine::COLLISION_LAYER_ALL);
+			jShotHit = hit.hit && hit.entity == pickup;
+			jShotDist = hit.distance;
+			if (jShotHit) {
+				score++;
+				respawnPickup();
+				std::printf("[J-Shot] HIT pickup at dist=%.0f  score=%d\n",
+					jShotDist, score);
+			} else {
+				std::printf("[J-Shot] MISS  dist=%.0f  entity=%s\n",
+					hit.distance,
+					hit.hit ? "other" : "none");
+			}
 		}
 
 		// Raycast 测试
@@ -438,11 +461,13 @@ int main(int argc, char** argv) {
 			"[T] Raycast: %s  dist=%.0f  hit=%s\n"
 			"[B] OverlapBox(160x120): %d entities\n"
 			"[C] OverlapCircle(r=100): %d entities\n"
-			"WASD=Move  T=Raycast  B=Box  C=Circle  ESC=Exit",
+			"[J] Shot pickup: %s  dist=%.0f\n"
+			"WASD=Move  J=ShootRay  T=Raycast  B=Box  C=Circle  ESC=Exit",
 			fps, ts.score, ts.collisionCount,
 			(ts.showRaycast_ ? "ON" : "OFF"), ts.queryRayDist,
 			(ts.queryRayHit ? "YES" : "no"),
-			ts.queryBoxCount, ts.queryCircleCount);
+			ts.queryBoxCount, ts.queryCircleCount,
+			(ts.jShotHit ? "HIT!" : "---"), ts.jShotDist);
 		api.setDebugInfo(buf);
 		ts.collisionCount = 0;
 	}
