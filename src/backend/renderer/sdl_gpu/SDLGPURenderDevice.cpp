@@ -1175,10 +1175,14 @@ void SDLGPURenderDevice::renderCmdsToTarget(SDL_GPUCommandBuffer* cmdBuf,
             const float v0 =  s->srcRect.y              / th;
             const float u1 = (s->srcRect.x + s->srcRect.w) / tw;
             const float v1 = (s->srcRect.y + s->srcRect.h) / th;
+            // 根据 pivot 计算 sprite 中心，使其与 PhysicsSystem/DebugOverlay 的坐标系一致
+            // pivot=(0.5,0.5) 时中心不偏移；pivot=(0,0) 时中心向左上偏移半个尺寸
+            const float centerX = s->x + (0.5f - s->pivotX) * (hw * 2.0f);
+            const float centerY = s->y + (0.5f - s->pivotY) * (hh * 2.0f);
             float px[4], py[4];
             for (int i = 0; i < 4; ++i) {
-                px[i] = s->x + lx[i] * cosR - ly[i] * sinR;
-                py[i] = s->y + lx[i] * sinR + ly[i] * cosR;
+                px[i] = centerX + lx[i] * cosR - ly[i] * sinR;
+                py[i] = centerY + lx[i] * sinR + ly[i] * cosR;
             }
             pushQuad(px[0],py[0], px[1],py[1], px[2],py[2], px[3],py[3],
                      u0,v0, u1,v1, s->tint);
