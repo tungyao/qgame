@@ -180,8 +180,8 @@ protected:
 
 		// ── 3. J 键向鼠标方向发射射线，检测是否击中 pickup（红球）──
 		if (ctx_.inputState.isKeyJustPressed(SDLK_J)) {
-			float mx = ctx_.inputState.pointerX(0);
-			float my = ctx_.inputState.pointerY(0);
+			float mx = ctx_.inputState.pointerX(0) * ctx_.windowWidth;
+			float my = ctx_.inputState.pointerY(0) * ctx_.windowHeight;
 			float rdx = mx - pTf->x;
 			float rdy = my - pTf->y;
 			float rlen = std::sqrt(rdx * rdx + rdy * rdy);
@@ -462,8 +462,8 @@ int main(int argc, char** argv) {
 		// ── 调试 HUD ──
 		char buf[512];
 		auto& ts = testSys;
-		float mx = ctx.inputState.pointerX(0);
-		float my = ctx.inputState.pointerY(0);
+		float mx = ctx.inputState.pointerX(0) * ctx.windowWidth;
+		float my = ctx.inputState.pointerY(0) * ctx.windowHeight;
 		std::snprintf(buf, sizeof(buf),
 			"FPS: %d  |  Score: %d  |  Collisions/frame: %d\n"
 			"Mouse: (%.0f, %.0f)\n"
