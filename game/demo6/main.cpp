@@ -535,6 +535,12 @@ int main(int argc, char** argv) {
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(head, col);
 	}
+	// 蛇头是动态体（虽然由 SnakeSystem 控制位置），有 RigidBody 才能触发碰撞检测
+	{
+		engine::RigidBody rb;
+		rb.isKinematic = true;
+		api.addComponent(head, rb);
+	}
 	{
 		SnakeHead sh;
 		sh.speed = speed;

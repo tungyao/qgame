@@ -32,11 +32,11 @@ PhysicsSystem
   │
   ├── resolveCollisions()
   │     1. 构建 dynamicGrid_ + staticGrid_
-  │     2. 遍历所有 Collider 实体：
-  │        A) 动态-动态：外循环为动态体 → 查 dynamicGrid_，含分离
-  │        B) 动态-静态：同一动态体 → 查 staticGrid_，含分离
-  │        C) 静态-静态（仅事件）：外循环为静态体 → 查 staticGrid_，无分离
-  │     3. 随后 resolveTileCollisions()
+  │     2. 外循环只遍历动态体（有 RigidBody）：
+  │        A) 动态-动态：查 dynamicGrid_，entity ID 去重，含分离
+  │        B) 动态-静态：查 staticGrid_，无需去重，含分离
+  │     3. 静态-静态对完全跳过（移动实体必须挂 RigidBody）
+  │     4. 随后 resolveTileCollisions()
   │
   ├── raycast() / overlapBox() / overlapCircle()
   │     1. 计算查询覆盖的 grid cell 范围
@@ -126,8 +126,8 @@ for (auto [e, tf, col] : view.each()) {
      仅派发碰撞事件，不做物理分离。保障 Trigger-only 实体（如 Snake 头与食物）能正常产生事件
 ```
 
-**与计划原案的关键差异**：
-- 计划原案说"静态-静态对跳过"，但 **Trigger-only 静态实体仍需碰撞事件**（如 Snake 头与食物均无 RigidBody）。添加 C) 节处理此场景。
+**设计决策**：
+- 静态-静态对完全跳过。Snake 等 Trigger-only 场景通过给移动实体添加 `RigidBody{isKinematic: true}` 解决，这样实体进入 dynamicGrid_，触发碰撞事件。
 - staticGrid_ 当前每帧全量重建（`clear()` + 全量 insert），hook 仅作预留。后续可通过 SpatialHashGrid 增加 `remove()` 实现增量更新。
 
 ### Step 2: 查询 API 接入 grid

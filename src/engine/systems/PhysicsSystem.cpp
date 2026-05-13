@@ -308,11 +308,10 @@ namespace engine {
 	 * - dynamicGrid_：有 RigidBody 的实体（含 kinematic）
 	 * - staticGrid_：无 RigidBody 的实体
 	 *
-	 * 外层遍历所有 Collider 实体。动态体同时命中两个子循环产生碰撞事件 + 分离；
-	 * 静态体只进入 C) 节产生碰撞事件（Trigger-only 用），不做物理分离。
-	 *
-	 * 复杂度：O(n_total · cells + pairs)
-	 * 较单 grid 方案减少了动态体候选集中的静态体数量，提升了 D-D 查询效率。
+	 * 外层只遍历动态体，产生两类碰撞对：
+	 *   A) 动态-动态：查 dynamicGrid_，entity ID 排序去重，分离逻辑完整
+	 *   B) 动态-静态：查 staticGrid_，无需 pair 去重，只推开动态体
+	 *   静态-静态对：完全跳过（移动实体必须有 RigidBody）
 	 */
 	void PhysicsSystem::resolveCollisions() {
 		// ── 1. 构建网格 ──
@@ -328,106 +327,16 @@ namespace engine {
 			            aabb.maxX - aabb.minX, aabb.maxY - aabb.minY);
 		}
 
-		// ── 2. 碰撞检测 ──
-		for (auto [e, tf, col] : allView.each()) {
+		// ── 2. 碰撞检测（只遍历动态体）──
+		auto dynView = world_.view<Transform, Collider, RigidBody>();
+		for (auto [e, tf, col, rb] : dynView.each()) {
 			(void)tf;
 			AABB aabb = makeEntityAABB(world_, e);
-			bool hasRb = world_.all_of<RigidBody>(e);
-			bool isKin = hasRb && world_.get<RigidBody>(e).isKinematic;
+			bool isKin = rb.isKinematic;
 
-			if (hasRb) {
-				// ── A) 动态-动态 ──
-				{
-					auto candidates = dynamicGrid_.query(
-						aabb.minX, aabb.minY,
-						aabb.maxX - aabb.minX,
-						aabb.maxY - aabb.minY
-					);
-					std::sort(candidates.begin(), candidates.end());
-					auto last = std::unique(candidates.begin(), candidates.end());
-					auto eId = entt::to_integral(e);
-
-					for (auto it = candidates.begin(); it != last; ++it) {
-						auto other = *it;
-						if (other == e) continue;
-						if (eId >= entt::to_integral(other)) continue;
-
-						const Collider& cj = world_.get<Collider>(other);
-						if (!canCollide(col, cj)) continue;
-
-						AABB otherAabb = makeEntityAABB(world_, other);
-						if (!overlaps(aabb, otherAabb)) continue;
-
-						float sepX = 0.f, sepY = 0.f;
-						minSeparation(aabb, otherAabb, sepX, sepY);
-
-						dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
-						dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
-
-						if (col.isTrigger || cj.isTrigger) continue;
-
-						bool otherIsKin = world_.get<RigidBody>(other).isKinematic;
-
-						Transform& tfe = world_.get<Transform>(e);
-						Transform& tfo = world_.get<Transform>(other);
-
-						if (!isKin && !otherIsKin) {
-							tfe.x += sepX * 0.5f; tfe.y += sepY * 0.5f;
-							tfo.x -= sepX * 0.5f; tfo.y -= sepY * 0.5f;
-							world_.patch<Transform>(e);
-							world_.patch<Transform>(other);
-						}
-						else if (!isKin) {
-							tfe.x += sepX; tfe.y += sepY;
-							world_.patch<Transform>(e);
-						}
-						else if (!otherIsKin) {
-							tfo.x -= sepX; tfo.y -= sepY;
-							world_.patch<Transform>(other);
-						}
-					}
-				}
-
-				// ── B) 动态-静态 ──
-				{
-					auto candidates = staticGrid_.query(
-						aabb.minX, aabb.minY,
-						aabb.maxX - aabb.minX,
-						aabb.maxY - aabb.minY
-					);
-					std::sort(candidates.begin(), candidates.end());
-					auto last = std::unique(candidates.begin(), candidates.end());
-
-					for (auto it = candidates.begin(); it != last; ++it) {
-						auto other = *it;
-						if (other == e) continue;
-
-						const Collider& cj = world_.get<Collider>(other);
-						if (!canCollide(col, cj)) continue;
-
-						AABB otherAabb = makeEntityAABB(world_, other);
-						if (!overlaps(aabb, otherAabb)) continue;
-
-						float sepX = 0.f, sepY = 0.f;
-						minSeparation(aabb, otherAabb, sepX, sepY);
-
-						dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
-						dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
-
-						if (col.isTrigger || cj.isTrigger) continue;
-						if (isKin) continue;
-
-						Transform& tfe = world_.get<Transform>(e);
-						tfe.x += sepX; tfe.y += sepY;
-						world_.patch<Transform>(e);
-					}
-				}
-			}
-			else {
-				// ── C) 静态-静态（仅触发事件，无物理分离）──
-				// 静态-静态对不产生分离，但需要派发 Trigger 事件
-				// （如 Snake 中 head 和 food 都无 RigidBody，仍需碰撞事件）
-				auto candidates = staticGrid_.query(
+			// ── A) 动态-动态 ──
+			{
+				auto candidates = dynamicGrid_.query(
 					aabb.minX, aabb.minY,
 					aabb.maxX - aabb.minX,
 					aabb.maxY - aabb.minY
@@ -452,7 +361,63 @@ namespace engine {
 
 					dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
 					dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
-					// 不做物理分离
+
+					if (col.isTrigger || cj.isTrigger) continue;
+
+					bool otherIsKin = world_.get<RigidBody>(other).isKinematic;
+
+					Transform& tfe = world_.get<Transform>(e);
+					Transform& tfo = world_.get<Transform>(other);
+
+					if (!isKin && !otherIsKin) {
+						tfe.x += sepX * 0.5f; tfe.y += sepY * 0.5f;
+						tfo.x -= sepX * 0.5f; tfo.y -= sepY * 0.5f;
+						world_.patch<Transform>(e);
+						world_.patch<Transform>(other);
+					}
+					else if (!isKin) {
+						tfe.x += sepX; tfe.y += sepY;
+						world_.patch<Transform>(e);
+					}
+					else if (!otherIsKin) {
+						tfo.x -= sepX; tfo.y -= sepY;
+						world_.patch<Transform>(other);
+					}
+				}
+			}
+
+			// ── B) 动态-静态 ──
+			{
+				auto candidates = staticGrid_.query(
+					aabb.minX, aabb.minY,
+					aabb.maxX - aabb.minX,
+					aabb.maxY - aabb.minY
+				);
+				std::sort(candidates.begin(), candidates.end());
+				auto last = std::unique(candidates.begin(), candidates.end());
+
+				for (auto it = candidates.begin(); it != last; ++it) {
+					auto other = *it;
+					if (other == e) continue;
+
+					const Collider& cj = world_.get<Collider>(other);
+					if (!canCollide(col, cj)) continue;
+
+					AABB otherAabb = makeEntityAABB(world_, other);
+					if (!overlaps(aabb, otherAabb)) continue;
+
+					float sepX = 0.f, sepY = 0.f;
+					minSeparation(aabb, otherAabb, sepX, sepY);
+
+					dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
+					dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
+
+					if (col.isTrigger || cj.isTrigger) continue;
+					if (isKin) continue;
+
+					Transform& tfe = world_.get<Transform>(e);
+					tfe.x += sepX; tfe.y += sepY;
+					world_.patch<Transform>(e);
 				}
 			}
 		}
