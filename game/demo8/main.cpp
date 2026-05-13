@@ -270,6 +270,22 @@ int main(int argc, char** argv) {
 		api.addComponent(camEnt, cam);
 	}
 
+	// ── UI 相机（debug overlay 需要 UI/Screen pass）──
+	auto uiCamEnt = api.spawnEntity();
+	api.addComponent(uiCamEnt, engine::Transform{ 640.0f, 360.0f });
+	{
+		engine::Camera cam;
+		cam.zoom = 1.f;
+		cam.primary = true;
+		cam.depth = 1;
+		cam.layerMask = engine::renderPassBit(engine::RenderPass::UI)
+			| engine::renderPassBit(engine::RenderPass::Screen);
+		cam.clear = false;
+		cam.cullEnabled = false;
+		cam.pixelSnap = true;
+		api.addComponent(uiCamEnt, cam);
+	}
+
 	// ── 加载 manifest + debug overlay ──
 #ifndef QGAME_BAKED_MANIFEST
 #define QGAME_BAKED_MANIFEST ""
@@ -284,7 +300,7 @@ int main(int argc, char** argv) {
 		api.addComponent(e, makeSprite(wallTex, static_cast<int>(w), static_cast<int>(h),
 			1, engine::RenderPass::World, tint));
 		engine::Collider col;
-		col.width = w; col.height = h; col.offsetX = -w * 0.5f; col.offsetY = -h * 0.5f;
+		col.width = w; col.height = h; col.offsetX = 0; col.offsetY = 0;
 		col.layer = engine::COLLISION_LAYER_STATIC;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(e, col);
@@ -304,7 +320,7 @@ int main(int argc, char** argv) {
 			2, engine::RenderPass::World));
 		engine::Collider col;
 		col.width = kObsW; col.height = kObsH;
-		col.offsetX = -kObsW * 0.5f; col.offsetY = -kObsH * 0.5f;
+		col.offsetX = 0; col.offsetY = 0;
 		col.layer = engine::COLLISION_LAYER_STATIC;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(e, col);
@@ -322,7 +338,7 @@ int main(int argc, char** argv) {
 			static_cast<int>(kBallR * 2), 3, engine::RenderPass::World));
 		engine::Collider col;
 		col.width = kBallR * 2; col.height = kBallR * 2;
-		col.offsetX = -kBallR; col.offsetY = -kBallR;
+		col.offsetX = 0; col.offsetY = 0;
 		col.layer = engine::COLLISION_LAYER_DEFAULT;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(e, col);
@@ -352,7 +368,7 @@ int main(int argc, char** argv) {
 	{
 		engine::Collider col;
 		col.width = kPlayerR * 2; col.height = kPlayerR * 2;
-		col.offsetX = -kPlayerR; col.offsetY = -kPlayerR;
+		col.offsetX = 0; col.offsetY = 0;
 		col.isTrigger = true;
 		col.layer = engine::COLLISION_LAYER_PLAYER;
 		col.mask = engine::COLLISION_LAYER_ALL;
@@ -375,7 +391,7 @@ int main(int argc, char** argv) {
 			static_cast<int>(kPickupR * 2), 3, engine::RenderPass::World));
 		engine::Collider col;
 		col.width = kPickupR * 2; col.height = kPickupR * 2;
-		col.offsetX = -kPickupR; col.offsetY = -kPickupR;
+		col.offsetX = 0; col.offsetY = 0;
 		col.isTrigger = true;
 		col.layer = engine::COLLISION_LAYER_DEFAULT;
 		col.mask = engine::COLLISION_LAYER_ALL;
