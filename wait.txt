@@ -1,1 +1,5 @@
- 排查正常移动时渲染位置抽搐问题
+224715pivot 语义:
+- pivotX=0.5,pivotr=0.5(默认):Transform 位置 =sprite 中心 
+- pivotX=0, pivotY=0: Transform 位置 = sprite 左上角 
+- pivotX=1,pivotY=1: Transform 位置
+-sprite右下角计算公式:中心 =Transform + (0.5 - pivot)*尺寸
