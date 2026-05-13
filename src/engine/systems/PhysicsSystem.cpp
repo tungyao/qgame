@@ -260,7 +260,7 @@ namespace engine {
 	 *
 	 * 外层只遍历动态体，产生两类碰撞对：
 	 *   A) 动态-动态：查 dynamicGrid_，entity ID 排序去重，分离逻辑完整
-	 *   B) 动态-静态：查 staticGrid_，无需 pair 去重，只推开动态体
+	 *   B) 动态-静态：查 staticGrid_，无需 pair 去重，推开动态/kinematic 体
 	 *   静态-静态对：完全跳过（移动实体必须有 RigidBody）
 	 */
 	void PhysicsSystem::rebuildGrids() {
@@ -366,8 +366,9 @@ namespace engine {
 					dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
 
 					if (col.isTrigger || cj.isTrigger) continue;
-					if (isKin) continue;
 
+					// Kinematic 体（脚本驱动移动）同样会被静态几何体阻挡，
+					// 否则会穿过墙体。Kinematic 仅跳过动态-动态分离和重力积分。
 					Transform& tfe = world_.get<Transform>(e);
 					tfe.x += sepX; tfe.y += sepY;
 					world_.patch<Transform>(e);

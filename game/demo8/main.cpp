@@ -401,7 +401,6 @@ int main(int argc, char** argv) {
 		engine::Collider col;
 		col.width = kPlayerR * 2; col.height = kPlayerR * 2;
 		col.offsetX = 0; col.offsetY = 0;
-		col.isTrigger = true;
 		col.layer = engine::COLLISION_LAYER_PLAYER;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(player, col);
