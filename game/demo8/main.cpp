@@ -179,6 +179,7 @@ protected:
 		}
 
 		// ── 3. J 键向鼠标方向发射射线，检测是否击中 pickup（红球）──
+		// 使用 COLLISION_LAYER_ENEMY 作为 mask，射线穿透墙体/障碍物，只检测 pickup
 		if (ctx_.inputState.isKeyJustPressed(SDLK_J)) {
 			float mx = ctx_.inputState.pointerX(0) * ctx_.windowWidth;
 			float my = ctx_.inputState.pointerY(0) * ctx_.windowHeight;
@@ -190,7 +191,7 @@ protected:
 				pTf->x, pTf->y,
 				rdx, rdy,
 				500.f,
-				engine::COLLISION_LAYER_ALL);
+				engine::COLLISION_LAYER_ENEMY);
 			jShotHit = hit.hit && hit.entity == pickup;
 			jShotDist = hit.distance;
 			if (jShotHit) {
@@ -420,7 +421,7 @@ int main(int argc, char** argv) {
 		col.width = kPickupR * 2; col.height = kPickupR * 2;
 		col.offsetX = 0; col.offsetY = 0;
 		col.isTrigger = true;
-		col.layer = engine::COLLISION_LAYER_DEFAULT;
+		col.layer = engine::COLLISION_LAYER_ENEMY;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(pickup, col);
 	}
