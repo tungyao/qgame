@@ -144,7 +144,9 @@ public:
      * }
      */
     RaycastHit raycast(float startX, float startY, float dirX, float dirY, float maxDist,
-                       CollisionLayer layerMask = COLLISION_LAYER_ALL);
+                       CollisionLayer layerMask = COLLISION_LAYER_ALL,
+                       CollisionLayer ignoreLayer = 0,
+                       entt::entity ignoreEntity = entt::null);
     
     /**
      * 盒形区域查询 - 检测矩形区域内所有碰撞体

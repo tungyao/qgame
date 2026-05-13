@@ -191,7 +191,9 @@ protected:
 				pTf->x, pTf->y,
 				rdx, rdy,
 				500.f,
-				engine::COLLISION_LAYER_ENEMY);
+				engine::COLLISION_LAYER_ALL,
+				engine::COLLISION_LAYER_STATIC,  // 穿透墙体/障碍物
+				player);                          // 跳过自身
 			jShotHit = hit.hit && hit.entity == pickup;
 			jShotDist = hit.distance;
 			if (jShotHit) {
@@ -212,7 +214,9 @@ protected:
 				pTf->x, pTf->y,
 				playerDirX_, playerDirY_,
 				300.f,
-				engine::COLLISION_LAYER_ALL);
+				engine::COLLISION_LAYER_ALL,
+				0,
+				player);
 			queryRayHit = hit.hit;
 			queryRayDist = hit.distance;
 		}

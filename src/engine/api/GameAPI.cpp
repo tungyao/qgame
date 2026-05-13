@@ -151,8 +151,10 @@ void GameAPI::setFixedTimestep(float step) {
 }
 
 RaycastHit GameAPI::raycast(float startX, float startY, float dirX, float dirY, 
-                            float maxDist, CollisionLayer layerMask) {
-    return ctx_.systems.get<PhysicsSystem>().raycast(startX, startY, dirX, dirY, maxDist, layerMask);
+                            float maxDist, CollisionLayer layerMask,
+                            CollisionLayer ignoreLayer,
+                            entt::entity ignoreEntity) {
+    return ctx_.systems.get<PhysicsSystem>().raycast(startX, startY, dirX, dirY, maxDist, layerMask, ignoreLayer, ignoreEntity);
 }
 
 std::vector<OverlapResult> GameAPI::overlapBox(float centerX, float centerY,

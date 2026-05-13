@@ -580,7 +580,8 @@ namespace engine {
 	 * 结合 dynamicGrid_ 和 staticGrid_ 覆盖所有碰撞体（含无 RigidBody 的 Trigger）。
 	 */
 	RaycastHit PhysicsSystem::raycast(float startX, float startY, float dirX, float dirY,
-		float maxDist, CollisionLayer layerMask) {
+		float maxDist, CollisionLayer layerMask, CollisionLayer ignoreLayer,
+		entt::entity ignoreEntity) {
 		RaycastHit result{};
 		result.hit = false;
 		result.distance = maxDist;
@@ -628,8 +629,11 @@ namespace engine {
 				if (visited.contains(e)) continue;
 				visited.push(e);
 
+				if (e == ignoreEntity) continue;
+
 				const Collider& col = world_.get<Collider>(e);
 				if ((col.layer & layerMask) == 0) continue;
+				if (ignoreLayer != 0 && (col.layer & ignoreLayer) != 0) continue;
 
 				const AABB box = makeEntityAABB(world_, e);
 
@@ -654,7 +658,7 @@ namespace engine {
 					}
 				}
 
-				if (valid && tMin <= tMaxLocal && tMin > 0.0001f && tMin < result.distance) {
+				if (valid && tMin <= tMaxLocal && tMin >= 0.f && tMin < result.distance) {
 					result.hit = true;
 					result.entity = e;
 					result.distance = tMin;
