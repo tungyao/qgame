@@ -1,8 +1,10 @@
 ﻿#include "DebugOverlaySystem.h"
 #include "../components/TextComponent.h"
 #include "../components/PhysicsComponents.h"
+#include "../components/RenderComponents.h"
 #include "../../backend/renderer/IRenderDevice.h"
 #include <cstdio>
+#include <cmath>
 
 namespace engine {
 
@@ -47,12 +49,16 @@ namespace engine {
 		for (auto [ent, tf, collider] : view.each()) {
 			if (collider.width <= 0.f || collider.height <= 0.f) continue;
 
-			float cx = tf.x + collider.offsetX;
-			float cy = tf.y + collider.offsetY;
-			float hw = collider.width;
-			float hh = collider.height;
-			float rx = cx - hw;
-			float ry = cy - hh;
+			float rx, ry;
+			if (const Sprite* sprite = ctx_.world.try_get<Sprite>(ent)) {
+				const float spriteW = sprite->srcRect.w * std::abs(tf.scaleX);
+				const float spriteH = sprite->srcRect.h * std::abs(tf.scaleY);
+				rx = tf.x - sprite->pivotX * spriteW + collider.offsetX;
+				ry = tf.y - sprite->pivotY * spriteH + collider.offsetY;
+			} else {
+				rx = tf.x + collider.offsetX;
+				ry = tf.y + collider.offsetY;
+			}
 
 			core::Color color = collider.isTrigger
 				? core::Color{ 0, 200, 255, 200 }

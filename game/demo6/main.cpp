@@ -167,8 +167,8 @@ public:
 			engine::Collider bodyCol;
 			bodyCol.width = kSegmentRadius * 2;
 			bodyCol.height = kSegmentRadius * 2;
-			bodyCol.offsetX = -kSegmentRadius;
-			bodyCol.offsetY = -kSegmentRadius;
+			bodyCol.offsetX = 0;
+			bodyCol.offsetY = 0;
 			bodyCol.isTrigger = true;
 			bodyCol.mask = 0;
 
@@ -324,8 +324,8 @@ protected:
 				engine::Collider col;
 				col.width = kSegmentRadius * 2;
 				col.height = kSegmentRadius * 2;
-				col.offsetX = -kSegmentRadius;
-				col.offsetY = -kSegmentRadius;
+				col.offsetX = 0;
+				col.offsetY = 0;
 				col.isTrigger = true;
 				col.mask = 0;
 				ctx_.world.emplace<engine::Collider>(newSeg, col);
