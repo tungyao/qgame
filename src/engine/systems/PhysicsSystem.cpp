@@ -431,9 +431,11 @@ namespace engine {
 		}
 
 		// ── CCD 后处理 ────────────────────────────────────────────────
-		// 3 次碰撞迭代中，动态体可能因 D-D 推力而被压入静态体（球被玩家推入墙）。
-		// CCD 后处理对启用了 ccdEnabled 的实体做一次纯静态分离（无 D-D 干扰），
-		// 将仍嵌入静态体的实体推到刚好接触的位置。
+		// 两步策略：
+		//   1. Swept AABB：从预碰撞位置扫描到当前位置，检测是否穿透了静态体。
+		//      如果穿透（如球被推穿墙壁），将位置 clamp 到首次接触点。
+		//   2. Overlap resolve：如果球仍与静态体重叠（残余误差），
+		//      用 minSeparation 推出（无 D-D 干扰，不会被玩家压回）。
 		if (!ccdBuffer_.empty()) {
 			rebuildGrids();
 			for (auto& entry : ccdBuffer_) {
@@ -441,36 +443,70 @@ namespace engine {
 				Collider* col = world_.try_get<Collider>(entry.e);
 				if (!tf || !col) continue;
 
-				// 收集候选静态体
-				AABB curBox = makeEntityAABB(world_, entry.e);
+				float dx = tf->x - entry.oldX;
+				float dy = tf->y - entry.oldY;
+				AABB oldBox{entry.oldMinX, entry.oldMinY, entry.oldMaxX, entry.oldMaxY};
+
+				// ── 收集覆盖扫掠路径的候选静态体 ──
+				AABB sweepRegion = oldBox;
+				sweepRegion.minX = std::min(sweepRegion.minX, oldBox.minX + dx);
+				sweepRegion.maxX = std::max(sweepRegion.maxX, oldBox.maxX + dx);
+				sweepRegion.minY = std::min(sweepRegion.minY, oldBox.minY + dy);
+				sweepRegion.maxY = std::max(sweepRegion.maxY, oldBox.maxY + dy);
+
 				auto staticCandidates = staticGrid_.query(
-					curBox.minX, curBox.minY,
-					curBox.maxX - curBox.minX,
-					curBox.maxY - curBox.minY
+					sweepRegion.minX, sweepRegion.minY,
+					sweepRegion.maxX - sweepRegion.minX,
+					sweepRegion.maxY - sweepRegion.minY
 				);
 				std::sort(staticCandidates.begin(), staticCandidates.end());
 				staticCandidates.erase(
 					std::unique(staticCandidates.begin(), staticCandidates.end()),
 					staticCandidates.end());
 
-				// 逐静态体推出，无 D-D 干扰，球不会再被玩家压回去
-				for (auto se : staticCandidates) {
-					if (!world_.all_of<Collider>(se)) continue;
-					const Collider& scol = world_.get<Collider>(se);
-					if (!canCollide(*col, scol)) continue;
+				// ── 1. Swept AABB：检测帧内穿透 ──
+				{
+					float bestT = 1.f;
+					float bestNX = 0.f, bestNY = 0.f;
+					for (auto se : staticCandidates) {
+						if (!world_.all_of<Collider>(se)) continue;
+						const Collider& scol = world_.get<Collider>(se);
+						if (!canCollide(*col, scol)) continue;
+						AABB targetBox = makeEntityAABB(world_, se);
+						float t = 1.f;
+						if (sweptAABBvsAABB(oldBox, dx, dy, targetBox, t) && t < bestT) {
+							bestT = t;
+						}
+					}
+					if (bestT < 1.f) {
+						float contact = std::max(0.f, bestT - 0.001f);
+						tf->x = entry.oldX + dx * contact;
+						tf->y = entry.oldY + dy * contact;
+						world_.patch<Transform>(entry.e);
+						// 更新 dx/dy 和 oldBox 给第二步
+						dx = tf->x - entry.oldX;
+						dy = tf->y - entry.oldY;
+						oldBox = makeEntityAABB(world_, entry.e);
+					}
+				}
 
-					AABB targetBox = makeEntityAABB(world_, se);
-					if (!overlaps(curBox, targetBox)) continue;
-
-					float sx = 0.f, sy = 0.f;
-					minSeparation(curBox, targetBox, sx, sy);
-
-					tf->x += sx;
-					tf->y += sy;
-					world_.patch<Transform>(entry.e);
-					// 更新本地 curBox 避免同帧内多次重叠分离冲突
-					curBox.minX += sx; curBox.maxX += sx;
-					curBox.minY += sy; curBox.maxY += sy;
+				// ── 2. Overlap resolve：解决残余重叠 ──
+				{
+					AABB curBox = (dx == 0.f && dy == 0.f)
+						? oldBox : makeEntityAABB(world_, entry.e);
+					for (auto se : staticCandidates) {
+						if (!world_.all_of<Collider>(se)) continue;
+						const Collider& scol = world_.get<Collider>(se);
+						if (!canCollide(*col, scol)) continue;
+						AABB targetBox = makeEntityAABB(world_, se);
+						if (!overlaps(curBox, targetBox)) continue;
+						float sx = 0.f, sy = 0.f;
+						minSeparation(curBox, targetBox, sx, sy);
+						tf->x += sx; tf->y += sy;
+						world_.patch<Transform>(entry.e);
+						curBox.minX += sx; curBox.maxX += sx;
+						curBox.minY += sy; curBox.maxY += sy;
+					}
 				}
 			}
 		}
