@@ -178,11 +178,17 @@ protected:
 			showCircle_ = !showCircle_;
 		}
 
-		// ── 3. J 键发射射线，检测是否击中 pickup（红球）──
+		// ── 3. J 键向鼠标方向发射射线，检测是否击中 pickup（红球）──
 		if (ctx_.inputState.isKeyJustPressed(SDLK_J)) {
+			float mx = ctx_.inputState.pointerX(0);
+			float my = ctx_.inputState.pointerY(0);
+			float rdx = mx - pTf->x;
+			float rdy = my - pTf->y;
+			float rlen = std::sqrt(rdx * rdx + rdy * rdy);
+			if (rlen > 0.001f) { rdx /= rlen; rdy /= rlen; }
 			auto hit = api_->raycast(
 				pTf->x, pTf->y,
-				playerDirX_, playerDirY_,
+				rdx, rdy,
 				500.f,
 				engine::COLLISION_LAYER_ALL);
 			jShotHit = hit.hit && hit.entity == pickup;
