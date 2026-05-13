@@ -85,6 +85,27 @@ public:
 		return engine::updatePhaseBit(engine::UpdatePhase::GameplayPrePhysics);
 	}
 
+	void onCollision(const engine::CollisionInfo& info) {
+		auto* snake = ctx_.world.try_get<SnakeHead>(head_);
+		if (!snake || !snake->alive) return;
+
+		// 判断哪一边是蛇头，哪一边是食物
+		entt::entity foodEntity = entt::null;
+		if (info.self == head_ && ctx_.world.all_of<SnakeFood>(info.other)) {
+			foodEntity = info.other;
+		} else if (info.other == head_ && ctx_.world.all_of<SnakeFood>(info.self)) {
+			foodEntity = info.self;
+		}
+
+		if (foodEntity != entt::null) {
+			// 避免同一帧重复添加同一食物
+			auto it = std::find(foodsToEat_.begin(), foodsToEat_.end(), foodEntity);
+			if (it == foodsToEat_.end()) {
+				foodsToEat_.push_back(foodEntity);
+			}
+		}
+	}
+
 	void spawnFood() {
 		auto& reg = ctx_.world;
 		auto food = reg.create();
@@ -114,7 +135,8 @@ public:
 			col.offsetX = 0;
 			col.offsetY = 0;
 			col.isTrigger = true;
-			col.mask = 0;
+			col.layer = engine::COLLISION_LAYER_DEFAULT;
+			col.mask = engine::COLLISION_LAYER_ALL;
 			reg.emplace<engine::Collider>(food, col);
 		}
 		reg.emplace<SnakeFood>(food);
@@ -334,24 +356,17 @@ protected:
 			snake->pendingGrow--;
 		}
 
-		// ── 8. 食物碰撞 ──
-		{
-			auto foodView = ctx_.world.view<SnakeFood, engine::Transform>();
-			float eatR2 = (kSegmentRadius + kFoodRadius)
-				* (kSegmentRadius + kFoodRadius);
-			for (auto foodEnt : foodView) {
-				auto* ftf = ctx_.world.try_get<engine::Transform>(foodEnt);
-				if (!ftf) continue;
-				float fdx = headTF->x - ftf->x;
-				float fdy = headTF->y - ftf->y;
-				if (fdx * fdx + fdy * fdy < eatR2) {
+		// ── 8. 处理物理碰撞检测到的食物 ──
+		if (!foodsToEat_.empty()) {
+			for (auto foodEnt : foodsToEat_) {
+				if (ctx_.world.valid(foodEnt)) {
 					ctx_.world.destroy(foodEnt);
 					snake->score++;
 					snake->pendingGrow++;
-					spawnFood();
-					break;
 				}
 			}
+			foodsToEat_.clear();
+			spawnFood();
 		}
 
 		// ── 9. 加速 ──
@@ -361,6 +376,7 @@ protected:
 private:
 	engine::EngineContext& ctx_;
 	entt::entity           head_;
+	std::vector<entt::entity> foodsToEat_;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -515,7 +531,8 @@ int main(int argc, char** argv) {
 		col.offsetX = 0;
 		col.offsetY = 0;
 		col.isTrigger = true;
-		col.mask = 0;
+		col.layer = engine::COLLISION_LAYER_PLAYER;
+		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(head, col);
 	}
 	{
@@ -529,6 +546,10 @@ int main(int argc, char** argv) {
 	sys.headTex = headTex;
 	sys.bodyTex = bodyTex;
 	sys.foodTex = foodTex;
+
+	// 注册物理碰撞监听（蛇头与食物的 trigger 碰撞）
+	// 注意：绕过 GameAPI::onCollision 的模板限制，直接使用 entt dispatcher
+	ctx.dispatcher.sink<engine::CollisionInfo>().connect<&SnakeSystem::onCollision>(sys);
 
 	// ── 初始化身体与食物 ──
 	sys.restart(head);
