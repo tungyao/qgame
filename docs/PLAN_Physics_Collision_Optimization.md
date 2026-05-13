@@ -20,18 +20,21 @@ PhysicsSystem 持有 SpatialHashGrid<entt::entity>，同时服务于：
 
 ```
 PhysicsSystem
-  ├── entityGrid_ / staticGrid_ / dynamicGrid_ (SpatialHashGrid<entt::entity>)
-  │     - 每帧对动态实体做 clear() + multi-cell insert (用 AABB)
+  ├── entityGrid_ (SpatialHashGrid<entt::entity>)  [Step 1 ✅]
+  │     - 每帧 clear() + 所有 Transform+Collider multi-cell insert (用 AABB)
+  │     - 替代原 SAP 宽相位，entity ID 排序去重
+  │
+  ├── staticGrid_ / dynamicGrid_ (SpatialHashGrid)  [Step 3 待实现]
+  │     - 每帧只重建 dynamicGrid_
   │     - 静态实体 cache 在 staticGrid_ 中，不每帧重建
   │     - 休眠实体仍插入 dynamicGrid_（只跳过 integration，不跳过碰撞检测）
   │
   ├── resolveCollisions()
-  │     1. 每帧重建 dynamicGrid_（动态体 + 休眠体）
-  │     2. 对每个动态实体：
-  │        a. 从 dynamicGrid_ 查邻居 → 处理动态-动态对
-  │        b. 从 staticGrid_ 查邻居 → 处理动态-静态对
-  │     3. 跳过静态-静态对
+  │     1. 每帧重建 entityGrid_（所有实体）
+  │     2. 遍历所有实体（含静态），entity ID 排序确保每对只处理一次
+  │     3. 静态-静态对跳过
   │     4. 碰撞事件 + 分离逻辑不变
+  │     5. 随后 resolveTileCollisions()
   │
   ├── raycast() / overlapBox() / overlapCircle()
   │     1. 计算查询覆盖的 grid cell 范围
@@ -49,36 +52,61 @@ PhysicsSystem
         - 碰撞/外部速度变化时唤醒
 ```
 
-### 实现步骤
+### 已完成
 
-### Step 1: SpatialHashGrid 接入 broad phase
+### Step 1: SpatialHashGrid 接入 broad phase ✅
 
-**文件**: PhysicsSystem.h, PhysicsSystem.cpp
+**提交**: PhysicsSystem.h:59, PhysicsSystem.cpp:298-379
 
-PhysicsSystem 新增成员：
+**改动**：
+- `PhysicsSystem.h`：新增 `#include "../../backend/renderer/gpu_driven/SpatialHashGrid.h"` + 成员 `entityGrid_`
+- `PhysicsSystem.cpp`：`resolveCollisions()` 从 SAP 重写为 SpatialHashGrid 宽相位
+
+**实现细节**：
 ```cpp
-// 默认 64px cell size；实际值应根据场景平均 Collider 尺寸调整
-// tile 尺寸 32px → cell 64px (2x2 tile)
-// tile 尺寸 64px → cell 128px (2x2 tile)
+// PhysicsSystem.h
+#include "../../backend/renderer/gpu_driven/SpatialHashGrid.h"
+
+// 成员变量
 SpatialHashGrid<entt::entity> entityGrid_{64.f};
 ```
 
-`resolveCollisions()` 改为：
-1. `entityGrid_.clear()`
-2. 对所有 `Transform + Collider` 实体做 multi-cell insert（用 AABB）
-3. 对每个动态实体，query 覆盖的 cell 获得候选集
-4. 对候选集做 layer 过滤 + AABB 重叠 + 分离
-5. 使用 visited 标记避免重复处理同一对
+```cpp
+// resolveCollisions() 核心流程
+entityGrid_.clear();
+// 1. 所有 Transform+Collider 用 AABB multi-cell insert
+for (auto [e, tf, col] : view.each()) {
+    AABB aabb = makeEntityAABB(world_, e);
+    entityGrid_.insert(e, aabb.minX, aabb.minY,
+                       aabb.maxX - aabb.minX, aabb.maxY - aabb.minY);
+}
 
-**复杂度说明**：
-- 当前 SAP：排序 O(n log n)，最坏 O(n²)（宽物体全重叠时），平均 O(n log n + n·k)（k 为 X 轴平均重叠数）
-- 优化后：插入 O(n·cells_per_entity)，查询 O(cells_queried × candidates_per_cell)
-- 对窄物体/均匀分布的场景提升显著；对全部密集重叠的场景两方案接近
+// 2. 遍历所有实体（含静态），用 entity ID 排序去重
+for (auto [e, tf, col] : view.each()) {
+    auto candidates = entityGrid_.query(aabb...);
+    std::sort(candidates.begin(), candidates.end());
+    auto last = std::unique(candidates.begin(), candidates.end());
 
-**去重方案**：
-- 推荐：`std::vector<uint64_t> processedPairs_`，每对 entity pair 编码为 `(min(e1,e2) << 32) | max(e1,e2)`，每帧 `clear()` + 插入 + 最终 `sort + unique` 去重
-- 备选：每动态实体用 `entt::sparse_set visited` 标记已配对实体（O(1) 查插，但需要每帧 clear 或 frame counter 技巧）
-- 不建议：裸 `std::vector<pair>` + 线性查找（退化为 O(n²)）
+    auto eId = entt::to_integral(e);
+    for (auto it = candidates.begin(); it != last; ++it) {
+        auto other = *it;
+        if (eId >= entt::to_integral(other)) continue;  // 每对只一次
+        // ... 碰撞处理
+    }
+}
+```
+
+**Pair 去重策略**：利用 entity ID 的大小关系（`eId < oId`），每个碰撞对只由 ID 较小的实体处理。这替代了原方案中 `processedPairs_` 的 `std::vector<uint64_t>` 方法，零额外内存分配，代码更简洁。
+
+**与 SAP 的关键差异**：
+| 项目 | SAP | Grid |
+|------|-----|------|
+| 复杂度 | O(n log n + n·k) | O(n·cells + pairs·candidates) |
+| 静态密集场景 | 排序 + X 轴扫描 | 只查覆盖 cell |
+| 大世界 | 全量收集 | 局部查询 |
+| Intra-frame AABB 更新 | 立即更新缓存的 ColEntry | 暂不更新（grid 每帧重建，不影响正确性） |
+
+## 待实现
 
 ### Step 2: 查询 API 接入 grid
 
@@ -236,12 +264,13 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 
 ### 关键文件列表
 
-| 文件                             | 改动                                                              |
-|----------------------------------|-------------------------------------------------------------------|
-| src/engine/components/PhysicsComponents.h | 新增 SleepState 组件；RigidBody 加 ccdEnabled           |
-| src/engine/systems/PhysicsSystem.h        | 新增 entityGrid_, staticGrid_, dynamicGrid_, tileCollisionCaches_, 新方法 |
-| src/engine/systems/PhysicsSystem.cpp      | 重写 resolveCollisions(), 查询 API, tile collision cache, sleep 逻辑 |
-| src/engine/systems/PhysicsSystem.cpp      | 新增 DDA raycast 辅助函数                                        |
+| 文件                             | 改动                                                              | 状态 |
+|----------------------------------|-------------------------------------------------------------------|------|
+| src/engine/systems/PhysicsSystem.h        | 新增 entityGrid_, staticGrid_, tileCollisionCaches_, 新方法 | Step 1 ✅ |
+| src/engine/systems/PhysicsSystem.cpp      | 重写 resolveCollisions() 为 grid 宽相位 | Step 1 ✅ |
+| src/engine/systems/PhysicsSystem.cpp      | 查询 API 接入 grid | Step 2 ⏳ |
+| src/engine/systems/PhysicsSystem.cpp      | 新增 DDA raycast 辅助函数 | Step 2 ⏳ |
+| src/engine/components/PhysicsComponents.h | 新增 SleepState 组件；RigidBody 加 ccdEnabled | Step 5+6 ⏳ |
 
 不新增 .h 文件。SpatialHashGrid.h 和 SpatialHashGrid.cpp 不修改（模板头文件已完整）。
 
@@ -250,7 +279,7 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 分 3 个 Phase 滚动落地，每个 Phase 有独立验证：
 
 **Phase A（核心）**：
-- Step 1: Grid broad phase（与现有 SAP 用 `#if` 或运行时 flag 切换，benchmark 对比验证）
+- Step 1: Grid broad phase — **已完成** ✅
 - Step 3: 静动分离（此时 Phase A 即获得最大收益）
 
 **Phase B（查询 + Tile）**：

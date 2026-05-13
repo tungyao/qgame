@@ -296,107 +296,93 @@ namespace engine {
 	}
 
 	/**
-	 * 碰撞解决 - 检测并处理所有碰撞对
+	 * 碰撞解决 - 使用 SpatialHashGrid 宽相位检测并处理所有碰撞对
 	 *
-	 * 优化后实现：Sweep and Prune 宽相位
+	 * 替换 SAP (Sweep and Prune) 为空间哈希网格：
+	 * - 每帧重建 grid：multi-cell insert (用 AABB)
+	 * - 对每个实体，查询覆盖 cell 内的候选实体
+	 * - sort + unique 去重（cell 级），entity ID 排序去重（pair 级）
+	 * - 静态-静态对跳过（两方都无 RigidBody 不产生碰撞事件）
 	 *
-	 * 相比 O(n²) 暴力遍历的改进：
-	 * 1. 按 AABB minX 升序排列所有实体
-	 * 2. 外层循环遍历每个实体 i
-	 * 3. 内层从 i+1 开始，当 ej.aabb.minX > ei.aabb.maxX 时提前 break
-	 *    — X 轴已无重叠，后续所有 j 也不可能与 i 重叠（已排序）
-	 * 4. 通过 X 轴快速剔除后，再做完整 AABB 重叠测试
-	 *
-	 * 同时将 RigidBody 信息缓存进 ColEntry，避免 n² 次 ECS 组件查找。
-	 *
-	 * 流程：
-	 * 1. 收集所有碰撞体，计算 AABB，缓存 RigidBody 信息
-	 * 2. 按 minX 排序（SAP 核心）
-	 * 3. 两两检测重叠，X 轴无重叠时提前退出
-	 * 4. 触发碰撞事件（无论是否 Trigger）
-	 * 5. 非 Trigger 碰撞体进行位置分离
-	 * 6. 更新 AABB 避免同帧重复碰撞
+	 * 复杂度：O(n * cells_per_entity + pairs * candidates)
+	 * 较原 SAP 的平均 O(n log n + n*k) 在静态密集场景更有优势。
 	 */
 	void PhysicsSystem::resolveCollisions() {
-		// [优化] ColEntry 缓存 RigidBody 状态，避免 n² 次 ECS 查找
-		struct ColEntry {
-			entt::entity e;
-			AABB aabb;
-			bool hasRb;
-			bool isKinematic;
-		};
-		std::vector<ColEntry> entries;
-		entries.reserve(64);
-
+		// Step 1: 构建空间哈希网格
+		entityGrid_.clear();
 		auto view = world_.view<Transform, Collider>();
 		for (auto [e, tf, col] : view.each()) {
-			(void)tf;
-			(void)col;
-			bool hasRb = world_.all_of<RigidBody>(e);
-			bool isKin = hasRb && world_.get<RigidBody>(e).isKinematic;
-			entries.push_back({ e, makeEntityAABB(world_, e), hasRb, isKin });
+			(void)tf; (void)col;
+			AABB aabb = makeEntityAABB(world_, e);
+			entityGrid_.insert(e, aabb.minX, aabb.minY,
+			                   aabb.maxX - aabb.minX, aabb.maxY - aabb.minY);
 		}
 
-		// [优化] Sweep and Prune：按 AABB minX 升序排列
-		// 排序后内层循环可在 X 轴不相交时提前 break，大幅减少配对数
-		std::sort(entries.begin(), entries.end(), [](const ColEntry& a, const ColEntry& b) {
-			return a.aabb.minX < b.aabb.minX;
-			});
+		// Step 2: 碰撞检测
+		// 遍历所有实体（含静态），用 entity ID 排序保证每对只处理一次
+		for (auto [e, tf, col] : view.each()) {
+			(void)tf;
+			AABB aabb = makeEntityAABB(world_, e);
+			bool hasRb = world_.all_of<RigidBody>(e);
+			bool isKin = hasRb && world_.get<RigidBody>(e).isKinematic;
 
-		for (int i = 0; i < (int)entries.size(); ++i) {
-			for (int j = i + 1; j < (int)entries.size(); ++j) {
-				auto& ei = entries[i];
-				auto& ej = entries[j];
+			// 查询覆盖 cell 内的所有候选实体
+			auto candidates = entityGrid_.query(
+				aabb.minX, aabb.minY,
+				aabb.maxX - aabb.minX,
+				aabb.maxY - aabb.minY
+			);
 
-				// [优化] SAP 提前退出：j 的左边界已超过 i 的右边界，
-				// 由于数组按 minX 排序，后续所有 j 也不可能与 i 重叠
-				if (ej.aabb.minX >= ei.aabb.maxX) break;
+			// Cell 级去重（跨 cell 重复） + pair 级去重（entity ID 排序）
+			std::sort(candidates.begin(), candidates.end());
+			auto last = std::unique(candidates.begin(), candidates.end());
+			auto eId = entt::to_integral(e);
 
-				const Collider& ci = world_.get<Collider>(ei.e);
-				const Collider& cj = world_.get<Collider>(ej.e);
+			for (auto it = candidates.begin(); it != last; ++it) {
+				auto other = *it;
+				auto oId = entt::to_integral(other);
+				if (eId >= oId) continue;  // 每对只由 ID 较小者处理
 
-				// 层过滤
+				const Collider& ci = col;
+				const Collider& cj = world_.get<Collider>(other);
 				if (!canCollide(ci, cj)) continue;
-				// 完整 AABB 重叠检测（含 Y 轴）
-				if (!overlaps(ei.aabb, ej.aabb)) continue;
 
-				// 计算分离向量
+				AABB otherAabb = makeEntityAABB(world_, other);
+				if (!overlaps(aabb, otherAabb)) continue;
+
 				float sepX = 0.f, sepY = 0.f;
-				minSeparation(ei.aabb, ej.aabb, sepX, sepY);
+				minSeparation(aabb, otherAabb, sepX, sepY);
 
-				// 派发碰撞事件（双向，让双方都知道被撞了）
-				dispatcher_.trigger(CollisionInfo{ ei.e, ej.e,  sepX,  sepY });
-				dispatcher_.trigger(CollisionInfo{ ej.e, ei.e, -sepX, -sepY });
+				// 碰撞事件始终派发（无论 RigidBody 状态 — Trigger-only 实体也需事件）
+				dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
+				dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
 
-				// Trigger 只触发事件，不做物理分离
+				// Trigger 不产生物理分离
 				if (ci.isTrigger || cj.isTrigger) continue;
 
-				// [优化] 直接使用缓存的 hasRb / isKinematic，无需再查 ECS
-				Transform& tfi = world_.get<Transform>(ei.e);
-				Transform& tfj = world_.get<Transform>(ej.e);
+				bool otherHasRb = world_.all_of<RigidBody>(other);
+				bool otherIsKin = otherHasRb && world_.get<RigidBody>(other).isKinematic;
 
-				if (ei.hasRb && !ei.isKinematic && ej.hasRb && !ej.isKinematic) {
-					// 双方都是动态物体：各承担一半位移
-					tfi.x += sepX * 0.5f; tfi.y += sepY * 0.5f;
-					tfj.x -= sepX * 0.5f; tfj.y -= sepY * 0.5f;
-					world_.patch<Transform>(ei.e);
-					world_.patch<Transform>(ej.e);
-				}
-				else if (ei.hasRb && !ei.isKinematic) {
-					// 只有 i 是动态物体：i 完全承担位移
-					tfi.x += sepX; tfi.y += sepY;
-					world_.patch<Transform>(ei.e);
-				}
-				else if (ej.hasRb && !ej.isKinematic) {
-					// 只有 j 是动态物体：j 完全承担位移
-					tfj.x -= sepX; tfj.y -= sepY;
-					world_.patch<Transform>(ej.e);
-				}
-				// 如果都是静态物体或 kinematic，不做分离
+				// 静态-静态对不做分离
+				if (!hasRb && !otherHasRb) continue;
 
-				// 更新 AABB，避免同帧后续碰撞检测使用旧位置
-				ei.aabb = makeEntityAABB(world_, ei.e);
-				ej.aabb = makeEntityAABB(world_, ej.e);
+				Transform& tfe = world_.get<Transform>(e);
+				Transform& tfo = world_.get<Transform>(other);
+
+				if (hasRb && !isKin && otherHasRb && !otherIsKin) {
+					tfe.x += sepX * 0.5f; tfe.y += sepY * 0.5f;
+					tfo.x -= sepX * 0.5f; tfo.y -= sepY * 0.5f;
+					world_.patch<Transform>(e);
+					world_.patch<Transform>(other);
+				}
+				else if (hasRb && !isKin) {
+					tfe.x += sepX; tfe.y += sepY;
+					world_.patch<Transform>(e);
+				}
+				else if (otherHasRb && !otherIsKin) {
+					tfo.x -= sepX; tfo.y -= sepY;
+					world_.patch<Transform>(other);
+				}
 			}
 		}
 

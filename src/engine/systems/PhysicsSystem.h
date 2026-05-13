@@ -5,6 +5,7 @@
 #include "ISystem.h"
 #include "../components/PhysicsComponents.h"
 #include "../runtime/TransformInterpolation.h"
+#include "../../backend/renderer/gpu_driven/SpatialHashGrid.h"
 
 namespace engine {
 
@@ -25,8 +26,8 @@ namespace engine {
  * 4. 查询碰撞：api.raycast(...) / api.overlapBox(...) / api.overlapCircle(...)
  * 
  * 性能特征：
- * - 碰撞检测：O(n²) 暴力遍历（后续优化为四叉树）
- * - 查询功能：O(n) 线性扫描
+ * - 碰撞检测：SpatialHashGrid 宽相位，平均 O(n + cells * candidates)
+ * - 查询功能：O(n) 线性扫描（后续优化为 grid 查询）
  * - 固定时间步：默认 60Hz，可调整
  */
 class PhysicsSystem : public ISystem {
@@ -181,6 +182,8 @@ private:
     bool steppingPhysics_ = false; // true 时 Transform 更新来自 fixed-step，不应触发 snap 逻辑
     bool variableTimestep_ = false; // true = 每帧用真实 dt 积分
     entt::connection transformUpdateConnection_;
+    
+    SpatialHashGrid<entt::entity> entityGrid_{64.f};  // 空间哈希网格（宽相位）
 
     void integrateVelocities(float dt);  // 速度积分
     void resolveCollisions();            // 碰撞解决
