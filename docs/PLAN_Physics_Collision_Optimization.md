@@ -24,17 +24,19 @@ PhysicsSystem
   │     - 每帧 clear() + 所有 Transform+Collider multi-cell insert (用 AABB)
   │     - 替代原 SAP 宽相位，entity ID 排序去重
   │
-  ├── staticGrid_ / dynamicGrid_ (SpatialHashGrid)  [Step 3 待实现]
-  │     - 每帧只重建 dynamicGrid_
-  │     - 静态实体 cache 在 staticGrid_ 中，不每帧重建
+  ├── staticGrid_ / dynamicGrid_ (SpatialHashGrid)  [Step 3 ✅]
+  │     - 每帧重建两个网格（staticGrid_ 后续可通过 hook 做到增量更新）
+  │     - 动态体（有 RigidBody，含 kinematic）→ dynamicGrid_
+  │     - 静态体（无 RigidBody）→ staticGrid_
   │     - 休眠实体仍插入 dynamicGrid_（只跳过 integration，不跳过碰撞检测）
   │
   ├── resolveCollisions()
-  │     1. 每帧重建 entityGrid_（所有实体）
-  │     2. 遍历所有实体（含静态），entity ID 排序确保每对只处理一次
-  │     3. 静态-静态对跳过
-  │     4. 碰撞事件 + 分离逻辑不变
-  │     5. 随后 resolveTileCollisions()
+  │     1. 构建 dynamicGrid_ + staticGrid_
+  │     2. 遍历所有 Collider 实体：
+  │        A) 动态-动态：外循环为动态体 → 查 dynamicGrid_，含分离
+  │        B) 动态-静态：同一动态体 → 查 staticGrid_，含分离
+  │        C) 静态-静态（仅事件）：外循环为静态体 → 查 staticGrid_，无分离
+  │     3. 随后 resolveTileCollisions()
   │
   ├── raycast() / overlapBox() / overlapCircle()
   │     1. 计算查询覆盖的 grid cell 范围
@@ -106,7 +108,27 @@ for (auto [e, tf, col] : view.each()) {
 | 大世界 | 全量收集 | 局部查询 |
 | Intra-frame AABB 更新 | 立即更新缓存的 ColEntry | 暂不更新（grid 每帧重建，不影响正确性） |
 
-## 待实现
+### Step 3: 静态/动态分离 ✅
+
+**提交**: PhysicsSystem.h:186-187, PhysicsSystem.cpp:298-430
+
+**改动**：
+- `PhysicsSystem.h`：新增 `staticGrid_`、`dynamicGrid_` 替换原有 `entityGrid_`；新增 hook 方法
+- `PhysicsSystem.cpp`：`resolveCollisions()` 重写为三路分离；`init()` 注册 ECS hook
+
+**实现细节**：
+
+```
+三个子循环：
+  A) 动态-动态：外循环遍历有 RigidBody 实体，查 dynamicGrid_，entity ID 去重
+  B) 动态-静态：同一外循环实体查 staticGrid_，无需 pair 去重
+  C) 静态-静态（仅事件）：外循环遍历无 RigidBody 实体，查 staticGrid_，entity ID 去重
+     仅派发碰撞事件，不做物理分离。保障 Trigger-only 实体（如 Snake 头与食物）能正常产生事件
+```
+
+**与计划原案的关键差异**：
+- 计划原案说"静态-静态对跳过"，但 **Trigger-only 静态实体仍需碰撞事件**（如 Snake 头与食物均无 RigidBody）。添加 C) 节处理此场景。
+- staticGrid_ 当前每帧全量重建（`clear()` + 全量 insert），hook 仅作预留。后续可通过 SpatialHashGrid 增加 `remove()` 实现增量更新。
 
 ### Step 2: 查询 API 接入 grid
 
@@ -266,8 +288,8 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 
 | 文件                             | 改动                                                              | 状态 |
 |----------------------------------|-------------------------------------------------------------------|------|
-| src/engine/systems/PhysicsSystem.h        | 新增 entityGrid_, staticGrid_, tileCollisionCaches_, 新方法 | Step 1 ✅ |
-| src/engine/systems/PhysicsSystem.cpp      | 重写 resolveCollisions() 为 grid 宽相位 | Step 1 ✅ |
+| src/engine/systems/PhysicsSystem.h        | 新增 dynamicGrid_, staticGrid_, hook 方法 | Step 1+3 ✅ |
+| src/engine/systems/PhysicsSystem.cpp      | 重写 resolveCollisions() 为 grid + 静动分离 | Step 1+3 ✅ |
 | src/engine/systems/PhysicsSystem.cpp      | 查询 API 接入 grid | Step 2 ⏳ |
 | src/engine/systems/PhysicsSystem.cpp      | 新增 DDA raycast 辅助函数 | Step 2 ⏳ |
 | src/engine/components/PhysicsComponents.h | 新增 SleepState 组件；RigidBody 加 ccdEnabled | Step 5+6 ⏳ |
@@ -280,7 +302,7 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 
 **Phase A（核心）**：
 - Step 1: Grid broad phase — **已完成** ✅
-- Step 3: 静动分离（此时 Phase A 即获得最大收益）
+- Step 3: 静动分离 — **已完成** ✅
 
 **Phase B（查询 + Tile）**：
 - Step 2: 查询 API 接入 grid

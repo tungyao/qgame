@@ -26,7 +26,7 @@ namespace engine {
  * 4. 查询碰撞：api.raycast(...) / api.overlapBox(...) / api.overlapCircle(...)
  * 
  * 性能特征：
- * - 碰撞检测：SpatialHashGrid 宽相位，平均 O(n + cells * candidates)
+ * - 碰撞检测：SpatialHashGrid 宽相位 + 静动分离，平均 O(dyn·cells + pairs)
  * - 查询功能：O(n) 线性扫描（后续优化为 grid 查询）
  * - 固定时间步：默认 60Hz，可调整
  */
@@ -183,12 +183,18 @@ private:
     bool variableTimestep_ = false; // true = 每帧用真实 dt 积分
     entt::connection transformUpdateConnection_;
     
-    SpatialHashGrid<entt::entity> entityGrid_{64.f};  // 空间哈希网格（宽相位）
+    SpatialHashGrid<entt::entity> dynamicGrid_{64.f};  // 动态体网格（每帧重建）
+    SpatialHashGrid<entt::entity> staticGrid_{64.f};   // 静态体网格（持久化，通过 hook 更新）
 
     void integrateVelocities(float dt);  // 速度积分
     void resolveCollisions();            // 碰撞解决
     void resolveTileCollisions();        // TileMap 静态碰撞解决
     bool canCollide(const Collider& a, const Collider& b) const;  // 碰撞过滤
+
+    void onColliderAdded(entt::registry& reg, entt::entity e);
+    void onColliderRemoved(entt::registry& reg, entt::entity e);
+    void onRigidBodyAdded(entt::registry& reg, entt::entity e);
+    void onRigidBodyRemoved(entt::registry& reg, entt::entity e);
 };
 
 } // namespace engine

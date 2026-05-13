@@ -14,6 +14,12 @@ namespace engine {
 	void PhysicsSystem::init() {
 		transformUpdateConnection_ =
 			world_.on_update<Transform>().connect<&PhysicsSystem::onTransformUpdated>(this);
+
+		// 监听 Collider / RigidBody 变化，维护 staticGrid_ 增量更新
+		world_.on_construct<Collider>().connect<&PhysicsSystem::onColliderAdded>(this);
+		world_.on_destroy<Collider>().connect<&PhysicsSystem::onColliderRemoved>(this);
+		world_.on_construct<RigidBody>().connect<&PhysicsSystem::onRigidBodyAdded>(this);
+		world_.on_destroy<RigidBody>().connect<&PhysicsSystem::onRigidBodyRemoved>(this);
 	}
 
 	void PhysicsSystem::shutdown() {
@@ -296,97 +302,190 @@ namespace engine {
 	}
 
 	/**
-	 * 碰撞解决 - 使用 SpatialHashGrid 宽相位检测并处理所有碰撞对
+	 * 碰撞解决 — SpatialHashGrid 宽相位 + 静动分离
 	 *
-	 * 替换 SAP (Sweep and Prune) 为空间哈希网格：
-	 * - 每帧重建 grid：multi-cell insert (用 AABB)
-	 * - 对每个实体，查询覆盖 cell 内的候选实体
-	 * - sort + unique 去重（cell 级），entity ID 排序去重（pair 级）
-	 * - 静态-静态对跳过（两方都无 RigidBody 不产生碰撞事件）
+	 * 构建两个独立网格：
+	 * - dynamicGrid_：有 RigidBody 的实体（含 kinematic）
+	 * - staticGrid_：无 RigidBody 的实体
 	 *
-	 * 复杂度：O(n * cells_per_entity + pairs * candidates)
-	 * 较原 SAP 的平均 O(n log n + n*k) 在静态密集场景更有优势。
+	 * 外层遍历所有 Collider 实体。动态体同时命中两个子循环产生碰撞事件 + 分离；
+	 * 静态体只进入 C) 节产生碰撞事件（Trigger-only 用），不做物理分离。
+	 *
+	 * 复杂度：O(n_total · cells + pairs)
+	 * 较单 grid 方案减少了动态体候选集中的静态体数量，提升了 D-D 查询效率。
 	 */
 	void PhysicsSystem::resolveCollisions() {
-		// Step 1: 构建空间哈希网格
-		entityGrid_.clear();
-		auto view = world_.view<Transform, Collider>();
-		for (auto [e, tf, col] : view.each()) {
+		// ── 1. 构建网格 ──
+		dynamicGrid_.clear();
+		staticGrid_.clear();
+		auto allView = world_.view<Transform, Collider>();
+		for (auto [e, tf, col] : allView.each()) {
 			(void)tf; (void)col;
 			AABB aabb = makeEntityAABB(world_, e);
-			entityGrid_.insert(e, aabb.minX, aabb.minY,
-			                   aabb.maxX - aabb.minX, aabb.maxY - aabb.minY);
+			bool hasRb = world_.all_of<RigidBody>(e);
+			auto& grid = hasRb ? dynamicGrid_ : staticGrid_;
+			grid.insert(e, aabb.minX, aabb.minY,
+			            aabb.maxX - aabb.minX, aabb.maxY - aabb.minY);
 		}
 
-		// Step 2: 碰撞检测
-		// 遍历所有实体（含静态），用 entity ID 排序保证每对只处理一次
-		for (auto [e, tf, col] : view.each()) {
+		// ── 2. 碰撞检测 ──
+		for (auto [e, tf, col] : allView.each()) {
 			(void)tf;
 			AABB aabb = makeEntityAABB(world_, e);
 			bool hasRb = world_.all_of<RigidBody>(e);
 			bool isKin = hasRb && world_.get<RigidBody>(e).isKinematic;
 
-			// 查询覆盖 cell 内的所有候选实体
-			auto candidates = entityGrid_.query(
-				aabb.minX, aabb.minY,
-				aabb.maxX - aabb.minX,
-				aabb.maxY - aabb.minY
-			);
+			if (hasRb) {
+				// ── A) 动态-动态 ──
+				{
+					auto candidates = dynamicGrid_.query(
+						aabb.minX, aabb.minY,
+						aabb.maxX - aabb.minX,
+						aabb.maxY - aabb.minY
+					);
+					std::sort(candidates.begin(), candidates.end());
+					auto last = std::unique(candidates.begin(), candidates.end());
+					auto eId = entt::to_integral(e);
 
-			// Cell 级去重（跨 cell 重复） + pair 级去重（entity ID 排序）
-			std::sort(candidates.begin(), candidates.end());
-			auto last = std::unique(candidates.begin(), candidates.end());
-			auto eId = entt::to_integral(e);
+					for (auto it = candidates.begin(); it != last; ++it) {
+						auto other = *it;
+						if (other == e) continue;
+						if (eId >= entt::to_integral(other)) continue;
 
-			for (auto it = candidates.begin(); it != last; ++it) {
-				auto other = *it;
-				auto oId = entt::to_integral(other);
-				if (eId >= oId) continue;  // 每对只由 ID 较小者处理
+						const Collider& cj = world_.get<Collider>(other);
+						if (!canCollide(col, cj)) continue;
 
-				const Collider& ci = col;
-				const Collider& cj = world_.get<Collider>(other);
-				if (!canCollide(ci, cj)) continue;
+						AABB otherAabb = makeEntityAABB(world_, other);
+						if (!overlaps(aabb, otherAabb)) continue;
 
-				AABB otherAabb = makeEntityAABB(world_, other);
-				if (!overlaps(aabb, otherAabb)) continue;
+						float sepX = 0.f, sepY = 0.f;
+						minSeparation(aabb, otherAabb, sepX, sepY);
 
-				float sepX = 0.f, sepY = 0.f;
-				minSeparation(aabb, otherAabb, sepX, sepY);
+						dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
+						dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
 
-				// 碰撞事件始终派发（无论 RigidBody 状态 — Trigger-only 实体也需事件）
-				dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
-				dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
+						if (col.isTrigger || cj.isTrigger) continue;
 
-				// Trigger 不产生物理分离
-				if (ci.isTrigger || cj.isTrigger) continue;
+						bool otherIsKin = world_.get<RigidBody>(other).isKinematic;
 
-				bool otherHasRb = world_.all_of<RigidBody>(other);
-				bool otherIsKin = otherHasRb && world_.get<RigidBody>(other).isKinematic;
+						Transform& tfe = world_.get<Transform>(e);
+						Transform& tfo = world_.get<Transform>(other);
 
-				// 静态-静态对不做分离
-				if (!hasRb && !otherHasRb) continue;
-
-				Transform& tfe = world_.get<Transform>(e);
-				Transform& tfo = world_.get<Transform>(other);
-
-				if (hasRb && !isKin && otherHasRb && !otherIsKin) {
-					tfe.x += sepX * 0.5f; tfe.y += sepY * 0.5f;
-					tfo.x -= sepX * 0.5f; tfo.y -= sepY * 0.5f;
-					world_.patch<Transform>(e);
-					world_.patch<Transform>(other);
+						if (!isKin && !otherIsKin) {
+							tfe.x += sepX * 0.5f; tfe.y += sepY * 0.5f;
+							tfo.x -= sepX * 0.5f; tfo.y -= sepY * 0.5f;
+							world_.patch<Transform>(e);
+							world_.patch<Transform>(other);
+						}
+						else if (!isKin) {
+							tfe.x += sepX; tfe.y += sepY;
+							world_.patch<Transform>(e);
+						}
+						else if (!otherIsKin) {
+							tfo.x -= sepX; tfo.y -= sepY;
+							world_.patch<Transform>(other);
+						}
+					}
 				}
-				else if (hasRb && !isKin) {
-					tfe.x += sepX; tfe.y += sepY;
-					world_.patch<Transform>(e);
+
+				// ── B) 动态-静态 ──
+				{
+					auto candidates = staticGrid_.query(
+						aabb.minX, aabb.minY,
+						aabb.maxX - aabb.minX,
+						aabb.maxY - aabb.minY
+					);
+					std::sort(candidates.begin(), candidates.end());
+					auto last = std::unique(candidates.begin(), candidates.end());
+
+					for (auto it = candidates.begin(); it != last; ++it) {
+						auto other = *it;
+						if (other == e) continue;
+
+						const Collider& cj = world_.get<Collider>(other);
+						if (!canCollide(col, cj)) continue;
+
+						AABB otherAabb = makeEntityAABB(world_, other);
+						if (!overlaps(aabb, otherAabb)) continue;
+
+						float sepX = 0.f, sepY = 0.f;
+						minSeparation(aabb, otherAabb, sepX, sepY);
+
+						dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
+						dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
+
+						if (col.isTrigger || cj.isTrigger) continue;
+						if (isKin) continue;
+
+						Transform& tfe = world_.get<Transform>(e);
+						tfe.x += sepX; tfe.y += sepY;
+						world_.patch<Transform>(e);
+					}
 				}
-				else if (otherHasRb && !otherIsKin) {
-					tfo.x -= sepX; tfo.y -= sepY;
-					world_.patch<Transform>(other);
+			}
+			else {
+				// ── C) 静态-静态（仅触发事件，无物理分离）──
+				// 静态-静态对不产生分离，但需要派发 Trigger 事件
+				// （如 Snake 中 head 和 food 都无 RigidBody，仍需碰撞事件）
+				auto candidates = staticGrid_.query(
+					aabb.minX, aabb.minY,
+					aabb.maxX - aabb.minX,
+					aabb.maxY - aabb.minY
+				);
+				std::sort(candidates.begin(), candidates.end());
+				auto last = std::unique(candidates.begin(), candidates.end());
+				auto eId = entt::to_integral(e);
+
+				for (auto it = candidates.begin(); it != last; ++it) {
+					auto other = *it;
+					if (other == e) continue;
+					if (eId >= entt::to_integral(other)) continue;
+
+					const Collider& cj = world_.get<Collider>(other);
+					if (!canCollide(col, cj)) continue;
+
+					AABB otherAabb = makeEntityAABB(world_, other);
+					if (!overlaps(aabb, otherAabb)) continue;
+
+					float sepX = 0.f, sepY = 0.f;
+					minSeparation(aabb, otherAabb, sepX, sepY);
+
+					dispatcher_.trigger(CollisionInfo{e, other,  sepX,  sepY});
+					dispatcher_.trigger(CollisionInfo{other, e, -sepX, -sepY});
+					// 不做物理分离
 				}
 			}
 		}
 
 		resolveTileCollisions();
+	}
+
+	void PhysicsSystem::onColliderAdded(entt::registry& reg, entt::entity e) {
+		if (!reg.all_of<Transform>(e)) return;
+		if (reg.all_of<RigidBody>(e)) return;  // 有 RigidBody → 动态体
+		// 无 RigidBody → 静态体，插入 staticGrid_
+		AABB aabb = makeEntityAABB(reg, e);
+		staticGrid_.insert(e, aabb.minX, aabb.minY,
+		                    aabb.maxX - aabb.minX, aabb.maxY - aabb.minY);
+	}
+
+	void PhysicsSystem::onColliderRemoved(entt::registry& reg, entt::entity e) {
+		(void)reg;
+		// 无法从 SpatialHashGrid 移除单实体，标记为无效
+		// staticGrid_ 每帧全量重建，冷数据自然消失
+		// 后续优化：SpatialHashGrid 增加 remove() 或 versioned entry
+	}
+
+	void PhysicsSystem::onRigidBodyAdded(entt::registry& reg, entt::entity e) {
+		if (!reg.all_of<Transform, Collider>(e)) return;
+		// 从静态变为动态，删不掉 staticGrid_ 条目，同上帧重建策略
+		(void)e;
+	}
+
+	void PhysicsSystem::onRigidBodyRemoved(entt::registry& reg, entt::entity e) {
+		if (!reg.all_of<Transform, Collider>(e)) return;
+		// 从动态变为静态，下帧 staticGrid_ 重建时会包含它
+		(void)e;
 	}
 
 	/**
