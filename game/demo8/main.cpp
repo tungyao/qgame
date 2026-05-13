@@ -137,12 +137,14 @@ public:
 		auto* tf = ctx_.world.try_get<engine::Transform>(pickup);
 		if (!tf) return;
 		float margin = kPickupR + kWallThick + 20.f;
-		tf->x = kPlayMinX + margin +
-			static_cast<float>(std::rand()) / RAND_MAX *
-			(kPlayMaxX - kPlayMinX - 2.f * margin);
-		tf->y = kPlayMinY + margin +
-			static_cast<float>(std::rand()) / RAND_MAX *
-			(kPlayMaxY - kPlayMinY - 2.f * margin);
+		api_->patchComponent<engine::Transform>(pickup ,[&](engine::Transform& tf){
+			tf.x = kPlayMinX + margin +
+				static_cast<float>(std::rand()) / RAND_MAX *
+				(kPlayMaxX - kPlayMinX - 2.f * margin);
+			tf.y = kPlayMinY + margin +
+				static_cast<float>(std::rand()) / RAND_MAX *
+				(kPlayMaxY - kPlayMinY - 2.f * margin);
+			});
 	}
 
 protected:
@@ -159,9 +161,11 @@ protected:
 		if (dx != 0.f || dy != 0.f) {
 			float len = std::sqrt(dx * dx + dy * dy);
 			dx /= len; dy /= len;
-			pTf->x += dx * kPlayerSpeed * dt;
-			pTf->y += dy * kPlayerSpeed * dt;
 
+			api_->patchComponent<engine::Transform>(player, [&](engine::Transform& tf) {
+				tf.x += dx * kPlayerSpeed * dt;
+				tf.y += dy * kPlayerSpeed * dt;
+				});
 			playerDirX_ = dx;
 			playerDirY_ = dy;
 		}

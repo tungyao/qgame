@@ -210,9 +210,9 @@ struct SleepState {
 - 当一堆方块堆叠休眠后，从上方掉落新方块时，被碰撞的方块应逐级唤醒
 - 实现：碰撞循环中使用一个 `wakeQueue_`，本帧唤醒的实体标记为 `recheck = true`，在当前帧循环中重新处理被唤醒实体的碰撞（不超过 N 次迭代防死循环）
 
-### Step 6: CCD 连续碰撞检测（横版射击专属）
+### Step 6: CCD 连续碰撞检测 ✅
 
-> ⚠️ **注意**：此步为后续工作，不在初始实施范围内。Step 1-5 已覆盖 90%+ 性能提升。
+已在 `resolveCollisions()` 中实现两步 CCD 后处理。
 
 文件: PhysicsComponents.h, PhysicsSystem.h, PhysicsSystem.cpp
 
@@ -272,7 +272,7 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 
 **Phase C（休眠）**：
 - Step 5: 休眠系统
-- Step 6: CCD（可选，后续工作）
+- Step 6: CCD — **已完成** ✅
 
 ### 验证方法
 
