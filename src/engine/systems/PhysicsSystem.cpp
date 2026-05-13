@@ -431,8 +431,9 @@ namespace engine {
 		}
 
 		// ── CCD 后处理 ────────────────────────────────────────────────
-		// 对启用了 ccdEnabled 的动态体，从预碰撞位置到当前位置做 swept AABB 检测。
-		// 如果扫掠路径穿透了静态体，把位置 clamp 到首次接触点。
+		// 3 次碰撞迭代中，动态体可能因 D-D 推力而被压入静态体（球被玩家推入墙）。
+		// CCD 后处理对启用了 ccdEnabled 的实体做一次纯静态分离（无 D-D 干扰），
+		// 将仍嵌入静态体的实体推到刚好接触的位置。
 		if (!ccdBuffer_.empty()) {
 			rebuildGrids();
 			for (auto& entry : ccdBuffer_) {
@@ -440,49 +441,36 @@ namespace engine {
 				Collider* col = world_.try_get<Collider>(entry.e);
 				if (!tf || !col) continue;
 
-				float dx = tf->x - entry.oldX;
-				float dy = tf->y - entry.oldY;
-				float minSize = std::min(col->width, col->height);
-				if (dx * dx + dy * dy < minSize * minSize * 0.25f) continue;
-
-				// 重建旧 AABB
-				AABB oldBox{entry.oldMinX, entry.oldMinY, entry.oldMaxX, entry.oldMaxY};
-
-				// 扫掠路径的包围盒
-				AABB sweepBox = oldBox;
-				sweepBox.minX = std::min(sweepBox.minX, oldBox.minX + dx);
-				sweepBox.maxX = std::max(sweepBox.maxX, oldBox.maxX + dx);
-				sweepBox.minY = std::min(sweepBox.minY, oldBox.minY + dy);
-				sweepBox.maxY = std::max(sweepBox.maxY, oldBox.maxY + dy);
-
-				float bestT = 1.f;
+				// 收集候选静态体
+				AABB curBox = makeEntityAABB(world_, entry.e);
 				auto staticCandidates = staticGrid_.query(
-					sweepBox.minX, sweepBox.minY,
-					sweepBox.maxX - sweepBox.minX,
-					sweepBox.maxY - sweepBox.minY
+					curBox.minX, curBox.minY,
+					curBox.maxX - curBox.minX,
+					curBox.maxY - curBox.minY
 				);
 				std::sort(staticCandidates.begin(), staticCandidates.end());
 				staticCandidates.erase(
 					std::unique(staticCandidates.begin(), staticCandidates.end()),
 					staticCandidates.end());
 
+				// 逐静态体推出，无 D-D 干扰，球不会再被玩家压回去
 				for (auto se : staticCandidates) {
 					if (!world_.all_of<Collider>(se)) continue;
 					const Collider& scol = world_.get<Collider>(se);
 					if (!canCollide(*col, scol)) continue;
 
 					AABB targetBox = makeEntityAABB(world_, se);
-					float t = 1.f;
-					if (sweptAABBvsAABB(oldBox, dx, dy, targetBox, t) && t < bestT) {
-						bestT = t;
-					}
-				}
+					if (!overlaps(curBox, targetBox)) continue;
 
-				if (bestT < 1.f) {
-					float contact = std::max(0.f, bestT - 0.001f);
-					tf->x = entry.oldX + dx * contact;
-					tf->y = entry.oldY + dy * contact;
+					float sx = 0.f, sy = 0.f;
+					minSeparation(curBox, targetBox, sx, sy);
+
+					tf->x += sx;
+					tf->y += sy;
 					world_.patch<Transform>(entry.e);
+					// 更新本地 curBox 避免同帧内多次重叠分离冲突
+					curBox.minX += sx; curBox.maxX += sx;
+					curBox.minY += sy; curBox.maxY += sy;
 				}
 			}
 		}
