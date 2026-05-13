@@ -1,6 +1,8 @@
 #pragma once
 #include <algorithm>
+#include <cstdint>
 #include <entt/entt.hpp>
+#include <unordered_map>
 #include <vector>
 #include "ISystem.h"
 #include "../components/PhysicsComponents.h"
@@ -30,6 +32,23 @@ namespace engine {
  * - 查询功能：SpatialHashGrid 宽相位，平均 O(n + cells * candidates)
  * - 固定时间步：默认 60Hz，可调整
  */
+// ── Tile 碰撞缓存 ──────────────────────────────────────────────────────
+// 预计算每个 tile 的碰撞 AABB（本地坐标系），跳过每帧 collisionAt() 的 gid→tileset 查找链。
+// 在 TileMap 组件 attach/update 时重建，不支持动态 TileCollisionShape 变化。
+struct TileCollisionCacheEntry {
+    float localMinX, localMinY, localMaxX, localMaxY;
+    uint8_t shape;           // static_cast<TileMap::TileCollisionShape>
+    bool    isTrigger;
+};
+
+struct TileCollisionCache {
+    std::vector<std::vector<TileCollisionCacheEntry>> grid;  // [y][x]
+    int    width = 0;
+    int    height = 0;
+    float  tileSize = 0.f;
+    bool   valid = false;
+};
+
 class PhysicsSystem : public ISystem {
 public:
     PhysicsSystem(entt::registry& world, entt::dispatcher& dispatcher);
@@ -185,6 +204,7 @@ private:
     
     SpatialHashGrid<entt::entity> dynamicGrid_{64.f};  // 动态体网格（每帧重建）
     SpatialHashGrid<entt::entity> staticGrid_{64.f};   // 静态体网格（持久化，通过 hook 更新）
+    std::unordered_map<entt::entity, TileCollisionCache> tileCollisionCaches_;
 
     void rebuildGrids();                 // 重建 dynamicGrid_ + staticGrid_
     void integrateVelocities(float dt);  // 速度积分
@@ -196,6 +216,11 @@ private:
     void onColliderRemoved(entt::registry& reg, entt::entity e);
     void onRigidBodyAdded(entt::registry& reg, entt::entity e);
     void onRigidBodyRemoved(entt::registry& reg, entt::entity e);
+
+    void rebuildTileCollisionCache(entt::entity mapEntity, const TileMap& tmap);
+    void onTileMapAdded(entt::registry& reg, entt::entity e);
+    void onTileMapUpdated(entt::registry& reg, entt::entity e);
+    void onTileMapRemoved(entt::registry& reg, entt::entity e);
 };
 
 } // namespace engine

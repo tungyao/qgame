@@ -252,6 +252,7 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 | src/engine/systems/PhysicsSystem.h        | 新增 dynamicGrid_, staticGrid_, hook 方法 | Step 1+3 ✅ |
 | src/engine/systems/PhysicsSystem.cpp      | 重写 resolveCollisions() 为 grid + 静动分离 | Step 1+3 ✅ |
 | src/engine/systems/PhysicsSystem.cpp      | 查询 API 接入 grid | Step 2 ✅ |
+| src/engine/systems/PhysicsSystem.cpp      | Tile 碰撞缓存 + rebuildTileCollisionCache | Step 4 ✅ |
 | src/engine/systems/PhysicsSystem.cpp      | 新增 DDA raycast 辅助函数 | Step 2 ⏳ |
 | src/engine/components/PhysicsComponents.h | 新增 SleepState 组件；RigidBody 加 ccdEnabled | Step 5+6 ⏳ |
 
@@ -267,7 +268,7 @@ bool ccdEnabled = false;      // 启用连续碰撞检测
 
 **Phase B（查询 + Tile）**：
 - Step 2: 查询 API 接入 grid — **已完成** ✅
-- Step 4: Tile 碰撞缓存
+- Step 4: Tile 碰撞缓存 — **已完成** ✅
 
 **Phase C（休眠）**：
 - Step 5: 休眠系统
