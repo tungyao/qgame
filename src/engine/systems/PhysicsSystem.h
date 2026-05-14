@@ -1,54 +1,44 @@
 #pragma once
-#include <algorithm>
+
 #include <cstdint>
 #include <entt/entt.hpp>
 #include <unordered_map>
 #include <vector>
+
 #include "ISystem.h"
+#include "PhysicsWorld2D.h"
 #include "../components/PhysicsComponents.h"
 #include "../runtime/TransformInterpolation.h"
-#include "../../backend/renderer/gpu_driven/SpatialHashGrid.h"
 
 namespace engine {
 
-/**
- * 物理系统 - 处理刚体运动和碰撞检测
- * 
- * 主要功能：
- * 1. 重力模拟 - 对所有非 kinematic 刚体应用重力
- * 2. 碰撞检测 - AABB 碰撞检测与分离
- * 3. 碰撞过滤 - 基于 Layer/Mask 的碰撞层系统
- * 4. 固定时间步 - 保证物理模拟的一致性
- * 5. 查询功能 - 射线检测和区域查询
- * 
- * 使用方式：
- * 1. 通过 GameAPI 设置重力：api.setGravity(0, 980);
- * 2. 给实体添加组件：Transform + RigidBody + Collider
- * 3. 监听碰撞事件：api.onCollision(listener, &Listener::onCollision);
- * 4. 查询碰撞：api.raycast(...) / api.overlapBox(...) / api.overlapCircle(...)
- * 
- * 性能特征：
- * - 碰撞检测：SpatialHashGrid 宽相位 + 静动分离，平均 O(dyn·cells + pairs)
- * - 查询功能：SpatialHashGrid 宽相位，平均 O(n + cells * candidates)
- * - 固定时间步：默认 60Hz，可调整
- */
 // ── Tile 碰撞缓存 ──────────────────────────────────────────────────────
 // 预计算每个 tile 的碰撞 AABB（本地坐标系），跳过每帧 collisionAt() 的 gid→tileset 查找链。
 // 在 TileMap 组件 attach/update 时重建，不支持动态 TileCollisionShape 变化。
 struct TileCollisionCacheEntry {
     float localMinX, localMinY, localMaxX, localMaxY;
-    uint8_t shape;           // static_cast<TileMap::TileCollisionShape>
+    uint8_t shape;
     bool    isTrigger;
 };
 
 struct TileCollisionCache {
-    std::vector<std::vector<TileCollisionCacheEntry>> grid;  // [y][x]
+    std::vector<std::vector<TileCollisionCacheEntry>> grid;
     int    width = 0;
     int    height = 0;
     float  tileSize = 0.f;
     bool   valid = false;
 };
 
+/**
+ * 物理系统 — ECS 适配层，委托 PhysicsWorld2D 执行模拟。
+ *
+ * 职责：
+ * 1. 同步 ECS (Transform + RigidBody + Collider) ↔ PhysicsWorld2D (Body + Shape)
+ * 2. 管理 TransformInterpolation 快照
+ * 3. TileMap 碰撞解析（独立于 PhysicsWorld2D 的后处理）
+ * 4. PhysicsWorld2D 接触回调 → entt::dispatcher CollisionInfo 事件
+ * 5. 空间查询（委托 PhysicsWorld2D，BodyId → entt::entity 映射）
+ */
 class PhysicsSystem : public ISystem {
 public:
     PhysicsSystem(entt::registry& world, entt::dispatcher& dispatcher);
@@ -62,174 +52,109 @@ public:
 
     void update(float dt) override;
 
-    // ── 重力设置 ─────────────────────────────────────────────────────────────
-    
-    /**
-     * 设置全局重力
-     * @param x X 方向重力加速度（像素/秒²）
-     * @param y Y 方向重力加速度（像素/秒²）
-     * 
-     * 典型值：
-     * - 标准重力：setGravity(0, 980) - Y 轴向下为正
-     * - 横版平台：setGravity(0, 1500) - 更快的下落
-     * - 俯视游戏：setGravity(0, 0) - 无重力
-     */
-    void setGravity(float x, float y) { gravityX_ = x; gravityY_ = y; }
-    float gravityX() const { return gravityX_; }
-    float gravityY() const { return gravityY_; }
+    // ── 重力设置 ─────────────────────────────────────────────────────────
 
-    // ── 固定时间步 ───────────────────────────────────────────────────────────
-    
-    /**
-     * 设置物理更新的固定时间步
-     * @param step 时间步长（秒）
-     * 
-     * 默认值：1/60 = 0.0167 秒（60Hz）
-     * 
-     * 调整建议：
-     * - 精确物理：1/120（120Hz）- 更准确但更耗性能
-     * - 移动端：1/30（30Hz）- 省电但可能穿透
-     */
-    void setFixedTimestep(float step) { fixedTimestep_ = step; }
-    float fixedTimestep() const { return fixedTimestep_; }
-    float accumulatorSeconds() const { return accumulator_; }
+    void setGravity(float x, float y);
+    float gravityX() const;
+    float gravityY() const;
 
-    /**
-     * 设置是否使用可变时间步（匹配真实渲染帧率）。
-     * true  : 每帧直接用 dt 积分，位置更新频率与渲染帧率一致，无插值延迟。
-     * false : 默认固定时间步（60Hz），保证物理一致性。
-     *
-     * 建议：
-     * - 需要严格可重现的物理（平台跳跃精度、网络同步）→ false
-     * - 玩家直接控制的角色追求跟手、流畅 → true
-     */
-    void setVariableTimestep(bool enable) { variableTimestep_ = enable; }
-    bool variableTimestep() const { return variableTimestep_; }
+    // ── 固定时间步 ───────────────────────────────────────────────────────
 
-    /**
-     * 返回“当前渲染时刻位于下一个物理步之前的比例”。
-     *
-     * 解释：
-     * - fixedTimestep = 1/60 时，PhysicsSystem 每 16.67ms 才真正推进一次世界。
-     * - 两次物理步之间，accumulator_ 保存的是“还没来得及模拟的剩余时间”。
-     * - 渲染/相机若直接读取 Transform，会看到 60Hz 的离散台阶。
-     *
-     * 这个比例可用于表现层插值/外推：
-     * - 插值：需要 previous/current 两份状态时使用
-     * - 外推：只有 current + velocity 时，也能用 accumulator_ 做一个轻量预测
-     */
-    float interpolationAlpha() const {
-        if (fixedTimestep_ <= 0.f) return 0.f;
-        const float alpha = accumulator_ / fixedTimestep_;
-        return std::clamp(alpha, 0.f, 1.f);
-    }
+    void setFixedTimestep(float step);
+    float fixedTimestep() const;
+    float accumulatorSeconds() const;
 
-    // ── 查询功能 ─────────────────────────────────────────────────────────────
-    
-    /**
-     * 射线检测 - 从起点发射射线，返回最近的碰撞体
-     * 
-     * @param startX, startY 射线起点
-     * @param dirX, dirY 射线方向（无需归一化）
-     * @param maxDist 最大检测距离
-     * @param layerMask 只检测指定层（默认检测所有层）
-     * @return RaycastHit 结果结构体
-     * 
-     * 用例：
-     * // 检测玩家前方是否有墙壁
-     * auto hit = api.raycast(playerX, playerY, 1, 0, 100, COLLISION_LAYER_STATIC);
-     * if (hit.hit) {
-     *     // hit.entity 是墙壁实体
-     *     // hit.distance 是距离
-     * }
-     */
-    RaycastHit raycast(float startX, float startY, float dirX, float dirY, float maxDist,
+    void setVariableTimestep(bool enable);
+    bool variableTimestep() const;
+
+    float interpolationAlpha() const;
+
+    // ── 查询功能 ─────────────────────────────────────────────────────────
+
+    RaycastHit raycast(float startX, float startY, float dirX, float dirY,
+                       float maxDist,
                        CollisionLayer layerMask = COLLISION_LAYER_ALL,
                        CollisionLayer ignoreLayer = 0,
                        entt::entity ignoreEntity = entt::null);
-    
-    /**
-     * 盒形区域查询 - 检测矩形区域内所有碰撞体
-     * 
-     * @param centerX, centerY 查询区域中心
-     * @param halfW, halfH 查询区域半宽/半高
-     * @param layerMask 只查询指定层
-     * @return 所有重叠的碰撞体列表
-     * 
-     * 用例：
-     * // 检测攻击范围内的敌人
-     * auto hits = api.overlapBox(attackX, attackY, 50, 30, COLLISION_LAYER_ENEMY);
-     * for (auto& h : hits) {
-     *     applyDamage(h.entity, 10);
-     * }
-     */
-    std::vector<OverlapResult> overlapBox(float centerX, float centerY, 
+
+    std::vector<OverlapResult> overlapBox(float centerX, float centerY,
                                            float halfW, float halfH,
                                            CollisionLayer layerMask = COLLISION_LAYER_ALL);
-    
-    /**
-     * 圆形区域查询 - 检测圆形区域内所有碰撞体
-     * 
-     * @param centerX, centerY 圆心
-     * @param radius 半径
-     * @param layerMask 只查询指定层
-     * @return 所有重叠的碰撞体列表
-     * 
-     * 用例：
-     * // 检测爆炸范围内的所有物体
-     * auto hits = api.overlapCircle(explosionX, explosionY, 150, COLLISION_LAYER_ALL);
-     * for (auto e : hits) {
-     *     applyExplosionForce(e);
-     * }
-     */
-    std::vector<entt::entity> overlapCircle(float centerX, float centerY, float radius,
-                                            CollisionLayer layerMask = COLLISION_LAYER_ALL);
+
+    std::vector<entt::entity> overlapCircle(float centerX, float centerY,
+                                             float radius,
+                                             CollisionLayer layerMask = COLLISION_LAYER_ALL);
+
+    // ── PhysicsWorld2D 访问 ──────────────────────────────────────────────
+
+    PhysicsWorld2D& physicsWorld() { return physicsWorld_; }
+    const PhysicsWorld2D& physicsWorld() const { return physicsWorld_; }
 
 private:
-    void onPhysicsPhase(float dt) override {
-        update(dt);
-    }
+    void onPhysicsPhase(float dt) override { update(dt); }
+
+    // ── ECS ↔ PhysicsWorld2D 同步 ────────────────────────────────────────
+
+    void syncBodiesToWorld();
+    void syncResultsToEntities();
+    void syncEntityToBody(entt::entity e, Transform& tf, RigidBody* rb, Collider& col);
+    void ensureBodyForEntity(entt::entity e, Transform& tf, RigidBody* rb, Collider& col);
+    void removeBodyForEntity(entt::entity e);
+
+    // ── 接触回调桥接 ─────────────────────────────────────────────────────
+
+    void onPhysicsContact(const PhysicsWorld2D::CollisionPair& pair);
+
+    // ── 插值快照 ─────────────────────────────────────────────────────────
 
     void snapshotInterpolatedBodiesForStep();
+
+    // ── ECS 事件钩子 ─────────────────────────────────────────────────────
+
     void onTransformUpdated(entt::registry& reg, entt::entity e);
-
-    entt::registry&   world_;
-    entt::dispatcher& dispatcher_;
-    
-    float gravityX_ = 0.f;       // X 方向重力
-    float gravityY_ = 0.f;       // Y 方向重力
-    float fixedTimestep_ = 1.f / 60.f;  // 固定时间步（默认 60Hz）
-    float accumulator_ = 0.f;    // 时间累积器
-    bool steppingPhysics_ = false; // true 时 Transform 更新来自 fixed-step，不应触发 snap 逻辑
-    bool variableTimestep_ = false; // true = 每帧用真实 dt 积分
-    entt::connection transformUpdateConnection_;
-    
-    SpatialHashGrid<entt::entity> dynamicGrid_{64.f};  // 动态体网格（每帧重建）
-    SpatialHashGrid<entt::entity> staticGrid_{64.f};   // 静态体网格（持久化，通过 hook 更新）
-    std::unordered_map<entt::entity, TileCollisionCache> tileCollisionCaches_;
-
-    struct CcdEntry {
-        entt::entity e;
-        float oldMinX, oldMinY, oldMaxX, oldMaxY;
-        float oldX, oldY;
-    };
-    std::vector<CcdEntry> ccdBuffer_;  // CCD 预碰撞状态（每帧重填）
-
-    void rebuildGrids();                 // 重建 dynamicGrid_ + staticGrid_
-    void integrateVelocities(float dt);  // 速度积分
-    void resolveCollisions();            // 碰撞解决
-    void resolveTileCollisions();        // TileMap 静态碰撞解决
-    bool canCollide(const Collider& a, const Collider& b) const;  // 碰撞过滤
-
     void onColliderAdded(entt::registry& reg, entt::entity e);
     void onColliderRemoved(entt::registry& reg, entt::entity e);
     void onRigidBodyAdded(entt::registry& reg, entt::entity e);
     void onRigidBodyRemoved(entt::registry& reg, entt::entity e);
-
-    void rebuildTileCollisionCache(entt::entity mapEntity, const TileMap& tmap);
     void onTileMapAdded(entt::registry& reg, entt::entity e);
     void onTileMapUpdated(entt::registry& reg, entt::entity e);
     void onTileMapRemoved(entt::registry& reg, entt::entity e);
+
+    // ── Tile 碰撞 ────────────────────────────────────────────────────────
+
+    void resolveTileCollisions();
+    void rebuildTileCollisionCache(entt::entity mapEntity, const TileMap& tmap);
+
+    // ── 辅助 ─────────────────────────────────────────────────────────────
+
+    PhysicsWorld2D::AABB makeEntityAABB(entt::entity e) const;
+    PhysicsWorld2D::AABB makeColliderAABB(const Transform& tf, const Collider& col) const;
+    static PhysicsWorld2D::ShapeDef colliderToShapeDef(const Collider& col);
+    static PhysicsWorld2D::BodyDef rigidBodyToBodyDef(const Transform& tf, const RigidBody& rb);
+
+    // ── 成员 ─────────────────────────────────────────────────────────────
+
+    entt::registry&   world_;
+    entt::dispatcher& dispatcher_;
+    PhysicsWorld2D    physicsWorld_;
+
+    // ECS entity ↔ PhysicsWorld2D BodyId 映射
+    struct BodyMapping {
+        PhysicsWorld2D::BodyId bodyId = PhysicsWorld2D::INVALID_BODY;
+    };
+    std::unordered_map<entt::entity, BodyMapping> entityToBody_;
+    std::vector<entt::entity> bodyToEntity_;  // indexed by BodyId
+
+    // 固定时间步
+    float fixedTimestep_ = 1.f / 60.f;
+    float accumulator_ = 0.f;
+    bool  steppingPhysics_ = false;
+    bool  variableTimestep_ = false;
+
+    entt::connection transformUpdateConnection_;
+
+    // Tile 碰撞缓存
+    std::unordered_map<entt::entity, TileCollisionCache> tileCollisionCaches_;
 };
 
 } // namespace engine

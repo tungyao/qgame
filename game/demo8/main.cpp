@@ -129,6 +129,7 @@ public:
 
 		if (pickupEnt != entt::null && pickupEnt == pickup) {
 			score++;
+			std::printf("[demo8] PICKUP! score=%d\n", score);
 			respawnPickup();
 		}
 	}

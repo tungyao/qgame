@@ -31,20 +31,58 @@ constexpr CollisionLayer COLLISION_LAYER_ENEMY   = 8;      // 1000 - 第4层
 constexpr CollisionLayer COLLISION_LAYER_ALL     = 0xFFFFFFFF;  // 所有层
 
 /**
+ * 刚体类型 — 决定物体如何参与物理模拟
+ *
+ * Static:    不移动，质量无穷大（如地形、墙壁）。旧的实现方式是不挂 RigidBody。
+ * Kinematic: 用户控制速度，质量无穷大，可推动 Rigid 物体（如移动平台）。
+ * Rigid:     完全物理模拟，受重力和碰撞力影响。
+ */
+enum class BodyType : uint8_t {
+    Static    = 0,
+    Kinematic = 1,
+    Rigid     = 2
+};
+
+/**
+ * 碰撞形状类型
+ */
+enum class ShapeType : uint8_t {
+    Box     = 0,
+    Circle  = 1,
+    Capsule = 2
+};
+
+/**
+ * 接触状态 — 跟踪碰撞对的生命周期
+ *
+ * Begin:   本帧新出现的重叠
+ * Persist: 上一帧已存在，本帧继续重叠
+ * End:     上一帧存在但本帧已分离
+ */
+enum class ContactState : uint8_t {
+    Begin   = 0,
+    Persist = 1,
+    End     = 2
+};
+
+/**
  * 刚体组件 - 控制物理运动
- * 
+ *
  * 必须与 Transform 组件一起使用
  * 表示实体参与物理模拟，具有速度和重力响应
  */
 struct RigidBody {
-    float velocityX    = 0.f;  // X 方向速度（像素/秒）
-    float velocityY    = 0.f;  // Y 方向速度（像素/秒）
-    float gravityScale = 0.f;  // 重力缩放：0=不受重力, 1=正常, 2=双倍
-    bool  isKinematic  = false; // 是否为运动学刚体
-    bool  interpolate  = true;  // 是否参与渲染插值（玩家控制角色建议设为 false）
-    bool  ccdEnabled   = false; // 启用连续碰撞检测（防止穿透）
-    // kinematic=true: 受速度影响但不受碰撞影响（如移动平台）
-    // kinematic=false: 完全参与物理模拟（受重力和碰撞影响）
+    BodyType type         = BodyType::Rigid;  // 刚体类型（Static=无质量, Kinematic=用户控制, Rigid=完全模拟）
+    float    velocityX    = 0.f;              // X 方向速度（像素/秒）
+    float    velocityY    = 0.f;              // Y 方向速度（像素/秒）
+    float    gravityScale = 0.f;              // 重力缩放：0=不受重力, 1=正常, 2=双倍
+    float    mass         = 1.f;              // 质量（仅 Rigid 类型生效，Static/Kinematic 质量无穷大）
+    float    bounciness   = 0.f;              // 弹性系数 [0, 1]
+    float    friction     = 0.f;              // 摩擦系数
+    float    contactMargin = 1.f;             // CCD 接触容差（像素）
+    bool     isKinematic  = false;            // [已废弃] 使用 type=BodyType::Kinematic 代替，保留以兼容旧代码
+    bool     interpolate  = true;             // 是否参与渲染插值
+    bool     ccdEnabled   = false;            // 启用连续碰撞检测
 };
 
 /**
@@ -54,8 +92,16 @@ struct RigidBody {
  * 定义实体的碰撞盒大小和碰撞行为
  */
 struct Collider {
+    ShapeType shapeType = ShapeType::Box;  // 碰撞形状类型
+
+    // Box 形状参数
     float width   = 0.f;    // 碰撞盒宽度（像素）
     float height  = 0.f;    // 碰撞盒高度（像素）
+
+    // Circle / Capsule 参数
+    float radius        = 0.f;  // 圆形半径 / 胶囊半径
+    float capsuleLength = 0.f;  // 胶囊内部线段长度（0 = 纯圆形）
+
     float offsetX = 0.f;    // 碰撞盒相对于 Transform 的 X 偏移
     float offsetY = 0.f;    // 碰撞盒相对于 Transform 的 Y 偏移
     bool  isTrigger = false; // 是否为触发器
@@ -89,6 +135,9 @@ struct CollisionInfo {
     entt::entity other;     // 碰撞的另一方
     float overlapX = 0.f;   // 最小分离向量 X（正数表示 self 需向右移动）
     float overlapY = 0.f;   // 最小分离向量 Y（正数表示 self 需向下移动）
+    ContactState state = ContactState::Begin;  // 接触生命周期状态
+    float normalX = 0.f;   // 碰撞法线 X（单位向量，从 self 指向 other）
+    float normalY = 0.f;   // 碰撞法线 Y
 };
 
 /**

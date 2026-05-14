@@ -134,6 +134,22 @@ public:
     template<typename Listener, auto Fn>
     void onCollision(Listener& listener);
 
+    // ── 物理参数设置 ─────────────────────────────────────────────────────
+
+    void setBodyMass(entt::entity e, float mass);
+    void setBodyBounciness(entt::entity e, float b);
+    void setBodyFriction(entt::entity e, float f);
+    void setBodyContactMargin(entt::entity e, float margin);
+    void setBodyCCD(entt::entity e, bool enable);
+    void setBodyGravityScale(entt::entity e, float scale);
+
+    // ── 碰撞形状辅助 ─────────────────────────────────────────────────────
+
+    void setBoxCollider(entt::entity e, float w, float h, float ox = 0.f, float oy = 0.f);
+    void setCircleCollider(entt::entity e, float radius, float ox = 0.f, float oy = 0.f);
+    void setCapsuleCollider(entt::entity e, float radius, float length,
+                            float ox = 0.f, float oy = 0.f);
+
     // ── Scene（Month 8 实现）─────────────────────────────────────────────
     bool loadScene(const char* path);
     bool saveScene(const char* path);

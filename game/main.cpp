@@ -1690,7 +1690,7 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 100, 100, 100, 255 };
 		api.addComponent(e, sp);
-		engine::Collider col{ 1280.f, 32.f, 0.f, 0.f, false };
+		engine::Collider col; col.width = 1280.f; col.height = 32.f;
 		col.layer = engine::COLLISION_LAYER_STATIC;
 		col.mask = engine::COLLISION_LAYER_DEFAULT | engine::COLLISION_LAYER_PLAYER | engine::COLLISION_LAYER_ENEMY;
 		api.addComponent(e, col);
@@ -1708,8 +1708,8 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 255, 150, 50, 255 };
 		api.addComponent(physicsBox, sp);
-		api.addComponent(physicsBox, engine::RigidBody{ 0.f, 0.f, 1.f, false });
-		engine::Collider col{ 32.f, 32.f, 0.f, 0.f, false };
+		engine::RigidBody rb1; rb1.gravityScale = 1.f; api.addComponent(physicsBox, rb1);
+		engine::Collider col; col.width = 32.f; col.height = 32.f;
 		col.layer = engine::COLLISION_LAYER_PLAYER;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(physicsBox, col);
@@ -1727,8 +1727,8 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 255, 255, 0, 255 };
 		api.addComponent(bullet, sp);
-		api.addComponent(bullet, engine::RigidBody{ 50.f, 0.f, 0.f, false });  // 向右飞
-		engine::Collider col{ 16.f, 16.f, 0.f, 0.f, false };
+		engine::RigidBody rbBullet; rbBullet.velocityX = 50.f; api.addComponent(bullet, rbBullet);  // 向右飞
+		engine::Collider col; col.width = 16.f; col.height = 16.f;
 		col.layer = COLLISION_LAYER_BULLET;
 		col.mask = engine::COLLISION_LAYER_ENEMY;  // 只碰敌人
 		api.addComponent(bullet, col);
@@ -1746,7 +1746,7 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 255, 50, 50, 255 };
 		api.addComponent(enemy, sp);
-		engine::Collider col{ 32.f, 32.f, 0.f, 0.f, false };
+		engine::Collider col; col.width = 32.f; col.height = 32.f;
 		col.layer = engine::COLLISION_LAYER_ENEMY;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(enemy, col);
@@ -1764,7 +1764,7 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 100, 255, 100, 150 };
 		api.addComponent(pickupZone, sp);
-		engine::Collider col{ 48.f, 48.f, 0.f, 0.f, true };  // isTrigger=true
+		engine::Collider col; col.width = 48.f; col.height = 48.f; col.isTrigger = true;  // isTrigger=true
 		col.layer = COLLISION_LAYER_PICKUP;
 		col.mask = engine::COLLISION_LAYER_PLAYER;
 		api.addComponent(pickupZone, col);

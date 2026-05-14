@@ -15,6 +15,7 @@ add_library(engine SHARED
     systems/RenderSystem.cpp
     systems/AudioSystem.cpp
     systems/PhysicsSystem.cpp
+    systems/PhysicsWorld2D.cpp
     systems/InputSystem.cpp
     systems/SceneSystem.cpp
     systems/AnimatorSystem.cpp
