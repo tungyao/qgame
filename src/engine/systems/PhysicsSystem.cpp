@@ -268,7 +268,16 @@ void PhysicsSystem::snapshotInterpolatedBodiesForStep() {
 // ── ECS 事件钩子 ────────────────────────────────────────────────────────────
 
 void PhysicsSystem::onTransformUpdated(entt::registry& reg, entt::entity e) {
-    if (steppingPhysics_) return;
+    if (steppingPhysics_) {
+        // 物理 step 期间 Transform 被 patch 了（如碰撞回调中移动 entity）
+        // 立即同步到 PhysicsWorld2D，否则后续 syncResultsToEntities 会用旧位置覆盖
+        auto it = entityToBody_.find(e);
+        if (it != entityToBody_.end() && it->second.bodyId != PhysicsWorld2D::INVALID_BODY) {
+            auto* tf = reg.try_get<Transform>(e);
+            if (tf) physicsWorld_.setBodyTransform(it->second.bodyId, tf->x, tf->y);
+        }
+        return;
+    }
     if (!reg.all_of<RigidBody, Transform>(e)) return;
 
     auto& interpolation = reg.get_or_emplace<TransformInterpolation>(e);

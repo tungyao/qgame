@@ -120,6 +120,9 @@ public:
 	void onCollision(const engine::CollisionInfo& info) {
 		collisionCount++;
 
+		// 只处理 Begin 事件，忽略 Persist 和 End
+		if (info.state != engine::ContactState::Begin) return;
+
 		// 收集 Pickup
 		entt::entity pickupEnt = entt::null;
 		if (info.self == player && ctx_.world.all_of<PickupTag>(info.other))
@@ -139,12 +142,14 @@ public:
 		if (!tf) return;
 		float margin = kPickupR + kWallThick + 20.f;
 		api_->patchComponent<engine::Transform>(pickup ,[&](engine::Transform& tf){
+			
 			tf.x = kPlayMinX + margin +
 				static_cast<float>(std::rand()) / RAND_MAX *
 				(kPlayMaxX - kPlayMinX - 2.f * margin);
 			tf.y = kPlayMinY + margin +
 				static_cast<float>(std::rand()) / RAND_MAX *
 				(kPlayMaxY - kPlayMinY - 2.f * margin);
+				std::printf("player respawnPickup: %.4f %.4f\n",tf.x,tf.y);
 			});
 	}
 
