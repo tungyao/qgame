@@ -230,7 +230,7 @@ private:
 
     float gravityX_ = 0.f;
     float gravityY_ = 0.f;
-    int   iterationCount_ = 3;
+    int   iterationCount_ = 8;
     float contactMargin_ = 1.f;
 
     BodyId nextBodyId_ = 1;

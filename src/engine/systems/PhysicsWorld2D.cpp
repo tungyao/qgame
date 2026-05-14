@@ -534,22 +534,28 @@ void PhysicsWorld2D::ccdPostPass_() {
             }
         }
 
-        // Step 2: Overlap resolve
+        // Step 2: Overlap resolve (iterative — pushing out of one overlap
+        // may push into another, so loop until stable or max iterations)
         {
-            AABB curBox = (dx == 0.f && dy == 0.f)
-                          ? oldBox : computeBodyAABB_(body, shape);
-            for (auto se : candidates) {
-                if (se == entry.id) continue;
-                auto sit = bodies_.find(se);
-                if (sit == bodies_.end() || sit->second.shapes.empty()) continue;
-                if (!canCollide_(shape, sit->second.shapes[0])) continue;
-                AABB targetBox = computeBodyAABB_(sit->second, sit->second.shapes[0]);
-                if (!overlaps(curBox, targetBox)) continue;
-                float sx = 0.f, sy = 0.f;
-                minSeparation(curBox, targetBox, sx, sy);
-                body.x += sx; body.y += sy;
-                curBox.minX += sx; curBox.maxX += sx;
-                curBox.minY += sy; curBox.maxY += sy;
+            constexpr int kMaxOverlapIter = 4;
+            for (int oi = 0; oi < kMaxOverlapIter; ++oi) {
+                bool anyResolved = false;
+                AABB curBox = computeBodyAABB_(body, shape);
+                for (auto se : candidates) {
+                    if (se == entry.id) continue;
+                    auto sit = bodies_.find(se);
+                    if (sit == bodies_.end() || sit->second.shapes.empty()) continue;
+                    if (!canCollide_(shape, sit->second.shapes[0])) continue;
+                    AABB targetBox = computeBodyAABB_(sit->second, sit->second.shapes[0]);
+                    if (!overlaps(curBox, targetBox)) continue;
+                    float sx = 0.f, sy = 0.f;
+                    minSeparation(curBox, targetBox, sx, sy);
+                    body.x += sx; body.y += sy;
+                    curBox.minX += sx; curBox.maxX += sx;
+                    curBox.minY += sy; curBox.maxY += sy;
+                    anyResolved = true;
+                }
+                if (!anyResolved) break;
             }
         }
     }
