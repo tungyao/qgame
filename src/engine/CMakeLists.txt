@@ -21,6 +21,7 @@ add_library(engine SHARED
     systems/AnimatorSystem.cpp
     systems/TweenSystem.cpp
     systems/UISystem.cpp
+    systems/InteractionSystem.cpp
     systems/DebugOverlaySystem.cpp
     input/SDLInputProvider.cpp
     assets/AssetManager.cpp
