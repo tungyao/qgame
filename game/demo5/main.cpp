@@ -263,16 +263,6 @@ int main(int argc, char** argv) {
 		sp.pass = engine::RenderPass::World;
 		api.addComponent(head, sp);
 	}
-	{
-		engine::Collider col;
-		col.width = static_cast<float>(foodDiam);
-		col.height = static_cast<float>(foodDiam);
-		col.offsetX = 0;
-		col.offsetY = 0;
-		col.isTrigger = true;
-		col.mask = 0;
-		api.addComponent(head, col);
-	}
 
 	while (ctx.scheduler.tick()) {
 		const float dt = ctx.scheduler.deltaTime();

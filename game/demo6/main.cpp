@@ -138,6 +138,7 @@ public:
 			col.layer = engine::COLLISION_LAYER_DEFAULT;
 			col.mask = engine::COLLISION_LAYER_ALL;
 			reg.emplace<engine::Collider>(food, col);
+			reg.emplace<engine::RigidBody>(food, engine::RigidBody{});
 		}
 		reg.emplace<SnakeFood>(food);
 	}
@@ -203,6 +204,7 @@ public:
 					});
 				ctx_.world.emplace<engine::Sprite>(seg, bodySp);
 				ctx_.world.emplace<engine::Collider>(seg, bodyCol);
+				ctx_.world.emplace<engine::RigidBody>(seg, engine::RigidBody{});
 				snake->body.push_back(seg);
 			}
 		}
@@ -256,8 +258,10 @@ protected:
 			snake->alive = false;
 			return;
 		}
-		headTF->x = newX;
-		headTF->y = newY;
+		ctx_.world.patch<engine::Transform>(head_, [&](engine::Transform& headTF) {
+			headTF.x = newX;
+			headTF.y = newY;
+		});
 
 		// ── 5. 记录轨迹 ──
 		snake->trail.push_back({ headTF->x, headTF->y });

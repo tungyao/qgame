@@ -137,6 +137,7 @@ public:
     // ── 物理参数设置 ─────────────────────────────────────────────────────
 
     void setBodyGravityScale(entt::entity e, float scale);
+    void setBodyVelocity(entt::entity e, float vx, float vy);
 
     // ── 碰撞形状辅助 ─────────────────────────────────────────────────────
 

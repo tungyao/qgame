@@ -173,6 +173,14 @@ std::vector<entt::entity> GameAPI::overlapCircle(float centerX, float centerY, f
 void GameAPI::setBodyGravityScale(entt::entity e, float scale) {
     auto* rb = ctx_.world.try_get<RigidBody>(e);
     if (rb) rb->gravityScale = scale;
+    if (B2_IS_NON_NULL(rb->bodyId))
+        b2Body_SetGravityScale(rb->bodyId, scale);
+}
+
+void GameAPI::setBodyVelocity(entt::entity e, float vx, float vy) {
+    auto* rb = ctx_.world.try_get<RigidBody>(e);
+    if (rb && B2_IS_NON_NULL(rb->bodyId))
+        b2Body_SetLinearVelocity(rb->bodyId, {vx / PIXELS_PER_METER, vy / PIXELS_PER_METER});
 }
 
 // ── Shape helpers ────────────────────────────────────────────────────────────

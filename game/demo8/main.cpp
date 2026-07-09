@@ -346,6 +346,7 @@ int main(int argc, char** argv) {
 		col.layer = engine::COLLISION_LAYER_STATIC;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(e, col);
+		api.addComponent(e, engine::RigidBody{engine::BodyType::Static});
 		return e;
 	};
 
@@ -366,6 +367,7 @@ int main(int argc, char** argv) {
 		col.layer = engine::COLLISION_LAYER_STATIC;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(e, col);
+		api.addComponent(e, engine::RigidBody{engine::BodyType::Static});
 		return e;
 	};
 
@@ -387,6 +389,7 @@ int main(int argc, char** argv) {
 		engine::RigidBody rb;
 		rb.gravityScale = 0.f;
 		api.addComponent(e, rb);
+		api.setBodyVelocity(e, vx, vy);
 		return e;
 	};
 
@@ -436,6 +439,7 @@ int main(int argc, char** argv) {
 		col.layer = engine::COLLISION_LAYER_ENEMY;
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(pickup, col);
+		api.addComponent(pickup, engine::RigidBody{engine::BodyType::Dynamic});
 	}
 	ctx.world.emplace<PickupTag>(pickup);
 
