@@ -463,8 +463,8 @@ int main() {
             transform.x == 50.0f &&
             transform.y == 60.0f &&
             transform.scaleX == 2.0f &&
-            rb.velocityX == 3.0f &&
-            rb.isKinematic) {
+            rb.gravityScale == 1.0f &&
+            rb.type == engine::BodyType::Dynamic) {
             foundPrefabInstance = true;
         }
     }

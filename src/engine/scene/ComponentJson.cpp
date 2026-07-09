@@ -281,57 +281,50 @@ static Camera cameraFromJson(const Json& j) {
 }
 
 static Json rigidBodyToJson(const RigidBody& rb) {
-    Json j = {{"vx", rb.velocityX}, {"vy", rb.velocityY},
-              {"gs", rb.gravityScale}, {"kin", rb.isKinematic}};
-    if (rb.type != BodyType::Rigid) j["type"] = static_cast<uint8_t>(rb.type);
-    if (rb.mass != 1.f) j["m"] = rb.mass;
-    if (rb.bounciness != 0.f) j["b"] = rb.bounciness;
-    if (rb.friction != 0.f) j["f"] = rb.friction;
-    if (rb.ccdEnabled) j["ccd"] = true;
-    if (rb.contactMargin != 1.f) j["cm"] = rb.contactMargin;
+    Json j = {{"gs", rb.gravityScale}};
+    if (rb.type != BodyType::Dynamic) j["type"] = static_cast<uint8_t>(rb.type);
+    if (!rb.enabled) j["disabled"] = true;
+    if (rb.freezeRotation) j["fr"] = true;
     return j;
 }
 
 static RigidBody rigidBodyFromJson(const Json& j) {
     RigidBody rb;
-    rb.velocityX     = j.value("vx",  0.f);
-    rb.velocityY     = j.value("vy",  0.f);
-    rb.gravityScale  = j.value("gs",  0.f);
-    rb.isKinematic   = j.value("kin", false);
-    uint8_t typeVal  = j.value("type", static_cast<uint8_t>(BodyType::Rigid));
-    rb.type          = static_cast<BodyType>(typeVal);
-    rb.mass          = j.value("m",    1.f);
-    rb.bounciness    = j.value("b",    0.f);
-    rb.friction      = j.value("f",    0.f);
-    rb.ccdEnabled    = j.value("ccd",  false);
-    rb.contactMargin = j.value("cm",   1.f);
+    rb.gravityScale   = j.value("gs",  1.0f);
+    rb.enabled        = !j.value("disabled", false);
+    rb.freezeRotation = j.value("fr", false);
+    uint8_t typeVal   = j.value("type", static_cast<uint8_t>(BodyType::Dynamic));
+    rb.type           = static_cast<BodyType>(typeVal);
     return rb;
 }
 
 static Json colliderToJson(const Collider& c) {
     Json j = {{"w", c.width}, {"h", c.height},
               {"ox", c.offsetX}, {"oy", c.offsetY}, {"trig", c.isTrigger},
-              {"layer", c.layer}, {"mask", c.mask}};
+              {"layer", c.layer}, {"mask", c.mask},
+              {"density", c.density}, {"friction", c.friction}};
     if (c.shapeType != ShapeType::Box)
         j["st"] = static_cast<uint8_t>(c.shapeType);
-    if (c.radius != 0.f) j["r"] = c.radius;
-    if (c.capsuleLength != 0.f) j["cl"] = c.capsuleLength;
+    if (c.radius != 0.5f) j["r"] = c.radius;
+    if (c.restitution != 0.0f) j["rest"] = c.restitution;
     return j;
 }
 
 static Collider colliderFromJson(const Json& j) {
     Collider c;
-    c.width     = j.value("w",    0.f);
-    c.height    = j.value("h",    0.f);
-    c.offsetX   = j.value("ox",   0.f);
-    c.offsetY   = j.value("oy",   0.f);
-    c.isTrigger = j.value("trig", false);
-    c.layer     = j.value("layer", COLLISION_LAYER_DEFAULT);
-    c.mask      = j.value("mask",  COLLISION_LAYER_ALL);
-    uint8_t st  = j.value("st", static_cast<uint8_t>(ShapeType::Box));
-    c.shapeType = static_cast<ShapeType>(st);
-    c.radius    = j.value("r", 0.f);
-    c.capsuleLength = j.value("cl", 0.f);
+    c.width       = j.value("w",    1.0f);
+    c.height      = j.value("h",    1.0f);
+    c.offsetX     = j.value("ox",   0.0f);
+    c.offsetY     = j.value("oy",   0.0f);
+    c.isTrigger   = j.value("trig", false);
+    c.layer       = j.value("layer", COLLISION_LAYER_DEFAULT);
+    c.mask        = j.value("mask",  COLLISION_LAYER_ALL);
+    c.density     = j.value("density", 1.0f);
+    c.friction    = j.value("friction", 0.3f);
+    c.restitution = j.value("rest", 0.0f);
+    uint8_t st    = j.value("st", static_cast<uint8_t>(ShapeType::Box));
+    c.shapeType   = static_cast<ShapeType>(st);
+    c.radius      = j.value("r", 0.5f);
     return c;
 }
 

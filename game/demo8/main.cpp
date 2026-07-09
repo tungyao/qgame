@@ -385,9 +385,7 @@ int main(int argc, char** argv) {
 		col.mask = engine::COLLISION_LAYER_ALL;
 		api.addComponent(e, col);
 		engine::RigidBody rb;
-		rb.velocityX = vx; rb.velocityY = vy;
 		rb.gravityScale = 0.f;
-		rb.ccdEnabled = true;
 		api.addComponent(e, rb);
 		return e;
 	};
@@ -418,7 +416,7 @@ int main(int argc, char** argv) {
 	}
 	{
 		engine::RigidBody rb;
-		rb.isKinematic = true;
+		rb.type = engine::BodyType::Kinematic;
 		api.addComponent(player, rb);
 	}
 	ctx.world.emplace<PlayerTag>(player);

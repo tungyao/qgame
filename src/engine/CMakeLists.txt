@@ -15,7 +15,6 @@ add_library(engine SHARED
     systems/RenderSystem.cpp
     systems/AudioSystem.cpp
     systems/PhysicsSystem.cpp
-    systems/PhysicsWorld2D.cpp
     systems/InputSystem.cpp
     systems/SceneSystem.cpp
     systems/AnimatorSystem.cpp
@@ -67,7 +66,7 @@ target_link_libraries(engine
     PRIVATE SDL3::SDL3
     PRIVATE stb_image
     PUBLIC  nlohmann_json::nlohmann_json
-    PRIVATE box2d::box2d
+    PUBLIC box2d::box2d
 )
 
 if(CMAKE_DL_LIBS)

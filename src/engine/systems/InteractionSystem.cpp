@@ -53,7 +53,7 @@ static bool pointTestShape(float px, float py,
     }
     case ShapeType::Capsule: {
         // Vertical capsule: line segment + hemispherical caps
-        const float halfLen = col.capsuleLength * 0.5f;
+        const float halfLen = std::max(0.0f, col.height * 0.5f - col.radius);
         const float segY0 = cy - halfLen;
         const float segY1 = cy + halfLen;
         const float closestY = std::clamp(py, segY0, segY1);

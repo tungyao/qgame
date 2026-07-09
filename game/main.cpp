@@ -1727,7 +1727,7 @@ int main(int argc, char* argv[]) {
 		sp.pass = engine::RenderPass::World;
 		sp.tint = { 255, 255, 0, 255 };
 		api.addComponent(bullet, sp);
-		engine::RigidBody rbBullet; rbBullet.velocityX = 50.f; api.addComponent(bullet, rbBullet);  // 向右飞
+		engine::RigidBody rbBullet; api.addComponent(bullet, rbBullet);  // 向右飞
 		engine::Collider col; col.width = 16.f; col.height = 16.f;
 		col.layer = COLLISION_LAYER_BULLET;
 		col.mask = engine::COLLISION_LAYER_ENEMY;  // 只碰敌人
@@ -2542,7 +2542,7 @@ int main(int argc, char* argv[]) {
 			for (auto& h : hits) {
 				if (api.hasComponent<engine::EntityID>(h.entity)) {
 					auto& id = api.getComponent<engine::EntityID>(h.entity);
-					printf("  - %s (overlap: %.1fx%.1f)\n", id.c_str(), h.overlapX, h.overlapY);
+					printf("  - %s\n", id.c_str());
 				}
 			}
 		}
@@ -2561,8 +2561,7 @@ int main(int argc, char* argv[]) {
 				tf.y = 50.f;
 				});
 			auto& rb = api.getComponent<engine::RigidBody>(physicsBox);
-			rb.velocityX = 0.f;
-			rb.velocityY = 0.f;
+			// Velocity is managed by Box2D internally; reset position to prevent tunneling
 			printf("[Physics] Reset physics box to (600, 50)\n");
 		}
 

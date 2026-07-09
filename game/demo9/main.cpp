@@ -144,7 +144,6 @@ static entt::entity makeInteractable(engine::GameAPI& api, engine::EngineContext
         col.width = def.colW;
         col.height = def.colH;
         col.radius = def.colRadius;
-        col.capsuleLength = def.colCapLen;
         col.isTrigger = true;
         col.layer = engine::COLLISION_LAYER_DEFAULT;
         col.mask = engine::COLLISION_LAYER_ALL;
