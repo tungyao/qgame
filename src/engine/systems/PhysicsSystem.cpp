@@ -446,6 +446,9 @@ void PhysicsSystem::onRigidBodyRemoved(entt::registry& reg, entt::entity e) {
     auto* rb = reg.try_get<RigidBody>(e);
     if (!rb) return;
     if (B2_IS_NON_NULL(rb->bodyId)) {
+        auto* col = reg.try_get<Collider>(e);
+        if (col)
+            col->shapeId = b2_nullShapeId;
         b2DestroyBody(rb->bodyId);
         rb->bodyId = b2_nullBodyId;
     }
