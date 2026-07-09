@@ -1,17 +1,74 @@
 #include "PhysicsSystem.h"
 #include "../components/RenderComponents.h"
-#include "../components/PhysicsComponents.h"
-#include <cmath>
-#include <vector>
 #include <algorithm>
+#include <cmath>
 
 namespace engine {
+
+static entt::entity getEntityFromBody(b2BodyId bodyId) {
+    void* ud = b2Body_GetUserData(bodyId);
+    return userDataToEntity(ud);
+}
+
+struct RaycastCtx {
+    entt::entity ignoreEntity;
+    CollisionLayer ignoreLayer;
+    float origDirX, origDirY;
+    RaycastHit* out;
+    bool found;
+};
+
+static float raycastFilter(b2ShapeId shapeId, b2Vec2 point, b2Vec2 normal,
+                            float fraction, void* context) {
+    auto* ctx = static_cast<RaycastCtx*>(context);
+    b2BodyId bodyId = b2Shape_GetBody(shapeId);
+    entt::entity e = getEntityFromBody(bodyId);
+    if (e == entt::null || e == ctx->ignoreEntity) return -1.0f;
+
+    b2Filter filter = b2Shape_GetFilter(shapeId);
+    if (filter.categoryBits & ctx->ignoreLayer) return -1.0f;
+
+    ctx->found = true;
+    ctx->out->entity = e;
+    ctx->out->hitX = toPixels(point.x);
+    ctx->out->hitY = toPixels(point.y);
+    ctx->out->normalX = normal.x;
+    ctx->out->normalY = normal.y;
+    ctx->out->distance = fraction * std::sqrt(ctx->origDirX * ctx->origDirX + ctx->origDirY * ctx->origDirY);
+    ctx->out->hit = true;
+    return fraction;
+}
+
+struct OverlapCtx {
+    std::vector<entt::entity>* results;
+    CollisionLayer ignoreLayer;
+    entt::entity ignoreEntity;
+};
+
+static bool overlapFilter(b2ShapeId shapeId, void* context) {
+    auto* ctx = static_cast<OverlapCtx*>(context);
+    b2BodyId bodyId = b2Shape_GetBody(shapeId);
+    entt::entity e = getEntityFromBody(bodyId);
+    if (e == entt::null || e == ctx->ignoreEntity) return true;
+
+    b2Filter filter = b2Shape_GetFilter(shapeId);
+    if (filter.categoryBits & ctx->ignoreLayer) return true;
+
+    ctx->results->push_back(e);
+    return true;
+}
 
 PhysicsSystem::PhysicsSystem(entt::registry& world, entt::dispatcher& dispatcher)
     : world_(world), dispatcher_(dispatcher) {
 }
 
 void PhysicsSystem::init() {
+    b2WorldDef worldDef = b2DefaultWorldDef();
+    worldDef.gravity = {0.0f, 0.0f};
+    worldDef.enableSleep = true;
+    worldDef.enableContinuous = true;
+    worldId_ = b2CreateWorld(&worldDef);
+
     transformUpdateConnection_ =
         world_.on_update<Transform>().connect<&PhysicsSystem::onTransformUpdated>(this);
 
@@ -23,24 +80,25 @@ void PhysicsSystem::init() {
     world_.on_construct<TileMap>().connect<&PhysicsSystem::onTileMapAdded>(this);
     world_.on_update<TileMap>().connect<&PhysicsSystem::onTileMapUpdated>(this);
     world_.on_destroy<TileMap>().connect<&PhysicsSystem::onTileMapRemoved>(this);
-
-    // 注册接触回调桥接
-    physicsWorld_.setContactCallback(
-        [this](const PhysicsWorld2D::CollisionPair& pair) {
-            onPhysicsContact(pair);
-        });
 }
 
 void PhysicsSystem::shutdown() {
     transformUpdateConnection_.release();
-    physicsWorld_.setContactCallback(nullptr);
+    if (B2_IS_NON_NULL(worldId_)) {
+        b2DestroyWorld(worldId_);
+        worldId_ = b2_nullWorldId;
+    }
 }
 
-// ── 公共 API ────────────────────────────────────────────────────────────────
+void PhysicsSystem::setGravity(float x, float y) {
+    gravityX_ = x;
+    gravityY_ = y;
+    b2Vec2 g = toMetersVec2(x, y);
+    b2World_SetGravity(worldId_, g);
+}
 
-void PhysicsSystem::setGravity(float x, float y)  { physicsWorld_.setGravity(x, y); }
-float PhysicsSystem::gravityX() const             { return physicsWorld_.gravityX(); }
-float PhysicsSystem::gravityY() const             { return physicsWorld_.gravityY(); }
+float PhysicsSystem::gravityX() const { return gravityX_; }
+float PhysicsSystem::gravityY() const { return gravityY_; }
 
 void PhysicsSystem::setFixedTimestep(float step)  { fixedTimestep_ = step; }
 float PhysicsSystem::fixedTimestep() const        { return fixedTimestep_; }
@@ -50,515 +108,441 @@ void PhysicsSystem::setVariableTimestep(bool e)   { variableTimestep_ = e; }
 bool PhysicsSystem::variableTimestep() const      { return variableTimestep_; }
 
 float PhysicsSystem::interpolationAlpha() const {
-    if (fixedTimestep_ <= 0.f) return 0.f;
-    return std::clamp(accumulator_ / fixedTimestep_, 0.f, 1.f);
+    if (fixedTimestep_ <= 0.0f) return 0.0f;
+    return std::clamp(accumulator_ / fixedTimestep_, 0.0f, 1.0f);
 }
 
-// ── 主更新 ──────────────────────────────────────────────────────────────────
-
 void PhysicsSystem::update(float dt) {
+    if (!B2_IS_NON_NULL(worldId_)) return;
+
     if (variableTimestep_) {
-        snapshotInterpolatedBodiesForStep();
-        steppingPhysics_ = true;
-        syncBodiesToWorld();
-        physicsWorld_.integrateVelocities(dt);
-        physicsWorld_.resolveCollisions();
-        syncResultsToEntities();
-        resolveTileCollisions();
-        steppingPhysics_ = false;
-        // Snap previous to current for direct display
-        auto snapView = world_.view<Transform, RigidBody>();
-        for (auto [e, tf, rb] : snapView.each()) {
+        b2World_Step(worldId_, dt, SUB_STEP_COUNT);
+        pollBodyEvents();
+        pollContactEvents();
+        pollSensorEvents();
+        auto view = world_.view<Transform, RigidBody>();
+        for (auto [e, tf, rb] : view.each()) {
             (void)rb;
-            if (auto* interpolation = world_.try_get<TransformInterpolation>(e)) {
-                interpolation->previous = tf;
-            }
+            if (auto* interp = world_.try_get<TransformInterpolation>(e))
+                interp->previous = tf;
         }
-        accumulator_ = 0.f;
+        accumulator_ = 0.0f;
         return;
     }
 
     accumulator_ += dt;
     while (accumulator_ >= fixedTimestep_) {
-        snapshotInterpolatedBodiesForStep();
-        steppingPhysics_ = true;
-        syncBodiesToWorld();
-        physicsWorld_.step(fixedTimestep_);
-        syncResultsToEntities();
-        steppingPhysics_ = false;
-        resolveTileCollisions();
+        auto interpView = world_.view<Transform, RigidBody>();
+        for (auto [e, tf, rb] : interpView.each()) {
+            (void)rb;
+            auto& interp = world_.get_or_emplace<TransformInterpolation>(e);
+            interp.previous = tf;
+            interp.initialized = true;
+            interp.disabled = false;
+        }
+
+        b2World_Step(worldId_, fixedTimestep_, SUB_STEP_COUNT);
+
+        pollBodyEvents();
+        pollContactEvents();
+        pollSensorEvents();
+
         accumulator_ -= fixedTimestep_;
     }
 }
 
-// ── ECS ↔ PhysicsWorld2D 同步 ───────────────────────────────────────────────
+void PhysicsSystem::createBox2DBody(entt::entity e) {
+    auto& rb = world_.get<RigidBody>(e);
+    const auto& tf = world_.get<Transform>(e);
 
-PhysicsWorld2D::ShapeDef PhysicsSystem::colliderToShapeDef(const Collider& col) {
-    PhysicsWorld2D::ShapeDef def;
-    def.shapeType = col.shapeType;
-    def.width     = col.width;
-    def.height    = col.height;
-    def.radius    = col.radius;
-    def.capsuleLength = col.capsuleLength;
-    def.offsetX   = col.offsetX;
-    def.offsetY   = col.offsetY;
-    def.isTrigger = col.isTrigger;
-    def.layer     = col.layer;
-    def.mask      = col.mask;
-    return def;
+    if (B2_IS_NON_NULL(rb.bodyId)) return;
+
+    b2BodyDef bodyDef = b2DefaultBodyDef();
+    switch (rb.type) {
+        case BodyType::Static:    bodyDef.type = b2_staticBody; break;
+        case BodyType::Kinematic: bodyDef.type = b2_kinematicBody; break;
+        case BodyType::Dynamic:   bodyDef.type = b2_dynamicBody; break;
+    }
+    bodyDef.position = toMetersVec2(tf.x, tf.y);
+    bodyDef.gravityScale = rb.gravityScale;
+    bodyDef.fixedRotation = rb.freezeRotation;
+    bodyDef.isEnabled = rb.enabled;
+    bodyDef.userData = entityToUserData(e);
+
+    steppingPhysics_ = true;
+    rb.bodyId = b2CreateBody(worldId_, &bodyDef);
+    steppingPhysics_ = false;
+
+    if (world_.all_of<Collider>(e))
+        createBox2DShape(e);
 }
 
-PhysicsWorld2D::BodyDef PhysicsSystem::rigidBodyToBodyDef(const Transform& tf, const RigidBody& rb) {
-    PhysicsWorld2D::BodyDef def;
-    def.type         = rb.isKinematic ? BodyType::Kinematic : rb.type;
-    def.x            = tf.x;
-    def.y            = tf.y;
-    def.velocityX    = rb.velocityX;
-    def.velocityY    = rb.velocityY;
-    def.gravityScale = rb.gravityScale;
-    def.mass         = rb.mass;
-    def.bounciness   = rb.bounciness;
-    def.friction     = rb.friction;
-    def.ccdEnabled   = rb.ccdEnabled;
-    def.contactMargin = rb.contactMargin;
-    return def;
+void PhysicsSystem::destroyBox2DBody(entt::entity e) {
+    auto& rb = world_.get<RigidBody>(e);
+    if (B2_IS_NON_NULL(rb.bodyId)) {
+        auto* col = world_.try_get<Collider>(e);
+        if (col)
+            col->shapeId = b2_nullShapeId;
+        steppingPhysics_ = true;
+        b2DestroyBody(rb.bodyId);
+        steppingPhysics_ = false;
+        rb.bodyId = b2_nullBodyId;
+    }
 }
 
-void PhysicsSystem::ensureBodyForEntity(entt::entity e, Transform& tf, RigidBody* rb, Collider& col) {
-    auto& mapping = entityToBody_[e];
-    if (mapping.bodyId != PhysicsWorld2D::INVALID_BODY) {
-        // Already exists — update
-        physicsWorld_.setBodyTransform(mapping.bodyId, tf.x, tf.y);
-        if (rb) {
-            physicsWorld_.setBodyVelocity(mapping.bodyId, rb->velocityX, rb->velocityY);
-            physicsWorld_.setBodyType(mapping.bodyId,
-                rb->isKinematic ? BodyType::Kinematic : rb->type);
-            physicsWorld_.setBodyGravityScale(mapping.bodyId, rb->gravityScale);
-            physicsWorld_.setBodyMass(mapping.bodyId, rb->mass);
+void PhysicsSystem::createBox2DShape(entt::entity e) {
+    auto& rb = world_.get<RigidBody>(e);
+    auto& col = world_.get<Collider>(e);
+
+    if (!B2_IS_NON_NULL(rb.bodyId)) return;
+    if (B2_IS_NON_NULL(col.shapeId)) return;
+
+    b2ShapeDef shapeDef = b2DefaultShapeDef();
+    shapeDef.density = col.density;
+    shapeDef.material.friction = col.friction;
+    shapeDef.material.restitution = col.restitution;
+    shapeDef.isSensor = col.isTrigger;
+    shapeDef.filter.categoryBits = col.layer;
+    shapeDef.filter.maskBits = col.mask;
+    shapeDef.enableContactEvents = true;
+
+    b2Vec2 offset = toMetersVec2(col.offsetX, col.offsetY);
+
+    steppingPhysics_ = true;
+    switch (col.shapeType) {
+        case ShapeType::Box: {
+            float hw = toMeters(col.width * 0.5f);
+            float hh = toMeters(col.height * 0.5f);
+            b2Polygon poly = b2MakeOffsetBox(hw, hh, offset, b2Rot_identity);
+            col.shapeId = b2CreatePolygonShape(rb.bodyId, &shapeDef, &poly);
+            break;
         }
-        physicsWorld_.clearShapes(mapping.bodyId);
-        physicsWorld_.addShape(mapping.bodyId, colliderToShapeDef(col));
-        return;
-    }
-
-    // Create new body
-    PhysicsWorld2D::BodyDef bodyDef;
-    if (rb) {
-        bodyDef = rigidBodyToBodyDef(tf, *rb);
-    } else {
-        bodyDef.type = BodyType::Static;
-        bodyDef.x = tf.x;
-        bodyDef.y = tf.y;
-    }
-
-    PhysicsWorld2D::BodyId id = physicsWorld_.createBody(bodyDef);
-    physicsWorld_.addShape(id, colliderToShapeDef(col));
-
-    mapping.bodyId = id;
-    if (static_cast<size_t>(id) >= bodyToEntity_.size()) {
-        bodyToEntity_.resize(id + 1, entt::null);
-    }
-    bodyToEntity_[id] = e;
-}
-
-void PhysicsSystem::removeBodyForEntity(entt::entity e) {
-    auto it = entityToBody_.find(e);
-    if (it != entityToBody_.end()) {
-        physicsWorld_.destroyBody(it->second.bodyId);
-        entityToBody_.erase(it);
-    }
-}
-
-void PhysicsSystem::syncBodiesToWorld() {
-    // 收集所有当前有 Collider 的实体
-    entt::sparse_set current;
-    auto view = world_.view<Transform, Collider>();
-    for (auto e : view) {
-        current.push(e);
-    }
-
-    // 移除不再有 Collider 的实体
-    for (auto it = entityToBody_.begin(); it != entityToBody_.end(); ) {
-        if (!current.contains(it->first)) {
-            physicsWorld_.destroyBody(it->second.bodyId);
-            it = entityToBody_.erase(it);
-        } else {
-            ++it;
+        case ShapeType::Circle: {
+            b2Circle circle;
+            circle.center = offset;
+            circle.radius = toMeters(col.radius);
+            col.shapeId = b2CreateCircleShape(rb.bodyId, &shapeDef, &circle);
+            break;
+        }
+        case ShapeType::Capsule: {
+            float r = toMeters(col.radius);
+            b2Capsule capsule;
+            capsule.center1 = {offset.x - r, offset.y};
+            capsule.center2 = {offset.x + r, offset.y};
+            capsule.radius = r;
+            col.shapeId = b2CreateCapsuleShape(rb.bodyId, &shapeDef, &capsule);
+            break;
         }
     }
+    steppingPhysics_ = false;
+}
 
-    // 确保所有当前实体有对应的 body
-    for (auto e : view) {
-        auto& tf = view.get<Transform>(e);
-        auto& col = view.get<Collider>(e);
-        auto* rb = world_.try_get<RigidBody>(e);
-        ensureBodyForEntity(e, tf, rb, col);
+void PhysicsSystem::buildTileMapChain(entt::entity e) {
+    auto& tmap = world_.get<TileMap>(e);
+    auto& tmc = world_.get_or_emplace<TileMapCollider>(e);
+
+    if (B2_IS_NON_NULL(tmc.chainId)) {
+        b2DestroyChain(tmc.chainId);
+        tmc.chainId = b2_nullChainId;
+    }
+
+    const float ts = static_cast<float>(tmap.tileSize);
+    const float halfTs = ts * 0.5f;
+
+    std::vector<b2Vec2> points;
+    points.reserve(static_cast<size_t>(tmap.width) * static_cast<size_t>(tmap.height));
+
+    for (int ty = 0; ty < tmap.height; ++ty) {
+        for (int tx = 0; tx < tmap.width; ++tx) {
+            bool solid = false;
+            for (int layer = 0; layer < static_cast<int>(tmap.layers.size()); ++layer) {
+                auto col = tmap.collisionAt(layer, tx, ty);
+                if (col.shape != TileMap::TileCollisionShape::None &&
+                    col.shape != TileMap::TileCollisionShape::Trigger) {
+                    solid = true;
+                    break;
+                }
+            }
+            if (solid) {
+                float cx = static_cast<float>(tx) * ts + halfTs;
+                float cy = static_cast<float>(ty) * ts + halfTs;
+                points.push_back(toMetersVec2(cx, cy));
+            }
+        }
+    }
+
+    if (points.size() < 4) return;
+
+    b2BodyDef bodyDef = b2DefaultBodyDef();
+    bodyDef.type = b2_staticBody;
+    bodyDef.userData = entityToUserData(e);
+    b2BodyId bodyId = b2CreateBody(worldId_, &bodyDef);
+
+    b2SurfaceMaterial material = b2DefaultSurfaceMaterial();
+    material.friction = tmc.friction;
+
+    b2ChainDef chainDef = b2DefaultChainDef();
+    chainDef.points = points.data();
+    chainDef.count = static_cast<int>(points.size());
+    chainDef.materials = &material;
+    chainDef.materialCount = 1;
+    chainDef.isLoop = false;
+    chainDef.filter.categoryBits = tmc.layer;
+    chainDef.filter.maskBits = tmc.mask;
+
+    tmc.chainId = b2CreateChain(bodyId, &chainDef);
+}
+
+void PhysicsSystem::destroyTileMapChain(entt::entity e) {
+    auto* tmc = world_.try_get<TileMapCollider>(e);
+    if (!tmc) return;
+    if (B2_IS_NON_NULL(tmc->chainId)) {
+        b2DestroyChain(tmc->chainId);
+        tmc->chainId = b2_nullChainId;
     }
 }
 
-void PhysicsSystem::syncResultsToEntities() {
-    for (auto& [e, mapping] : entityToBody_) {
-        if (mapping.bodyId == PhysicsWorld2D::INVALID_BODY) continue;
-
-        float x, y, vx, vy;
-        physicsWorld_.getBodyState(mapping.bodyId, x, y, vx, vy);
+void PhysicsSystem::pollBodyEvents() {
+    b2BodyEvents events = b2World_GetBodyEvents(worldId_);
+    for (int i = 0; i < events.moveCount; ++i) {
+        const auto& ev = events.moveEvents[i];
+        entt::entity e = getEntityFromBody(ev.bodyId);
+        if (e == entt::null) continue;
 
         auto* tf = world_.try_get<Transform>(e);
-        if (tf) {
-            tf->x = x;
-            tf->y = y;
-            world_.patch<Transform>(e);
-        }
+        if (!tf) continue;
+
+        steppingPhysics_ = true;
+        tf->x = toPixels(ev.transform.p.x);
+        tf->y = toPixels(ev.transform.p.y);
+        tf->rotation = toDegrees(b2Rot_GetAngle(ev.transform.q));
+        world_.patch<Transform>(e);
+        steppingPhysics_ = false;
 
         auto* rb = world_.try_get<RigidBody>(e);
         if (rb) {
-            rb->velocityX = vx;
-            rb->velocityY = vy;
+            b2Vec2 v = b2Body_GetLinearVelocity(rb->bodyId);
+            (void)v;
         }
     }
 }
 
-// ── 接触回调桥接 ────────────────────────────────────────────────────────────
+void PhysicsSystem::pollContactEvents() {
+    b2ContactEvents events = b2World_GetContactEvents(worldId_);
 
-void PhysicsSystem::onPhysicsContact(const PhysicsWorld2D::CollisionPair& pair) {
-    entt::entity self = entt::null;
-    entt::entity other = entt::null;
+    for (int i = 0; i < events.beginCount; ++i) {
+        const auto& ev = events.beginEvents[i];
+        entt::entity eA = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.shapeIdA)));
+        entt::entity eB = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.shapeIdB)));
+        if (eA == entt::null || eB == entt::null) continue;
 
-    if (pair.bodyA > 0 && static_cast<size_t>(pair.bodyA) < bodyToEntity_.size())
-        self = bodyToEntity_[pair.bodyA];
-    if (pair.bodyB > 0 && static_cast<size_t>(pair.bodyB) < bodyToEntity_.size())
-        other = bodyToEntity_[pair.bodyB];
-
-    if (self == entt::null || other == entt::null) {
-        std::printf("[Physics] contact IGNORED: bodyA=%d→valid=%d bodyB=%d→valid=%d trigger=%d\n",
-                    pair.bodyA, self != entt::null,
-                    pair.bodyB, other != entt::null,
-                    pair.isTriggerPair);
-        return;
+        CollisionInfo info;
+        info.self = eA;
+        info.other = eB;
+        info.state = ContactState::Begin;
+        dispatcher_.trigger(info);
     }
 
-    std::printf("[Physics] contact: e%d↔e%d trigger=%d overlap=%.1f\n",
-                static_cast<int>(self), static_cast<int>(other),
-                pair.isTriggerPair, pair.overlap);
+    for (int i = 0; i < events.endCount; ++i) {
+        const auto& ev = events.endEvents[i];
+        if (!b2Shape_IsValid(ev.shapeIdA) || !b2Shape_IsValid(ev.shapeIdB))
+            continue;
+        entt::entity eA = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.shapeIdA)));
+        entt::entity eB = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.shapeIdB)));
+        if (eA == entt::null || eB == entt::null) continue;
 
-    CollisionInfo info;
-    info.self     = self;
-    info.other    = other;
-    info.normalX  = pair.normalX;
-    info.normalY  = pair.normalY;
-    info.overlapX = pair.normalX * pair.overlap;
-    info.overlapY = pair.normalY * pair.overlap;
-    info.state    = pair.state;
+        CollisionInfo info;
+        info.self = eA;
+        info.other = eB;
+        info.state = ContactState::End;
+        dispatcher_.trigger(info);
+    }
 
-    dispatcher_.trigger(info);
-}
+    for (int i = 0; i < events.hitCount; ++i) {
+        const auto& ev = events.hitEvents[i];
+        entt::entity eA = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.shapeIdA)));
+        entt::entity eB = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.shapeIdB)));
+        if (eA == entt::null || eB == entt::null) continue;
 
-// ── 插值快照 ────────────────────────────────────────────────────────────────
-
-void PhysicsSystem::snapshotInterpolatedBodiesForStep() {
-    auto view = world_.view<Transform, RigidBody>();
-    for (auto [e, tf, rb] : view.each()) {
-        auto& interpolation = world_.get_or_emplace<TransformInterpolation>(e);
-        interpolation.previous = tf;
-        interpolation.initialized = true;
-        interpolation.disabled = !rb.interpolate;
+        CollisionInfo info;
+        info.self = eA;
+        info.other = eB;
+        info.normalX = ev.normal.x;
+        info.normalY = ev.normal.y;
+        info.contactX = toPixels(ev.point.x);
+        info.contactY = toPixels(ev.point.y);
+        info.approachSpeed = ev.approachSpeed;
+        info.state = ContactState::Persist;
+        dispatcher_.trigger(info);
     }
 }
 
-// ── ECS 事件钩子 ────────────────────────────────────────────────────────────
+void PhysicsSystem::pollSensorEvents() {
+    b2SensorEvents events = b2World_GetSensorEvents(worldId_);
+
+    for (int i = 0; i < events.beginCount; ++i) {
+        const auto& ev = events.beginEvents[i];
+        entt::entity eSensor = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.sensorShapeId)));
+        entt::entity eVisitor = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.visitorShapeId)));
+        if (eSensor == entt::null || eVisitor == entt::null) continue;
+
+        CollisionInfo info;
+        info.self = eSensor;
+        info.other = eVisitor;
+        info.state = ContactState::Begin;
+        dispatcher_.trigger(info);
+    }
+
+    for (int i = 0; i < events.endCount; ++i) {
+        const auto& ev = events.endEvents[i];
+        if (!b2Shape_IsValid(ev.visitorShapeId)) continue;
+        entt::entity eSensor = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.sensorShapeId)));
+        entt::entity eVisitor = userDataToEntity(b2Body_GetUserData(b2Shape_GetBody(ev.visitorShapeId)));
+        if (eSensor == entt::null || eVisitor == entt::null) continue;
+
+        CollisionInfo info;
+        info.self = eSensor;
+        info.other = eVisitor;
+        info.state = ContactState::End;
+        dispatcher_.trigger(info);
+    }
+}
 
 void PhysicsSystem::onTransformUpdated(entt::registry& reg, entt::entity e) {
-    if (steppingPhysics_) {
-        // 物理 step 期间 Transform 被 patch 了（如碰撞回调中移动 entity）
-        // 立即同步到 PhysicsWorld2D，否则后续 syncResultsToEntities 会用旧位置覆盖
-        auto it = entityToBody_.find(e);
-        if (it != entityToBody_.end() && it->second.bodyId != PhysicsWorld2D::INVALID_BODY) {
-            auto* tf = reg.try_get<Transform>(e);
-            if (tf) physicsWorld_.setBodyTransform(it->second.bodyId, tf->x, tf->y);
-        }
-        return;
-    }
-    if (!reg.all_of<RigidBody, Transform>(e)) return;
+    if (steppingPhysics_) return;
+    auto* rb = reg.try_get<RigidBody>(e);
+    auto* tf = reg.try_get<Transform>(e);
+    if (!rb || !tf) return;
+    if (!B2_IS_NON_NULL(rb->bodyId)) return;
 
-    auto& interpolation = reg.get_or_emplace<TransformInterpolation>(e);
-    interpolation.previous = reg.get<Transform>(e);
-    interpolation.initialized = true;
+    steppingPhysics_ = true;
+    b2Vec2 pos = toMetersVec2(tf->x, tf->y);
+    b2Rot rot = b2MakeRot(toRadians(tf->rotation));
+    b2Body_SetTransform(rb->bodyId, pos, rot);
+    steppingPhysics_ = false;
 }
 
 void PhysicsSystem::onColliderAdded(entt::registry& reg, entt::entity e) {
-    // Body creation deferred to next syncBodiesToWorld()
-    (void)reg; (void)e;
+    if (!reg.all_of<RigidBody>(e)) return;
+    createBox2DShape(e);
 }
 
 void PhysicsSystem::onColliderRemoved(entt::registry& reg, entt::entity e) {
     (void)reg;
-    removeBodyForEntity(e);
+    auto* col = world_.try_get<Collider>(e);
+    if (!col) return;
+    if (B2_IS_NON_NULL(col->shapeId)) {
+        b2DestroyShape(col->shapeId, true);
+        col->shapeId = b2_nullShapeId;
+    }
 }
 
 void PhysicsSystem::onRigidBodyAdded(entt::registry& reg, entt::entity e) {
-    // Body type change deferred to next syncBodiesToWorld()
-    (void)reg; (void)e;
+    if (!reg.all_of<Collider>(e)) return;
+    createBox2DBody(e);
 }
 
 void PhysicsSystem::onRigidBodyRemoved(entt::registry& reg, entt::entity e) {
-    // If entity still has Collider, it becomes Static — deferred to sync
-    (void)reg; (void)e;
-}
-
-// ── Tile 碰撞缓存 ───────────────────────────────────────────────────────────
-
-void PhysicsSystem::rebuildTileCollisionCache(entt::entity mapEntity, const TileMap& tmap) {
-    TileCollisionCache cache;
-    cache.width = tmap.width;
-    cache.height = tmap.height;
-    cache.tileSize = static_cast<float>(tmap.tileSize);
-    cache.valid = true;
-
-    cache.grid.resize(tmap.height);
-    for (int ty = 0; ty < tmap.height; ++ty) {
-        cache.grid[ty].resize(tmap.width);
-        for (int tx = 0; tx < tmap.width; ++tx) {
-            auto& entry = cache.grid[ty][tx];
-
-            TileMap::TileCollision collision;
-            collision.shape = TileMap::TileCollisionShape::None;
-            for (int layer = 0; layer < static_cast<int>(tmap.layers.size()); ++layer) {
-                collision = tmap.collisionAt(layer, tx, ty);
-                if (collision.shape != TileMap::TileCollisionShape::None) break;
-            }
-
-            entry.shape = static_cast<uint8_t>(collision.shape);
-            entry.isTrigger = (collision.shape == TileMap::TileCollisionShape::Trigger);
-
-            if (collision.shape == TileMap::TileCollisionShape::None) {
-                entry.localMinX = entry.localMinY = entry.localMaxX = entry.localMaxY = 0.f;
-                continue;
-            }
-
-            const float ts = cache.tileSize;
-            const float tx_f = static_cast<float>(tx);
-            const float ty_f = static_cast<float>(ty);
-
-            if (collision.shape == TileMap::TileCollisionShape::Rect &&
-                collision.points.size() >= 4) {
-                entry.localMinX = tx_f * ts + collision.points[0];
-                entry.localMinY = ty_f * ts + collision.points[1];
-                entry.localMaxX = entry.localMinX + collision.points[2];
-                entry.localMaxY = entry.localMinY + collision.points[3];
-            }
-            else if ((collision.shape == TileMap::TileCollisionShape::Polygon ||
-                      collision.shape == TileMap::TileCollisionShape::OneWay) &&
-                      collision.points.size() >= 4) {
-                float minX = tx_f * ts + collision.points[0];
-                float maxX = minX;
-                float minY = ty_f * ts + collision.points[1];
-                float maxY = minY;
-                for (size_t pi = 2; pi + 1 < collision.points.size(); pi += 2) {
-                    minX = std::min(minX, tx_f * ts + collision.points[pi]);
-                    maxX = std::max(maxX, tx_f * ts + collision.points[pi]);
-                    minY = std::min(minY, ty_f * ts + collision.points[pi + 1]);
-                    maxY = std::max(maxY, ty_f * ts + collision.points[pi + 1]);
-                }
-                entry.localMinX = minX;
-                entry.localMinY = minY;
-                entry.localMaxX = maxX;
-                entry.localMaxY = maxY;
-            }
-            else {
-                entry.localMinX = tx_f * ts;
-                entry.localMinY = ty_f * ts;
-                entry.localMaxX = entry.localMinX + ts;
-                entry.localMaxY = entry.localMinY + ts;
-            }
-        }
+    auto* rb = reg.try_get<RigidBody>(e);
+    if (!rb) return;
+    if (B2_IS_NON_NULL(rb->bodyId)) {
+        b2DestroyBody(rb->bodyId);
+        rb->bodyId = b2_nullBodyId;
     }
-
-    tileCollisionCaches_[mapEntity] = std::move(cache);
 }
 
 void PhysicsSystem::onTileMapAdded(entt::registry& reg, entt::entity e) {
     if (!reg.all_of<TileMap>(e)) return;
-    rebuildTileCollisionCache(e, reg.get<TileMap>(e));
+    buildTileMapChain(e);
 }
 
 void PhysicsSystem::onTileMapUpdated(entt::registry& reg, entt::entity e) {
     if (!reg.all_of<TileMap>(e)) return;
-    rebuildTileCollisionCache(e, reg.get<TileMap>(e));
+    buildTileMapChain(e);
 }
 
 void PhysicsSystem::onTileMapRemoved(entt::registry& reg, entt::entity e) {
     (void)reg;
-    tileCollisionCaches_.erase(e);
+    destroyTileMapChain(e);
 }
 
-// ── AABB 辅助 ───────────────────────────────────────────────────────────────
+RaycastHit PhysicsSystem::raycast(float startX, float startY,
+                                   float dirX, float dirY,
+                                   float maxDist,
+                                   CollisionLayer layerMask,
+                                   CollisionLayer ignoreLayer,
+                                   entt::entity ignoreEntity) {
+    RaycastHit hit{};
+    hit.hit = false;
 
-PhysicsWorld2D::AABB PhysicsSystem::makeColliderAABB(const Transform& tf, const Collider& col) const {
-    // Simple AABB without sprite — used for pure physics entities
-    auto def = colliderToShapeDef(col);
-    return PhysicsWorld2D::computeAABB(tf.x, tf.y, def);
-}
+    if (!B2_IS_NON_NULL(worldId_) || maxDist <= 0.0f) return hit;
 
-PhysicsWorld2D::AABB PhysicsSystem::makeEntityAABB(entt::entity e) const {
-    const Transform& tf = world_.get<Transform>(e);
-    const Collider& col = world_.get<Collider>(e);
+    float len = std::sqrt(dirX * dirX + dirY * dirY);
+    if (len <= 0.0f) return hit;
 
-    auto def = colliderToShapeDef(col);
+    b2Vec2 origin = toMetersVec2(startX, startY);
+    b2Vec2 translation = toMetersVec2(dirX / len * maxDist, dirY / len * maxDist);
 
-    if (const Sprite* sprite = world_.try_get<Sprite>(e)) {
-        const float spriteW = sprite->srcRect.w * std::abs(tf.scaleX);
-        const float spriteH = sprite->srcRect.h * std::abs(tf.scaleY);
-        return PhysicsWorld2D::computeAABB(
-            tf.x, tf.y, def,
-            &spriteW, &spriteH,
-            tf.scaleX, tf.scaleY,
-            sprite->pivotX, sprite->pivotY);
-    }
+    b2QueryFilter filter;
+    filter.categoryBits = layerMask;
+    filter.maskBits = COLLISION_LAYER_ALL;
 
-    return makeColliderAABB(tf, col);
-}
+    RaycastCtx ctx;
+    ctx.ignoreEntity = ignoreEntity;
+    ctx.ignoreLayer = ignoreLayer;
+    ctx.origDirX = dirX;
+    ctx.origDirY = dirY;
+    ctx.out = &hit;
+    ctx.found = false;
 
-// ── Tile 碰撞解析 ───────────────────────────────────────────────────────────
+    b2World_CastRay(worldId_, origin, translation, filter, raycastFilter, &ctx);
 
-void PhysicsSystem::resolveTileCollisions() {
-    if (tileCollisionCaches_.empty()) return;
-
-    auto actors = world_.view<Transform, Collider, RigidBody>();
-    for (auto [actor, tf, col, rb] : actors.each()) {
-        if (col.isTrigger || rb.isKinematic) continue;
-
-        // 简化的碰撞检测：tileCollider 与 actor 的碰撞
-        // tile 始终是 STATIC 层
-        if ((col.layer & COLLISION_LAYER_STATIC) == 0 &&
-            (COLLISION_LAYER_STATIC & col.mask) == 0) continue;
-
-        PhysicsWorld2D::AABB actorBox = makeEntityAABB(actor);
-
-        for (auto& [mapEntity, cache] : tileCollisionCaches_) {
-            if (!cache.valid) continue;
-            const Transform* mapTf = world_.try_get<Transform>(mapEntity);
-            if (!mapTf) continue;
-
-            const float ts = cache.tileSize;
-            if (ts <= 0.f) continue;
-
-            int minTileX = static_cast<int>(std::floor((actorBox.minX - mapTf->x) / ts));
-            int maxTileX = static_cast<int>(std::floor((actorBox.maxX - mapTf->x) / ts));
-            int minTileY = static_cast<int>(std::floor((actorBox.minY - mapTf->y) / ts));
-            int maxTileY = static_cast<int>(std::floor((actorBox.maxY - mapTf->y) / ts));
-
-            minTileX = std::max(0, minTileX);
-            minTileY = std::max(0, minTileY);
-            maxTileX = std::min(cache.width - 1, maxTileX);
-            maxTileY = std::min(cache.height - 1, maxTileY);
-            if (minTileX > maxTileX || minTileY > maxTileY) continue;
-
-            for (int ty = minTileY; ty <= maxTileY; ++ty) {
-                for (int tx = minTileX; tx <= maxTileX; ++tx) {
-                    const auto& entry = cache.grid[ty][tx];
-                    if (entry.shape == static_cast<uint8_t>(TileMap::TileCollisionShape::None))
-                        continue;
-
-                    PhysicsWorld2D::AABB tileBox{
-                        mapTf->x + entry.localMinX,
-                        mapTf->y + entry.localMinY,
-                        mapTf->x + entry.localMaxX,
-                        mapTf->y + entry.localMaxY
-                    };
-
-                    if (!PhysicsWorld2D::overlaps(actorBox, tileBox)) continue;
-
-                    float sepX = 0.f, sepY = 0.f;
-                    PhysicsWorld2D::minSeparation(actorBox, tileBox, sepX, sepY);
-
-                    dispatcher_.trigger(CollisionInfo{actor, mapEntity, sepX, sepY});
-                    dispatcher_.trigger(CollisionInfo{mapEntity, actor, -sepX, -sepY});
-
-                    if (entry.isTrigger) continue;
-
-                    tf.x += sepX;
-                    tf.y += sepY;
-                    world_.patch<Transform>(actor);
-
-                    if (sepX != 0.f && rb.velocityX * sepX < 0.f) rb.velocityX = 0.f;
-                    if (sepY != 0.f && rb.velocityY * sepY < 0.f) rb.velocityY = 0.f;
-
-                    actorBox.minX += sepX; actorBox.maxX += sepX;
-                    actorBox.minY += sepY; actorBox.maxY += sepY;
-
-                    // 同步回 PhysicsWorld2D 以供下帧 CCD
-                    auto mit = entityToBody_.find(actor);
-                    if (mit != entityToBody_.end()) {
-                        physicsWorld_.setBodyTransform(mit->second.bodyId, tf.x, tf.y);
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── 空间查询 ────────────────────────────────────────────────────────────────
-
-RaycastHit PhysicsSystem::raycast(float startX, float startY, float dirX, float dirY,
-                                   float maxDist, CollisionLayer layerMask,
-                                   CollisionLayer ignoreLayer, entt::entity ignoreEntity) {
-    PhysicsWorld2D::BodyId ignoreBody = PhysicsWorld2D::INVALID_BODY;
-    if (ignoreEntity != entt::null) {
-        auto it = entityToBody_.find(ignoreEntity);
-        if (it != entityToBody_.end()) ignoreBody = it->second.bodyId;
-    }
-
-    auto result = physicsWorld_.raycast(startX, startY, dirX, dirY, maxDist,
-                                         layerMask, ignoreLayer, ignoreBody);
-
-    RaycastHit hit;
-    hit.hit      = result.hit;
-    hit.distance = result.distance;
-    hit.hitX     = result.hitX;
-    hit.hitY     = result.hitY;
-    hit.normalX  = result.normalX;
-    hit.normalY  = result.normalY;
-    if (result.hit && result.bodyId > 0 &&
-        static_cast<size_t>(result.bodyId) < bodyToEntity_.size()) {
-        hit.entity = bodyToEntity_[result.bodyId];
-    } else {
-        hit.entity = entt::null;
-    }
     return hit;
 }
 
 std::vector<OverlapResult> PhysicsSystem::overlapBox(float centerX, float centerY,
                                                       float halfW, float halfH,
                                                       CollisionLayer layerMask) {
-    auto worldResults = physicsWorld_.overlapRect(centerX, centerY, halfW, halfH, layerMask);
-
     std::vector<OverlapResult> results;
-    results.reserve(worldResults.size());
-    for (auto& wr : worldResults) {
+    if (!B2_IS_NON_NULL(worldId_)) return results;
+
+    b2AABB aabb;
+    b2Vec2 c = toMetersVec2(centerX, centerY);
+    b2Vec2 h = toMetersVec2(halfW, halfH);
+    aabb.lowerBound = {c.x - h.x, c.y - h.y};
+    aabb.upperBound = {c.x + h.x, c.y + h.y};
+
+    b2QueryFilter filter;
+    filter.categoryBits = layerMask;
+    filter.maskBits = COLLISION_LAYER_ALL;
+
+    std::vector<entt::entity> entities;
+
+    OverlapCtx ctx;
+    ctx.results = &entities;
+    ctx.ignoreLayer = 0;
+    ctx.ignoreEntity = entt::null;
+
+    b2World_OverlapAABB(worldId_, aabb, filter, overlapFilter, &ctx);
+
+    results.reserve(entities.size());
+    for (auto e : entities) {
         OverlapResult r;
-        if (wr.bodyId > 0 && static_cast<size_t>(wr.bodyId) < bodyToEntity_.size()) {
-            r.entity = bodyToEntity_[wr.bodyId];
-        } else {
-            r.entity = entt::null;
-        }
-        r.overlapX = wr.overlapX;
-        r.overlapY = wr.overlapY;
+        r.entity = e;
         results.push_back(r);
     }
+
     return results;
 }
 
 std::vector<entt::entity> PhysicsSystem::overlapCircle(float centerX, float centerY,
                                                         float radius,
                                                         CollisionLayer layerMask) {
-    auto worldResults = physicsWorld_.overlapCircle(centerX, centerY, radius, layerMask);
-
+    auto boxResults = overlapBox(centerX, centerY, radius, radius, layerMask);
     std::vector<entt::entity> results;
-    results.reserve(worldResults.size());
-    for (auto id : worldResults) {
-        if (id > 0 && static_cast<size_t>(id) < bodyToEntity_.size()) {
-            results.push_back(bodyToEntity_[id]);
-        }
+    results.reserve(boxResults.size());
+    for (auto& r : boxResults) {
+        results.push_back(r.entity);
     }
     return results;
 }
