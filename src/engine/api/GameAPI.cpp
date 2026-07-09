@@ -170,31 +170,6 @@ std::vector<entt::entity> GameAPI::overlapCircle(float centerX, float centerY, f
 
 // ── Physics params ────────────────────────────────────────────────────────────
 
-void GameAPI::setBodyMass(entt::entity e, float mass) {
-    auto* rb = ctx_.world.try_get<RigidBody>(e);
-    if (rb) rb->mass = mass;
-}
-
-void GameAPI::setBodyBounciness(entt::entity e, float b) {
-    auto* rb = ctx_.world.try_get<RigidBody>(e);
-    if (rb) rb->bounciness = b;
-}
-
-void GameAPI::setBodyFriction(entt::entity e, float f) {
-    auto* rb = ctx_.world.try_get<RigidBody>(e);
-    if (rb) rb->friction = f;
-}
-
-void GameAPI::setBodyContactMargin(entt::entity e, float margin) {
-    auto* rb = ctx_.world.try_get<RigidBody>(e);
-    if (rb) rb->contactMargin = margin;
-}
-
-void GameAPI::setBodyCCD(entt::entity e, bool enable) {
-    auto* rb = ctx_.world.try_get<RigidBody>(e);
-    if (rb) rb->ccdEnabled = enable;
-}
-
 void GameAPI::setBodyGravityScale(entt::entity e, float scale) {
     auto* rb = ctx_.world.try_get<RigidBody>(e);
     if (rb) rb->gravityScale = scale;
@@ -216,8 +191,6 @@ void GameAPI::setCircleCollider(entt::entity e, float radius, float ox, float oy
     if (col) {
         col->shapeType = ShapeType::Circle;
         col->radius = radius;
-        col->width = radius * 2.f;
-        col->height = radius * 2.f;
         col->offsetX = ox; col->offsetY = oy;
     }
 }
@@ -228,7 +201,6 @@ void GameAPI::setCapsuleCollider(entt::entity e, float radius, float length,
     if (col) {
         col->shapeType = ShapeType::Capsule;
         col->radius = radius;
-        col->capsuleLength = length;
         col->width = radius * 2.f;
         col->height = radius * 2.f + length;
         col->offsetX = ox; col->offsetY = oy;

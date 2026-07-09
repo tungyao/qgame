@@ -136,11 +136,6 @@ public:
 
     // ── 物理参数设置 ─────────────────────────────────────────────────────
 
-    void setBodyMass(entt::entity e, float mass);
-    void setBodyBounciness(entt::entity e, float b);
-    void setBodyFriction(entt::entity e, float f);
-    void setBodyContactMargin(entt::entity e, float margin);
-    void setBodyCCD(entt::entity e, bool enable);
     void setBodyGravityScale(entt::entity e, float scale);
 
     // ── 碰撞形状辅助 ─────────────────────────────────────────────────────
