@@ -80,7 +80,7 @@ struct RaycastHit {
     float hitX, hitY;
     float normalX, normalY;
     float distance;
-    bool  hit;
+    bool  hit = false;
 };
 
 struct OverlapResult {
