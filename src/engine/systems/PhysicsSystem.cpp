@@ -290,6 +290,7 @@ void PhysicsSystem::buildTileMapChain(entt::entity e) {
     chainDef.filter.categoryBits = tmc.layer;
     chainDef.filter.maskBits = tmc.mask;
 
+    tmc.chainBodyId = bodyId;
     tmc.chainId = b2CreateChain(bodyId, &chainDef);
 }
 
@@ -297,7 +298,10 @@ void PhysicsSystem::destroyTileMapChain(entt::entity e) {
     auto* tmc = world_.try_get<TileMapCollider>(e);
     if (!tmc) return;
     if (B2_IS_NON_NULL(tmc->chainId)) {
-        b2DestroyChain(tmc->chainId);
+        if (B2_IS_NON_NULL(tmc->chainBodyId)) {
+            b2DestroyBody(tmc->chainBodyId);
+            tmc->chainBodyId = b2_nullBodyId;
+        }
         tmc->chainId = b2_nullChainId;
     }
 }
@@ -318,12 +322,6 @@ void PhysicsSystem::pollBodyEvents() {
         tf->rotation = toDegrees(b2Rot_GetAngle(ev.transform.q));
         world_.patch<Transform>(e);
         steppingPhysics_ = false;
-
-        auto* rb = world_.try_get<RigidBody>(e);
-        if (rb) {
-            b2Vec2 v = b2Body_GetLinearVelocity(rb->bodyId);
-            (void)v;
-        }
     }
 }
 

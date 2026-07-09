@@ -57,6 +57,7 @@ struct Collider {
 
 struct TileMapCollider {
     b2ChainId     chainId = b2_nullChainId;
+    b2BodyId      chainBodyId = b2_nullBodyId;
     float         friction = 0.3f;
     CollisionLayer layer = COLLISION_LAYER_STATIC;
     CollisionLayer mask  = COLLISION_LAYER_ALL;
