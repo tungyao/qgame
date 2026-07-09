@@ -2,8 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(physics_smoke)
 
 add_executable(physics_smoke main.cpp)
-target_link_libraries(physics_smoke PRIVATE engine box2d::box2d SDL3::SDL3)
-target_include_directories(physics_smoke PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(physics_smoke PRIVATE box2d::box2d)
 add_test(NAME physics_smoke COMMAND physics_smoke)
 
 if(WIN32)
