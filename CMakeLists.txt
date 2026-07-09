@@ -79,6 +79,19 @@ set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 set(JSON_Install    OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# Box2D v3.1.1 — 2D physics engine
+FetchContent_Declare(box2d
+    GIT_REPOSITORY https://github.com/erincatto/box2d.git
+    GIT_TAG        v3.1.1
+    GIT_SHALLOW    TRUE
+)
+set(BOX2D_SAMPLES       OFF CACHE BOOL "" FORCE)
+set(BOX2D_UNIT_TESTS    OFF CACHE BOOL "" FORCE)
+set(BOX2D_BENCHMARKS    OFF CACHE BOOL "" FORCE)
+set(BOX2D_DOCS          OFF CACHE BOOL "" FORCE)
+set(BOX2D_PROFILE       OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(box2d)
+
 # ── 引擎模块（按依赖顺序）────────────────────────────────────────────────────
 add_subdirectory(src/core)
 add_subdirectory(src/platform)
@@ -125,6 +138,7 @@ if(BUILD_TESTS)
     add_subdirectory(tests/asset_manifest_demo)
     add_subdirectory(tests/asset_pack_smoke)
     add_subdirectory(tests/framework_smoke)
+    add_subdirectory(tests/physics_smoke)
 endif()
 
 #if(BUILD_EDITOR)

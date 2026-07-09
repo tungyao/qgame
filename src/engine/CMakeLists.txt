@@ -67,6 +67,7 @@ target_link_libraries(engine
     PRIVATE SDL3::SDL3
     PRIVATE stb_image
     PUBLIC  nlohmann_json::nlohmann_json
+    PRIVATE box2d::box2d
 )
 
 if(CMAKE_DL_LIBS)
